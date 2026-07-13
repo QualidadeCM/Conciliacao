@@ -2575,7 +2575,14 @@
       r.divergenciasZero = (text.match(/\b0\s*\/\s*0\b/g) || []).length;
       r.lotesSeries = [...new Set((text.match(/\b\d{15}\b/g) || []))];
       r.seriesComPrefixo = [...new Set((text.match(/\b[A-Z][A-Z0-9]{1,7}-\d{4,6}-\d+\b/g) || []))];
-      r.naoConformes = (text.match(/N[ãa]o\s+Conforme/gi) || []).length;
+      // "Não Conforme" na RC do Sapiens é uma COLUNA (quantidade não conforme), cujo
+      // CABEÇALHO se repete em cada página ("... Utilizada Não Conforme"). Antes,
+      // contávamos o texto do cabeçalho como se fossem componentes NC — falso positivo
+      // (ex.: RC de 4 páginas acusava "4 não conformes" sem nenhum de verdade).
+      // Correção: remove o cabeçalho antes de contar. Componente NC de verdade apareceria
+      // como QUANTIDADE > 0 nessa coluna (numérica), não como o texto "Não Conforme".
+      const _semCabecalhoRC = String(text || '').replace(/Utilizada\s+N[ãa]o\s+Conform\w*(\s+e\b)?/gi, ' ');
+      r.naoConformes = (_semCabecalhoRC.match(/N[ãa]o\s+Conforme/gi) || []).length;
       return r;
     }
 
