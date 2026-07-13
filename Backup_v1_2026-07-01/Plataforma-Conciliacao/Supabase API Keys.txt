@@ -1,0 +1,2 @@
+Project URL: https://riqzwwbprdnjxodicxce.supabase.co/rest/v1/
+Anon public key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJpcXp3d2JwcmRuanhvZGljeGNlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MjQxMjgsImV4cCI6MjA5NDAwMDEyOH0.ioPneGvVOtJuNCtqBrCJiqC3EI3pydZuyYa5cug85Ok

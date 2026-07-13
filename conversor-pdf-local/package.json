@@ -1,0 +1,16 @@
+{
+  "name": "conversor-pdf-local",
+  "version": "1.0.0",
+  "description": "Servico local de conversao para PDF (LibreOffice + Ghostscript + Chromium) — substitui o CloudConvert na Plataforma de Conciliacao da Producao (Confiance Medical).",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "libreoffice-convert": "^1.6.0",
+    "puppeteer": "^22.0.0"
+  }
+}

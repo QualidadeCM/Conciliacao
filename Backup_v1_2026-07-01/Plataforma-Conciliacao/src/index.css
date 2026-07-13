@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Design System Confiance Medical
+  - Cor primária: Navy hsl(222 45% 22%)
+  - Cor accent: Cyan hsl(188 52% 61%)
+  - Cor secondary: Turquoise hsl(189 72% 42%)
+  - Tipografia: Montserrat (títulos) + Raleway (corpo)
+  - Border radius: 0.75rem
+*/
+
+@layer base {
+  :root {
+    /* Base */
+    --background: 210 30% 98%;
+    --foreground: 222 45% 14%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 45% 14%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 45% 14%;
+
+    /* Confiance brand */
+    --primary: 222 45% 22%;            /* Navy */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 189 72% 42%;          /* Turquoise */
+    --secondary-foreground: 0 0% 100%;
+
+    --accent: 188 52% 61%;             /* Cyan */
+    --accent-foreground: 222 45% 14%;
+
+    --muted: 210 20% 94%;
+    --muted-foreground: 222 20% 40%;
+
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 25% 88%;
+    --input: 214 25% 88%;
+    --ring: 188 52% 61%;
+
+    /* Status badges */
+    --status-conforme: 142 65% 42%;
+    --status-conforme-foreground: 0 0% 100%;
+    --status-ressalva: 38 92% 50%;
+    --status-ressalva-foreground: 0 0% 100%;
+    --status-nao-conforme: 0 72% 50%;
+    --status-nao-conforme-foreground: 0 0% 100%;
+
+    /* Sidebar */
+    --sidebar-background: 222 45% 22%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-accent: 222 45% 28%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 222 45% 28%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222 45% 8%;
+    --foreground: 210 25% 96%;
+
+    --card: 222 45% 12%;
+    --card-foreground: 210 25% 96%;
+
+    --popover: 222 45% 12%;
+    --popover-foreground: 210 25% 96%;
+
+    --primary: 188 52% 61%;            /* Cyan no dark mode */
+    --primary-foreground: 222 45% 14%;
+
+    --secondary: 189 72% 42%;
+    --secondary-foreground: 0 0% 100%;
+
+    --accent: 188 52% 61%;
+    --accent-foreground: 222 45% 14%;
+
+    --muted: 222 30% 18%;
+    --muted-foreground: 210 15% 65%;
+
+    --destructive: 0 65% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 30% 22%;
+    --input: 222 30% 22%;
+    --ring: 188 52% 61%;
+
+    --status-conforme: 142 55% 45%;
+    --status-conforme-foreground: 0 0% 100%;
+    --status-ressalva: 38 85% 55%;
+    --status-ressalva-foreground: 222 45% 14%;
+    --status-nao-conforme: 0 65% 55%;
+    --status-nao-conforme-foreground: 0 0% 100%;
+
+    --sidebar-background: 222 45% 10%;
+    --sidebar-foreground: 210 25% 96%;
+    --sidebar-accent: 222 45% 16%;
+    --sidebar-accent-foreground: 210 25% 96%;
+    --sidebar-border: 222 30% 18%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-raleway antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-montserrat font-semibold tracking-tight;
+  }
+
+  /* Scrollbar customizada */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/40;
+  }
+}
+
+@layer components {
+  /* Badge de status reutilizável */
+  .status-badge {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+  .status-badge-conforme {
+    background-color: hsl(var(--status-conforme));
+    color: hsl(var(--status-conforme-foreground));
+  }
+  .status-badge-ressalva {
+    background-color: hsl(var(--status-ressalva));
+    color: hsl(var(--status-ressalva-foreground));
+  }
+  .status-badge-nao-conforme {
+    background-color: hsl(var(--status-nao-conforme));
+    color: hsl(var(--status-nao-conforme-foreground));
+  }
+}
