@@ -5719,6 +5719,11 @@
       const [itens, setItens] = useState([]);            // worklist do BANCO: [{ op, added_at }]
       const [analisesMap, setAnalisesMap] = useState(new Map()); // op(norm) -> análise mais recente
       const [fileName, setFileName] = useState('');
+      // Status do PCP (dupla checagem): Set de OPs com "ok" na planilha do PCP.
+      const [pcpCfg, setPcpCfg] = useState(null);        // { sheetId, aba, colOP, colOK } ou null se não configurado
+      const [pcpOk, setPcpOk] = useState(new Set());     // OPs (norm) liberadas pelo PCP
+      const [pcpAtualizando, setPcpAtualizando] = useState(false);
+      const [pcpErro, setPcpErro] = useState('');
       const normOp = (v) => String(v || '').replace(/\D/g, '');
 
       // Carrega a worklist do BANCO (persiste a F5) + status das análises. Remove da fila
@@ -5743,6 +5748,38 @@
       useEffect(() => { carregar(); }, [carregar]);
       useRealtime('analises', () => carregar());
       useRealtime('worklist_ops', () => carregar());
+
+      // Busca no serviço o status do PCP (OPs com "ok" na planilha).
+      const atualizarPcp = useCallback(async (cfg) => {
+        const c = cfg || pcpCfg;
+        if (!c || !c.csvUrl) { toast.error('Planilha do PCP não configurada (Configurações).'); return; }
+        if (!CONVERSAO_PDF_LOCAL) { toast.error('Serviço não configurado.'); return; }
+        setPcpAtualizando(true); setPcpErro('');
+        try {
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const resp = await fetch(base + '/pcp-status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(j.error || ('HTTP ' + resp.status));
+          setPcpOk(new Set((j.oks || []).map(normOp)));
+          if (!cfg) toast.success(`Status do PCP atualizado — ${(j.oks || []).length} OP(s) liberada(s).`);
+        } catch (e) { setPcpErro(e?.message || String(e)); if (!cfg) toast.error('Falha ao ler o PCP: ' + (e?.message || e)); }
+        finally { setPcpAtualizando(false); }
+      }, [pcpCfg]);
+
+      // Ao montar: carrega a config do PCP e já atualiza o status (se configurado).
+      useEffect(() => {
+        (async () => {
+          try {
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pcp_csv_url', 'pcp_col_op', 'pcp_col_ok']);
+            const map = Object.fromEntries((data || []).map((r) => [r.chave, r.valor]));
+            if (map.pcp_csv_url) {
+              const cfg = { csvUrl: map.pcp_csv_url, colOP: map.pcp_col_op || 'OP', colOK: map.pcp_col_ok || 'OK?' };
+              setPcpCfg(cfg);
+              atualizarPcp(cfg);
+            }
+          } catch (e) { /* PCP opcional */ }
+        })();
+      }, []);
 
       const parseXlsxSapiens = async (file) => {
         const buf = await file.arrayBuffer();
@@ -5844,25 +5881,42 @@
                     Mostrar só pendentes
                   </label>
                   <Input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar OP…" className="max-w-[160px]" />
+                  {pcpCfg && (
+                    <Button variant="outline" size="sm" onClick={() => atualizarPcp()} disabled={pcpAtualizando} title="Consultar na planilha do PCP quais OPs já foram conferidas (têm 'ok')">
+                      {pcpAtualizando ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Atualizando…</>) : (<><Icon name="database" className="h-3.5 w-3.5" />Atualizar status PCP</>)}
+                    </Button>
+                  )}
                   <span className="text-xs text-muted-foreground">{fileName}</span>
                   <Button variant="ghost" size="sm" onClick={limparLista} title="Limpar toda a lista importada"><Icon name="trash" className="h-3.5 w-3.5" />Limpar lista</Button>
                   <span className="text-xs text-muted-foreground ml-auto">{filtradas.length} de {linhas.length} OP(s)</span>
                 </div>
+                {pcpCfg && pcpErro && <div className="text-xs mt-2" style={{ color: 'hsl(var(--status-nao-conforme))' }}>Não foi possível ler o PCP: {pcpErro}. A análise segue liberada até restabelecer.</div>}
               </CardHeader>
               <CardContent>
                 <div className="rounded-md border divide-y max-h-[62vh] overflow-y-auto">
                   {filtradas.map(({ op, a }) => {
                     const b = badgeDe(a);
+                    // PCP: só bloqueia quando a planilha está configurada E foi possível
+                    // lê-la (sem erro). Sem OK do PCP → aguardando; com erro de leitura →
+                    // libera (fail-open) para não travar a GQ por indisponibilidade.
+                    const pcpAtivo = !!pcpCfg && !pcpErro;
+                    const pcpLiberado = pcpOk.has(normOp(op));
+                    const bloqueadoPeloPcp = pcpAtivo && !pcpLiberado;
                     return (
                       <div key={op} className="flex items-center justify-between gap-3 p-3">
-                        <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex items-center gap-3 min-w-0 flex-wrap">
                           <span className="font-mono font-semibold">OP {op}</span>
                           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: `hsl(var(${b.v}) / 0.15)`, color: `hsl(var(${b.v}))` }}>{b.txt}</span>
+                          {pcpCfg && (
+                            pcpLiberado
+                              ? <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-conforme) / 0.15)', color: 'hsl(var(--status-conforme))' }}>✓ Análise PCP concluída</span>
+                              : <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>⏳ Aguardando PCP</span>
+                          )}
                           {a?.numero_serie && <span className="text-xs text-muted-foreground">{a.numero_serie}</span>}
                           {a?.created_at && <span className="text-xs text-muted-foreground">· analisada em {new Date(a.created_at).toLocaleDateString('pt-BR')}</span>}
                         </div>
                         <div className="flex items-center gap-1">
-                          <Button size="sm" variant={a ? 'outline' : 'default'} onClick={() => onSelecionar(op)}>
+                          <Button size="sm" variant={a ? 'outline' : 'default'} disabled={bloqueadoPeloPcp} onClick={() => onSelecionar(op)} title={bloqueadoPeloPcp ? 'Aguardando a dupla checagem do PCP (sem "ok" na planilha)' : ''}>
                             <Icon name="search" className="h-3.5 w-3.5" />{a ? 'Reanalisar' : 'Analisar'}
                           </Button>
                           <Button size="sm" variant="ghost" onClick={() => removerOp(op)} title="Remover da lista"><Icon name="x" className="h-3.5 w-3.5" /></Button>
@@ -12457,6 +12511,11 @@ ${parecer.parecer_tecnico ? `
       const podeGerenciarUsuarios = isAdmin || can('config_usuarios');
       const [pastaDestino, setPastaDestino] = useState(() => localStorage.getItem('confiance_pasta_destino') || '');
       const [porMes, setPorMes] = useState(() => localStorage.getItem('confiance_pasta_por_mes') === 'true');
+      // Planilha do PCP (Google Sheets publicado como CSV) — dupla checagem antes da GQ
+      const [pcpCsvUrl, setPcpCsvUrl] = useState('');
+      const [pcpColOP, setPcpColOP] = useState('OP');
+      const [pcpColOK, setPcpColOK] = useState('OK?');
+      const [testandoPcp, setTestandoPcp] = useState(false);
       const [salvando, setSalvando] = useState(false);
       const [testando, setTestando] = useState(false);
       const MESES_PT = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
@@ -12466,11 +12525,14 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'pcp_csv_url', 'pcp_col_op', 'pcp_col_ok']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
               if (map.pasta_por_mes != null) { const b = map.pasta_por_mes === 'true'; setPorMes(b); localStorage.setItem('confiance_pasta_por_mes', b ? 'true' : 'false'); }
+              if (map.pcp_csv_url != null) setPcpCsvUrl(map.pcp_csv_url);
+              if (map.pcp_col_op != null && map.pcp_col_op) setPcpColOP(map.pcp_col_op);
+              if (map.pcp_col_ok != null && map.pcp_col_ok) setPcpColOK(map.pcp_col_ok);
             }
           } catch (e) { /* segue com o cache local */ }
         })();
@@ -12485,12 +12547,16 @@ ${parecer.parecer_tecnico ? `
           localStorage.setItem('confiance_pasta_por_mes', porMes ? 'true' : 'false');
           // Config COMPARTILHADA no banco — todos os usuários passam a usar essa pasta
           const autor = perfil?.nome_completo || perfil?.email || null;
+          const agora = new Date().toISOString();
           const { error } = await supabase.from('config_app').upsert([
-            { chave: 'pasta_destino', valor, updated_at: new Date().toISOString(), updated_by: autor },
-            { chave: 'pasta_por_mes', valor: porMes ? 'true' : 'false', updated_at: new Date().toISOString(), updated_by: autor },
+            { chave: 'pasta_destino', valor, updated_at: agora, updated_by: autor },
+            { chave: 'pasta_por_mes', valor: porMes ? 'true' : 'false', updated_at: agora, updated_by: autor },
+            { chave: 'pcp_csv_url', valor: (pcpCsvUrl || '').trim(), updated_at: agora, updated_by: autor },
+            { chave: 'pcp_col_op', valor: (pcpColOP || 'OP').trim(), updated_at: agora, updated_by: autor },
+            { chave: 'pcp_col_ok', valor: (pcpColOK || 'OK?').trim(), updated_at: agora, updated_by: autor },
           ], { onConflict: 'chave' });
           if (error) throw error;
-          registrarLog(perfil, 'editar_config', 'config', 'pasta_destino', `${autor || 'Usuário'} alterou a pasta de destino do pacote para "${valor || '(vazio)'}"${porMes ? ' (+ subpasta do mês)' : ''}`);
+          registrarLog(perfil, 'editar_config', 'config', 'pasta_destino', `${autor || 'Usuário'} alterou as configurações (pasta de destino${pcpCsvUrl ? ' + planilha do PCP' : ''})`);
           toast.success('Configuração salva para todos os usuários. O próximo pacote será gravado nessa pasta pelo serviço.');
         } catch (e) {
           toast.error('Erro ao salvar a configuração: ' + (e?.message || e));
@@ -12508,6 +12574,24 @@ ${parecer.parecer_tecnico ? `
         } catch (e) {
           toast.error('Não foi possível falar com o serviço em ' + CONVERSAO_PDF_LOCAL + '. Verifique se está no ar.');
         } finally { setTestando(false); }
+      };
+
+      const testarPcp = async () => {
+        if (!CONVERSAO_PDF_LOCAL) { toast.error('Serviço não configurado.'); return; }
+        if (!pcpCsvUrl.trim()) { toast.error('Informe a URL do CSV publicado da planilha do PCP.'); return; }
+        setTestandoPcp(true);
+        try {
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const resp = await fetch(base + '/pcp-status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csvUrl: pcpCsvUrl.trim(), colOP: pcpColOP.trim(), colOK: pcpColOK.trim() }),
+          });
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(j.error || ('HTTP ' + resp.status));
+          toast.success(`Conexão OK — ${j.total} OP(s) com "ok" na planilha do PCP.`, { duration: 8000 });
+        } catch (e) {
+          toast.error('Falha ao ler a planilha do PCP: ' + (e?.message || e), { duration: 12000 });
+        } finally { setTestandoPcp(false); }
       };
 
       return (
@@ -12538,6 +12622,33 @@ ${parecer.parecer_tecnico ? `
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">Serviço de conversão/salvamento: <code>{CONVERSAO_PDF_LOCAL || '(não configurado)'}</code></p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Icon name="database" className="h-5 w-5 text-accent" />Planilha do PCP (dupla checagem)</CardTitle>
+                <CardDescription>Planilha do Google Sheets onde o PCP marca "ok" nas OPs conferidas. A análise da GQ só é liberada quando o PCP der o OK.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <Label>URL do CSV publicado</Label>
+                  <Input value={pcpCsvUrl} onChange={(e) => setPcpCsvUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv" />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    No Google Sheets: <strong>Arquivo → Compartilhar → Publicar na web</strong> → escolha a aba certa e o formato <strong>CSV</strong> → Publicar. Cole aqui a URL gerada (termina em <code>output=csv</code>).
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div><Label>Coluna da OP</Label><Input value={pcpColOP} onChange={(e) => setPcpColOP(e.target.value)} placeholder="OP" /></div>
+                  <div><Label>Coluna do OK</Label><Input value={pcpColOK} onChange={(e) => setPcpColOK(e.target.value)} placeholder="OK?" /></div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button onClick={salvar} disabled={salvando || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar</Button>
+                  <Button variant="outline" onClick={testarPcp} disabled={testandoPcp}>
+                    {testandoPcp ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Testando…</>) : (<><Icon name="search" className="h-4 w-4" />Testar planilha</>)}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">A leitura é feita pelo serviço (baixa o CSV publicado). Considera "ok" quando a célula for: ok, sim, s, x ou ✓. Obs.: um CSV publicado fica acessível por quem tiver a URL.</p>
               </CardContent>
             </Card>
 

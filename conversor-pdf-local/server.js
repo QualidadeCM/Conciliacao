@@ -24,6 +24,26 @@ const libre = require('libreoffice-convert');
 const AdmZip = require('adm-zip');
 const { createClient } = require('@supabase/supabase-js');
 
+// Parser CSV simples (lida com aspas e vírgulas dentro de campo). Retorna array de linhas,
+// cada linha um array de células.
+function parseCSV(txt) {
+  const linhas = [];
+  let campo = '', linha = [], emAspas = false;
+  const s = String(txt || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (emAspas) {
+      if (c === '"') { if (s[i + 1] === '"') { campo += '"'; i++; } else emAspas = false; }
+      else campo += c;
+    } else if (c === '"') emAspas = true;
+    else if (c === ',') { linha.push(campo); campo = ''; }
+    else if (c === '\n') { linha.push(campo); linhas.push(linha); linha = []; campo = ''; }
+    else campo += c;
+  }
+  if (campo.length || linha.length) { linha.push(campo); linhas.push(linha); }
+  return linhas;
+}
+
 // Supabase Admin (service_role) — SÓ no servidor. Usado para convidar usuários.
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -61,7 +81,7 @@ app.get(['/', '/plataforma.html'], (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, servico: 'conversor-pdf-local', versao: '1.3.0' });
+  res.json({ ok: true, servico: 'conversor-pdf-local', versao: '1.4.0' });
 });
 
 // ---- Conversao para PDF ---------------------------------------------------
@@ -189,6 +209,49 @@ app.post('/notificar-slack', async (req, res) => {
   }
 });
 
+// ---- Status do PCP (CSV publicado do Google Sheets) -----------------------
+//   Body JSON: { csvUrl, colOP, colOK }
+//   Baixa o CSV publicado da planilha do PCP (dupla checagem) e devolve as OPs
+//   que estao com "ok" na coluna indicada. Feito no servidor (sem CORS).
+app.post('/pcp-status', async (req, res) => {
+  let body;
+  try { body = JSON.parse(Buffer.from(req.body).toString('utf8')); } catch (e) { return res.status(400).json({ error: 'JSON invalido.' }); }
+  const { csvUrl, colOP, colOK } = body || {};
+  if (!csvUrl || !/^https?:\/\//i.test(String(csvUrl))) return res.status(400).json({ error: 'csvUrl ausente/invalida (URL do CSV publicado da planilha do PCP).' });
+  const nomeColOP = String(colOP || 'OP').trim().toLowerCase();
+  const nomeColOK = String(colOK || 'OK?').trim().toLowerCase();
+  const OKS = new Set(['ok', 'sim', 's', 'x', '✓', 'true', 'v']);
+  const norm = (v) => String(v == null ? '' : v).trim();
+  const normHeader = (v) => norm(v).toLowerCase().replace(/\s+/g, ' ');
+  try {
+    const r = await fetch(String(csvUrl), { redirect: 'follow' });
+    if (!r.ok) return res.status(502).json({ error: 'Não foi possível baixar o CSV (HTTP ' + r.status + '). Confirme que a planilha está publicada como CSV.' });
+    const rows = parseCSV(await r.text());
+    if (!rows.length) return res.json({ ok: true, oks: [], total: 0, aviso: 'CSV vazio.' });
+    // acha a linha de cabecalho (a que contem as duas colunas)
+    let headerIdx = -1, idxOP = -1, idxOK = -1;
+    for (let i = 0; i < Math.min(rows.length, 15); i++) {
+      const h = rows[i].map(normHeader);
+      const cOP = h.findIndex((c) => c === nomeColOP || c.includes(nomeColOP));
+      const cOK = h.findIndex((c) => c === nomeColOK || c.includes(nomeColOK));
+      if (cOP >= 0 && cOK >= 0) { headerIdx = i; idxOP = cOP; idxOK = cOK; break; }
+    }
+    if (headerIdx < 0) return res.status(422).json({ error: `Não achei as colunas "${colOP}" e "${colOK}" no cabeçalho do CSV.` });
+    const oks = [];
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const op = norm(row[idxOP]).replace(/\D/g, '');
+      const okVal = norm(row[idxOK]).toLowerCase();
+      if (op && OKS.has(okVal)) oks.push(op);
+    }
+    console.log(`[PCP] ${oks.length} OP(s) com OK (CSV do PCP)`);
+    return res.json({ ok: true, oks: [...new Set(oks)], total: oks.length, atualizadoEm: new Date().toISOString() });
+  } catch (err) {
+    console.error('[ERRO pcp-status]', err.message);
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // ---- Ghostscript: regenera o PDF SEM restricoes (assinavel no Adobe) ------
 async function otimizarPdf(inputBytes) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cpdf-'));
@@ -232,6 +295,5 @@ async function htmlParaPdf(html) {
 
 app.listen(PORT, () => {
   console.log(`Conversor PDF local ouvindo em http://0.0.0.0:${PORT}`);
-  console.log(`  Ghostscript: ${GHOSTSCRIPT_BIN}`);
-  console.log(`  Endpoints: POST /converter-pdf | POST /salvar-pacote | GET /health`);
+  console.log(`  Endpoints: POST /converter-pdf | POST /salvar-pacote | POST /convidar-usuario | POST /notificar-slack | POST /pcp-status`);
 });
