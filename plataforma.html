@@ -10336,13 +10336,18 @@ ${parecer.parecer_tecnico ? `
           if (filtroPeriodo === 'mes' && d.getMonth() + 1 !== filtroMes) return false;
           return true;
         };
-        const idsCorrigidas = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
-        return analises.filter((a) =>
-          !idsCorrigidas.has(a.id) &&
-          a.origem_analise !== 'manual' &&
-          !a.pacote_zip_path &&
-          dentroPeriodo(a)
-        ).length;
+        // MESMA deduplicação da lista: exclui substituídas e mantém a mais recente por
+        // (OP|série). Assim o contador do "Só pendentes" bate com o que a lista mostra.
+        const dentroFiltro = analises.filter(dentroPeriodo);
+        const idsCorrigidas = new Set(dentroFiltro.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
+        const porLote = new Map();
+        for (const a of dentroFiltro) {
+          if (idsCorrigidas.has(a.id)) continue;
+          const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+          const atual = porLote.get(chave);
+          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(chave, a);
+        }
+        return [...porLote.values()].filter((a) => a.origem_analise !== 'manual' && !a.pacote_zip_path).length;
       }, [analises, filtroPeriodo, filtroAno, filtroMes]);
 
       const handleDelete = async (id, op, serie) => {
