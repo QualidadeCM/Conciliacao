@@ -6923,6 +6923,16 @@
       }[cat] || 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes.';
       return reincidente ? `Erro reincidente — priorizar o tratamento da causa raiz para evitar repetição. ${base}` : base;
     }
+    // Separa a recomendação do agente entre AÇÃO IMEDIATA (fix direto) e frases de
+    // CAUSA/sistêmicas (que pertencem à ação corretiva). Ex.: "Possível troca acidental…",
+    // "verificar se afeta outros lotes…", "avaliar…", "revisar o processo/modelo…".
+    const _CAUSA_RE_SLACK = /(poss[íi]vel|prov[áa]vel|causa|verificar se|avaliar|impact|outros?\s+(?:lotes?|produtos?)|revisar o (?:processo|modelo|template)|recorr|reincid)/i;
+    function separarRecomendacao(rec) {
+      const frases = String(rec || '').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+      const imediata = [], causa = [];
+      for (const f of frases) (_CAUSA_RE_SLACK.test(f) ? causa : imediata).push(f);
+      return { imediata: imediata.join(' '), causa: causa.join(' ') };
+    }
 
     function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId }) {
       const toast = useToast();
@@ -7996,6 +8006,8 @@ ${parecer.parecer_tecnico ? `
             const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
             const reincidente = outras.has(cat);
             const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
+            const rec = String(ap.recomendacao || '').replace(/\s+/g, ' ').trim();
+            const sep = separarRecomendacao(rec);
             return {
               codigo: ap.codigo || 'NC',
               doc,
@@ -8003,8 +8015,8 @@ ${parecer.parecer_tecnico ? `
               erro: desc,
               correto: extrairCorreto(desc),
               norma: ap.referencia_normativa || '',
-              correcao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim() || 'Corrigir o documento conforme a ficha mestre.',
-              corretiva: sugerirAcaoCorretiva(cat, reincidente),
+              correcao: sep.imediata || 'Corrigir o documento conforme o registro correto.',
+              corretiva: [sep.causa, sugerirAcaoCorretiva(cat, reincidente)].filter(Boolean).join(' '),
               reincidente,
             };
           });
