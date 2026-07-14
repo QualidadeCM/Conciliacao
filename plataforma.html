@@ -6917,11 +6917,11 @@
         'Nº de série': 'Revisar a geração/gravação do número de série no processo (Sapiens) e conferir os demais lotes da OP.',
         'Data/Validade': 'Revisar o registro de datas/validade no processo e conferir os demais lotes.',
         'Acessório': 'Revisar a BOM/ficha mestre do produto e conferir se outros lotes têm o mesmo desvio de acessório.',
-        'Componente/RC': 'Investigar com a produção, abrir RNC do componente e verificar lotes correlatos.',
+        'Componente/RC': 'Investigar com a produção e verificar lotes correlatos.',
         'Inspeção/Medição': 'Revisar o plano de inspeção/medição e verificar reincidência em outros lotes.',
-        'Outros': 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes; registrar a tratativa.',
-      }[cat] || 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes; registrar a tratativa.';
-      return reincidente ? `ERRO REINCIDENTE — abrir RNC/CAPA e tratar a causa raiz. ${base}` : base;
+        'Outros': 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes.',
+      }[cat] || 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes.';
+      return reincidente ? `Erro reincidente — priorizar o tratamento da causa raiz para evitar repetição. ${base}` : base;
     }
 
     function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId }) {
@@ -7898,10 +7898,14 @@ ${parecer.parecer_tecnico ? `
 
         // 7) Em paralelo: faz upload do ZIP pro Storage e salva o caminho na
         //    análise — permite re-download do Histórico sem regenerar (decisão 18/06/2026)
-        if (analiseId) {
+        // Usa o id da análise ATUAL do parecer (após reanálise, o parecer é a nova
+        // análise conforme — é NELA que o pacote deve ser marcado, senão o Histórico
+        // mostra a nova análise como "pendente de download").
+        const aidPacote = parecer?._analiseId || analiseId;
+        if (aidPacote) {
           try {
             setZipStage('Salvando pacote no banco…');
-            const aId = analiseId;
+            const aId = aidPacote;
             const path = `${aId}/${fileName}`;
             const { error: upErr } = await supabase.storage
               .from('pacotes-analise')
@@ -7975,16 +7979,29 @@ ${parecer.parecer_tecnico ? `
               outras.add(categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || '')));
             }
           } catch (e) { /* reincidência é best-effort */ }
+          // Tenta extrair o REGISTRO CORRETO (valor de referência) da descrição — a
+          // referência costuma vir após "RC", "ficha", "esperado", "correto", "deveria".
+          const extrairCorreto = (desc) => {
+            const pats = [
+              /\bRC\s*=?\s*["']([^"']+)["']/i,
+              /ficha(?:\s+mestre)?[^"'\n]{0,20}["']([^"']+)["']/i,
+              /(?:esperad[oa]|correto|deveria(?:\s+ser)?)\s*[:=]?\s*["']?([^"'\n×;]{1,80}?)["']?(?=\s*[×;.,]|$)/i,
+            ];
+            for (const re of pats) { const m = String(desc || '').match(re); if (m && m[1]) return m[1].trim(); }
+            return '';
+          };
           const itens = ncsAbertas.map((ap) => {
             const { slotKey, nome } = mapApontamento(ap);
             const doc = (slotKey === 'etiqueta_acessorio' && nome) ? `Etiqueta de Acessório (${nome})` : (labelSlot[slotKey] || ap.documento_afetado || 'Documento');
             const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
             const reincidente = outras.has(cat);
+            const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
             return {
               codigo: ap.codigo || 'NC',
               doc,
               responsavel: responsavelPorSlot(slotKey),
-              erro: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
+              erro: desc,
+              correto: extrairCorreto(desc),
               norma: ap.referencia_normativa || '',
               correcao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim() || 'Corrigir o documento conforme a ficha mestre.',
               corretiva: sugerirAcaoCorretiva(cat, reincidente),
@@ -8009,6 +8026,7 @@ ${parecer.parecer_tecnico ? `
               `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${it.reincidente ? '  _(reincidente)_' : ''}`,
               `   *O que está errado:* ${it.erro}`,
             ];
+            if (it.correto) linhas.push(`   *Registro correto:* ${it.correto}`);
             if (it.norma) linhas.push(`   *Norma/legislação:* ${it.norma}`);
             linhas.push(`   *Correção imediata:* ${it.correcao}`);
             linhas.push(`   *Ação corretiva:* ${it.corretiva}`);
@@ -8023,7 +8041,7 @@ ${parecer.parecer_tecnico ? `
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
           const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }) });
           if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.error || `HTTP ${resp.status}`); }
-          const resumo = itens.map((it) => `${it.codigo} [${it.doc}]: ${it.erro} | Correção: ${it.correcao} | Corretiva: ${it.corretiva}${it.reincidente ? ' (reincidente)' : ''}`).join(' || ');
+          const resumo = itens.map((it) => `${it.codigo} [${it.doc}]: ${it.erro}${it.correto ? ' | Correto: ' + it.correto : ''} | Correção: ${it.correcao} | Corretiva: ${it.corretiva}${it.reincidente ? ' (reincidente)' : ''}`).join(' || ');
           await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} (${itens.length} NC). ${resumo}`);
           toast.success('Alerta enviado ao Slack.');
           setSlackModal(null);
@@ -8577,6 +8595,10 @@ ${parecer.parecer_tecnico ? `
                       {it.reincidente && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
                     </div>
                     <div className="text-xs"><span className="font-semibold text-muted-foreground">O que está errado:</span> {it.erro}</div>
+                    <div>
+                      <Label className="text-xs">Registro correto (o que deveria ser)</Label>
+                      <textarea value={it.correto} onChange={(e) => setItemSlack(idx, 'correto', e.target.value)} rows={1} placeholder="Ex.: o valor/registro correto conforme a ficha/RC" className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                    </div>
                     {it.norma && <div className="text-xs"><span className="font-semibold text-muted-foreground">Norma/legislação:</span> {it.norma}</div>}
                     <div>
                       <Label className="text-xs">Ação de correção imediata</Label>
