@@ -6886,6 +6886,44 @@
       },
     };
 
+    // Categoriza um apontamento (para sugerir ação corretiva e detectar reincidência).
+    const CATEGORIAS_ERRO_SLACK = [
+      { nome: 'Registro ANVISA', re: /anvisa/i },
+      { nome: 'Modelo', re: /\bmodelo\b/i },
+      { nome: 'Nome do produto', re: /nome do produto|fam[íi]lia/i },
+      { nome: 'CNPJ', re: /\bcnpj\b/i },
+      { nome: 'Fabricante', re: /fabricante/i },
+      { nome: 'Endereço', re: /endere[çc]o/i },
+      { nome: 'Responsável Técnico', re: /respons[áa]vel\s+t[ée]cnico|\brt\b|crea/i },
+      { nome: 'Nº de série', re: /s[ée]rie/i },
+      { nome: 'Data/Validade', re: /\bdata\b|validade|cronologia/i },
+      { nome: 'Acessório', re: /acess[óo]rio/i },
+      { nome: 'Componente/RC', re: /\brc\b|componente/i },
+      { nome: 'Inspeção/Medição', re: /inspe[çc]|medi[çc]/i },
+    ];
+    function categorizarErroSlack(txt) {
+      for (const c of CATEGORIAS_ERRO_SLACK) if (c.re.test(txt || '')) return c.nome;
+      return 'Outros';
+    }
+    function sugerirAcaoCorretiva(cat, reincidente) {
+      const base = {
+        'Registro ANVISA': 'Verificar se o registro ANVISA está incorreto em outros lotes/produtos e corrigir na origem (cadastro/ficha mestre); avaliar ajustar o modelo da etiqueta.',
+        'Modelo': 'Conferir o modelo em outros lotes do mesmo produto e avaliar corrigir o modelo/template da etiqueta para prevenir recorrência.',
+        'Nome do produto': 'Verificar se o nome incorreto afeta outros produtos e avaliar corrigir o MODELO da etiqueta para os próximos lotes.',
+        'CNPJ': 'Conferir o CNPJ no cadastro do fabricante e nas etiquetas dos demais produtos; corrigir na origem.',
+        'Fabricante': 'Revisar os dados do fabricante no cadastro/ficha e nas etiquetas dos demais produtos.',
+        'Endereço': 'Revisar o endereço do fabricante no cadastro e nas etiquetas dos demais produtos.',
+        'Responsável Técnico': 'Atualizar os dados do RT/CREA no cadastro/ficha e verificar as etiquetas dos demais produtos.',
+        'Nº de série': 'Revisar a geração/gravação do número de série no processo (Sapiens) e conferir os demais lotes da OP.',
+        'Data/Validade': 'Revisar o registro de datas/validade no processo e conferir os demais lotes.',
+        'Acessório': 'Revisar a BOM/ficha mestre do produto e conferir se outros lotes têm o mesmo desvio de acessório.',
+        'Componente/RC': 'Investigar com a produção, abrir RNC do componente e verificar lotes correlatos.',
+        'Inspeção/Medição': 'Revisar o plano de inspeção/medição e verificar reincidência em outros lotes.',
+        'Outros': 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes; registrar a tratativa.',
+      }[cat] || 'Avaliar a causa raiz e se o desvio pode recorrer em outros lotes; registrar a tratativa.';
+      return reincidente ? `ERRO REINCIDENTE — abrir RNC/CAPA e tratar a causa raiz. ${base}` : base;
+    }
+
     function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId }) {
       const toast = useToast();
       const { perfil: usuarioAtual, can } = usePerm();
@@ -7917,40 +7955,80 @@ ${parecer.parecer_tecnico ? `
         return 'PCP'; // OP, RC, FORM, reprocesso, RNC → PCP
       };
       const [enviandoSlack, setEnviandoSlack] = useState(false);
+      const [slackModal, setSlackModal] = useState(null); // { itens: [...] } — caixa editável antes de enviar
       const ncsAbertas = (parecer.apontamentos || []).filter((a) => a.severidade === 'nao_conforme');
       // Não conformidades OU ressalvas — ambas podem ter sido causadas por ficha desatualizada
       const apontAbertos = (parecer.apontamentos || []).filter((a) => a.severidade === 'nao_conforme' || a.severidade === 'ressalva');
-      const enviarAlertaSlack = async () => {
+
+      // Abre a caixa editável: monta, por NC, o erro, a norma, a correção imediata e a
+      // ação corretiva sugerida (com detecção de reincidência entre análises).
+      const abrirAlertaSlack = async () => {
         if (!ncsAbertas.length) { toast.error('Não há não conformidades para enviar.'); return; }
         setEnviandoSlack(true);
         try {
-          const p = parecer.produto || {};
-          const linhas = ncsAbertas.map((ap) => {
+          // Reincidência: categorias de NC/ressalva já vistas em OUTRAS análises.
+          const outras = new Set();
+          try {
+            const { data } = await supabase.from('apontamentos').select('analise_id, descricao, documento_afetado, severidade').in('severidade', ['nao_conforme', 'ressalva']).limit(3000);
+            for (const ap of (data || [])) {
+              if (analiseId && ap.analise_id === analiseId) continue; // ignora a própria análise
+              outras.add(categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || '')));
+            }
+          } catch (e) { /* reincidência é best-effort */ }
+          const itens = ncsAbertas.map((ap) => {
             const { slotKey, nome } = mapApontamento(ap);
             const doc = (slotKey === 'etiqueta_acessorio' && nome) ? `Etiqueta de Acessório (${nome})` : (labelSlot[slotKey] || ap.documento_afetado || 'Documento');
-            const resp = responsavelPorSlot(slotKey);
-            const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
-            return `• *${ap.codigo || 'NC'}* — ${doc}  →  responsável: *${resp}*\n   ${desc}`;
+            const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
+            const reincidente = outras.has(cat);
+            return {
+              codigo: ap.codigo || 'NC',
+              doc,
+              responsavel: responsavelPorSlot(slotKey),
+              erro: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
+              norma: ap.referencia_normativa || '',
+              correcao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim() || 'Corrigir o documento conforme a ficha mestre.',
+              corretiva: sugerirAcaoCorretiva(cat, reincidente),
+              reincidente,
+            };
+          });
+          setSlackModal({ itens });
+        } catch (e) { toast.error('Erro ao preparar o alerta: ' + (e?.message || e)); }
+        finally { setEnviandoSlack(false); }
+      };
+      const setItemSlack = (idx, campo, valor) => setSlackModal((m) => ({ itens: m.itens.map((it, i) => (i === idx ? { ...it, [campo]: valor } : it)) }));
+
+      // Envia ao Slack o conteúdo (já editado) da caixa e registra no histórico.
+      const confirmarEnvioSlack = async () => {
+        if (!slackModal) return;
+        const p = parecer.produto || {};
+        const itens = slackModal.itens;
+        setEnviandoSlack(true);
+        try {
+          const blocos = itens.map((it) => {
+            const linhas = [
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${it.reincidente ? '  _(reincidente)_' : ''}`,
+              `   *O que está errado:* ${it.erro}`,
+            ];
+            if (it.norma) linhas.push(`   *Norma/legislação:* ${it.norma}`);
+            linhas.push(`   *Correção imediata:* ${it.correcao}`);
+            linhas.push(`   *Ação corretiva:* ${it.corretiva}`);
+            return linhas.join('\n');
           });
           const texto = [
             `:rotating_light: *NÃO CONFORMIDADE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
-            `Conferência da Qualidade identificou ${ncsAbertas.length} não conformidade(s) a corrigir:`,
+            `Conferência da Qualidade identificou ${itens.length} não conformidade(s):`,
             '',
-            ...linhas,
-          ].join('\n');
+            ...blocos,
+          ].join('\n\n');
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
-          const resp = await fetch(`${base}/notificar-slack`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }),
-          });
-          if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.error || `HTTP ${resp.status}`);
-          }
-          await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} (${ncsAbertas.length} NC)`);
+          const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }) });
+          if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.error || `HTTP ${resp.status}`); }
+          const resumo = itens.map((it) => `${it.codigo} [${it.doc}]: ${it.erro} | Correção: ${it.correcao} | Corretiva: ${it.corretiva}${it.reincidente ? ' (reincidente)' : ''}`).join(' || ');
+          await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} (${itens.length} NC). ${resumo}`);
           toast.success('Alerta enviado ao Slack.');
-        } catch (e) {
-          toast.error('Falha ao enviar ao Slack: ' + (e?.message || e));
-        } finally { setEnviandoSlack(false); }
+          setSlackModal(null);
+        } catch (e) { toast.error('Falha ao enviar ao Slack: ' + (e?.message || e)); }
+        finally { setEnviandoSlack(false); }
       };
 
       // === Atualizar a ficha mestre desatualizada e refazer a análise ===
@@ -8012,8 +8090,8 @@ ${parecer.parecer_tecnico ? `
               </Button>
             )}
             {ncsAbertas.length > 0 && (
-              <Button variant="outline" onClick={enviarAlertaSlack} disabled={enviandoSlack} title="Enviar as não conformidades para o canal do Slack (PCP e Almoxarifado)">
-                {enviandoSlack ? (<><Icon name="loader" className="animate-spin" />Enviando…</>) : (<><Icon name="bell" />Enviar NC ao Slack</>)}
+              <Button variant="outline" onClick={abrirAlertaSlack} disabled={enviandoSlack} title="Revisar e enviar as não conformidades para o canal do Slack (PCP e Almoxarifado)">
+                {enviandoSlack ? (<><Icon name="loader" className="animate-spin" />Preparando…</>) : (<><Icon name="bell" />Enviar NC ao Slack</>)}
               </Button>
             )}
             {parecer._formXlsxBytes && (
@@ -8485,6 +8563,40 @@ ${parecer.parecer_tecnico ? `
             <div className="font-semibold">Relatório gerado automaticamente pelo Analisador de Conciliação · {dataGeracao}</div>
             <div className="mt-1">Uso interno — Garantia da Qualidade — Confiance Medical · Protocolo v1.1</div>
           </div>
+
+          {/* === Caixa editável do alerta de NC ao Slack === */}
+          {slackModal && (
+            <Modal open onClose={() => !enviandoSlack && setSlackModal(null)} title="Enviar não conformidades ao Slack" description="Revise e edite a correção imediata e a ação corretiva de cada NC antes de enviar ao canal." size="xl">
+              <div className="space-y-4 max-h-[62vh] overflow-y-auto">
+                {slackModal.itens.map((it, idx) => (
+                  <div key={idx} className="rounded-md border p-3 space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap text-sm">
+                      <span className="font-semibold">{it.codigo}</span>
+                      <span className="text-muted-foreground">· {it.doc}</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
+                      {it.reincidente && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                    </div>
+                    <div className="text-xs"><span className="font-semibold text-muted-foreground">O que está errado:</span> {it.erro}</div>
+                    {it.norma && <div className="text-xs"><span className="font-semibold text-muted-foreground">Norma/legislação:</span> {it.norma}</div>}
+                    <div>
+                      <Label className="text-xs">Ação de correção imediata</Label>
+                      <textarea value={it.correcao} onChange={(e) => setItemSlack(idx, 'correcao', e.target.value)} rows={2} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Ação corretiva (sugestão — edite se quiser)</Label>
+                      <textarea value={it.corretiva} onChange={(e) => setItemSlack(idx, 'corretiva', e.target.value)} rows={3} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center justify-end gap-2 mt-4">
+                <Button variant="outline" onClick={() => setSlackModal(null)} disabled={enviandoSlack}>Cancelar</Button>
+                <Button onClick={confirmarEnvioSlack} disabled={enviandoSlack}>
+                  {enviandoSlack ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Enviando…</>) : (<><Icon name="bell" className="h-4 w-4" />Enviar ao Slack</>)}
+                </Button>
+              </div>
+            </Modal>
+          )}
 
           {/* === Modal de justificativa de ressalva === */}
           {justifyModal && (
