@@ -807,7 +807,7 @@
         { id: 'configuracoes', label: 'Configurações', icon: 'settings', perm: 'config_ver' },
       ].filter((it) => !it.perm || permitido(it.perm));
       return (
-        <aside className="flex h-screen w-64 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border no-print">
+        <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border no-print">
           <div className="flex items-center gap-3 px-6 py-6 border-b border-sidebar-border">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent">
               <span className="font-montserrat font-bold text-accent-foreground text-lg">C</span>
@@ -817,7 +817,7 @@
               <span className="text-xs text-sidebar-foreground/70 leading-tight">Medical</span>
             </div>
           </div>
-          <nav className="flex-1 px-3 py-4 space-y-1">
+          <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
             <div className="px-3 pb-2 text-xs uppercase tracking-wider text-sidebar-foreground/50 font-semibold">
               Conciliação da Produção
             </div>
@@ -897,8 +897,9 @@
       const motivos = [];
       // Sobe pela chain
       while (cursor?.analise_origem_id) {
-        // Ajuste por ficha desatualizada NÃO conta como iteração/correção.
-        if (cursor.tipo_reanalise === 'atualizacao_ficha') {
+        // Ajustes que NÃO contam como iteração/correção: ficha desatualizada e
+        // atualização do cadastro de operadores (operador/inspetor novo).
+        if (cursor.tipo_reanalise === 'atualizacao_ficha' || cursor.tipo_reanalise === 'atualizacao_cadastro') {
           ajusteFicha++;
         } else {
           iteracoes++;
@@ -977,6 +978,10 @@
       const isoDia = (d) => d.toISOString().slice(0, 10);
       const [trendDe, setTrendDe] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() - 5); d.setDate(1); return isoDia(d); });
       const [trendAte, setTrendAte] = useState(() => isoDia(new Date()));
+      // Filtro do gráfico "Erros que motivaram correção" por documento.
+      const [filtroDocErro, setFiltroDocErro] = useState('todos'); // 'todos'|'op'|'rc'|'etx'|'eac'
+      // Visão do gráfico "Problemas na OP": por estágio ou por inspeção do estágio.
+      const [viewOpChart, setViewOpChart] = useState('estagio'); // 'estagio'|'inspecao'
 
       useEffect(() => {
         const load = async () => {
@@ -1047,7 +1052,7 @@
         while (c?.analise_origem_id && s-- > 0) { passos.push(c); c = byIdAll.get(c.analise_origem_id); if (!c) break; }
         return passos;
       };
-      const temCorrecaoReal = (a) => passosReanalise(a).some((p) => p.tipo_reanalise !== 'atualizacao_ficha');
+      const temCorrecaoReal = (a) => passosReanalise(a).some((p) => p.tipo_reanalise !== 'atualizacao_ficha' && p.tipo_reanalise !== 'atualizacao_cadastro');
       const ehAjusteFichaSomente = (a) => !!a.analise_origem_id && !temCorrecaoReal(a);
       // Agrupa análises por OP/série, mantendo a mais recente de cada
       const porLoteMap = new Map();
@@ -1070,7 +1075,7 @@
       // Exclui re-análises de ajuste de ficha (não são correção de documento).
       const docTipoCount = {};
       const correcoesDetalhe = []; // para timeline / tabela
-      for (const r of reanalises.filter((r) => r.tipo_reanalise !== 'atualizacao_ficha')) {
+      for (const r of reanalises.filter((r) => r.tipo_reanalise !== 'atualizacao_ficha' && r.tipo_reanalise !== 'atualizacao_cadastro')) {
         // Normaliza chaves antigas "etiqueta_acessorio(removida)" → "etiqueta_acessorio"
         // para que remoções de etiqueta contem na categoria "Etiqueta Acessório"
         // (inclusive registros anteriores à padronização).
@@ -1150,36 +1155,65 @@
         { nome: 'Validade',            re: /validade/i },
         { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
         { nome: 'Acessório',           re: /acess[óo]rio/i },
+        { nome: 'Operador/estágio',    re: /operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|n[ãa]o cadastrado|aptid[ãa]o (do|ao)/i },
         { nome: 'Inspeção/Medição',   re: /inspe[çc][ãa]o|medi[çc]/i },
       ];
       // Calibração 18/06/2026: o gráfico de "Principais erros" mostra o que MOTIVOU
       // a correção — ou seja, os apontamentos NC/ressalva da análise ORIGINAL de cada
       // lote (e não do estado final, que pode já estar limpo). Para lotes sem correção,
       // usa o estado final mesmo (são erros ainda pendentes).
+      // Classifica um apontamento no documento que ele afeta (para o filtro do gráfico).
+      const classificarDocApontamento = (ap) => {
+        const d = String(ap?.documento_afetado || '').toLowerCase();
+        if (d.includes('etiqueta') && d.includes('acess')) return 'eac';
+        if (d.includes('etiqueta')) return 'etx';
+        if (/\brc\b|rela[çc][ãa]o de componentes/.test(d)) return 'rc';
+        if (/\bop\b|ordem de produ/.test(d)) return 'op';
+        return 'outros';
+      };
+      const categoriaDoTexto = (txt) => {
+        for (const cat of categorias) { if (cat.re.test(txt)) return cat.nome; }
+        return 'Outros';
+      };
+      // Contagem por documento: { todos:{cat:n}, op:{}, rc:{}, etx:{}, eac:{} }.
+      // Dedupe por (documento, categoria) DENTRO da mesma análise (igual à lógica antiga).
+      const tiposErroPorDoc = { todos: {}, op: {}, rc: {}, etx: {}, eac: {} };
+      // Gráfico "Problemas na OP" — só apontamentos que afetam a OP.
+      const opEstagioCount = {};   // { "60 — Conciliação": n }
+      const opInspecaoCount = {};  // { "#125945 · Est. 60": n }
       for (const a of lotesFinais) {
         // Ajuste por ficha desatualizada: a NC original era falso positivo → usa o
         // estado FINAL (conforme, sem apontamentos), não a original.
         const origem = ehAjusteFichaSomente(a) ? a : (findOriginal(a) || a);
         const aps = origem.parecer_completo?.apontamentos || [];
-        const errosAnalise = new Set(); // dedupe na MESMA análise
+        const vistos = new Set(); // dedupe `${bucket}|${cat}` na MESMA análise
         for (const ap of aps) {
           if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
           const txt = (ap.descricao || '') + ' ' + (ap.documento_afetado || '');
-          let achou = false;
-          for (const cat of categorias) {
-            if (cat.re.test(txt)) {
-              errosAnalise.add(cat.nome);
-              achou = true;
-              break; // 1 categoria por apontamento (primeira que casar)
-            }
+          const cat = categoriaDoTexto(txt);
+          const bucket = classificarDocApontamento(ap); // op|rc|etx|eac|outros
+          const alvos = tiposErroPorDoc[bucket] ? ['todos', bucket] : ['todos'];
+          for (const b of alvos) {
+            const key = b + '|' + cat;
+            if (vistos.has(key)) continue;
+            vistos.add(key);
+            tiposErroPorDoc[b][cat] = (tiposErroPorDoc[b][cat] || 0) + 1;
           }
-          if (!achou) errosAnalise.add('Outros');
-        }
-        for (const nome of errosAnalise) {
-          tiposErroCount[nome] = (tiposErroCount[nome] || 0) + 1;
+          // Problemas na OP por estágio/inspeção (só apontamentos da OP)
+          if (bucket === 'op') {
+            const ests = Array.isArray(ap.estagios) ? ap.estagios : [];
+            const insps = Array.isArray(ap.inspecoes) ? ap.inspecoes : [];
+            if (ests.length === 0) opEstagioCount['OP — sem estágio específico'] = (opEstagioCount['OP — sem estágio específico'] || 0) + 1;
+            else for (const e of ests) opEstagioCount[e] = (opEstagioCount[e] || 0) + 1;
+            if (insps.length === 0) opInspecaoCount['Sem inspeção identificada'] = (opInspecaoCount['Sem inspeção identificada'] || 0) + 1;
+            else for (const i of insps) opInspecaoCount[i] = (opInspecaoCount[i] || 0) + 1;
+          }
         }
       }
-      const tiposErroLista = Object.entries(tiposErroCount).sort((a, b) => b[1] - a[1]);
+      const tiposErroLista = Object.entries(tiposErroPorDoc[filtroDocErro] || tiposErroPorDoc.todos).sort((a, b) => b[1] - a[1]);
+      const opEstagioLista = Object.entries(opEstagioCount).sort((a, b) => b[1] - a[1]);
+      const opInspecaoLista = Object.entries(opInspecaoCount).sort((a, b) => b[1] - a[1]);
+      const opChartLista = viewOpChart === 'inspecao' ? opInspecaoLista : opEstagioLista;
 
       // === Erros por tipo de equipamento (decisão 23/06/2026) ===
       // Conta quantos apontamentos NC/ressalva foram registrados na análise ORIGINAL
@@ -1239,7 +1273,7 @@
       const tendencia = (() => {
         const de = trendDe, ate = trendAte;
         const corr = analises
-          .filter((a) => a.analise_origem_id && a.tipo_reanalise !== 'atualizacao_ficha')
+          .filter((a) => a.analise_origem_id && a.tipo_reanalise !== 'atualizacao_ficha' && a.tipo_reanalise !== 'atualizacao_cadastro')
           .filter((a) => { const d = (a.created_at || '').slice(0, 10); return d && d >= de && d <= ate; });
         // meses do intervalo (inclui meses sem correção como 0)
         const meses = [];
@@ -1544,7 +1578,7 @@
                     <CardDescription>Quais tipos de erro foram apontados nas análises originais (NC ou ressalva) — o que precisou ser corrigido. Permite identificar gargalos recorrentes: registro ANVISA, modelo, nome do produto, CNPJ, etc.</CardDescription>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarBarChartPNG('Erros que motivaram correção', tiposErroLista.map(([k, v]) => ({ label: k, value: v })))} title="Exportar este gráfico em PNG">
+                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarBarChartPNG(`Erros que motivaram correção${filtroDocErro !== 'todos' ? ' — ' + ({ op: 'OP', rc: 'RC', etx: 'Etiqueta Externa', eac: 'Etiqueta de Acessório' }[filtroDocErro]) : ''}`, tiposErroLista.map(([k, v]) => ({ label: k, value: v })))} title="Exportar este gráfico em PNG">
                       <Icon name="download" className="h-3.5 w-3.5" />PNG
                     </Button>
                     <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => handleExportarGrafico('Principais_erros', '#chart-erros')} title="Exportar este gráfico em PDF">
@@ -1554,10 +1588,59 @@
                 </div>
               </CardHeader>
               <CardContent>
+                <div className="flex items-center gap-1 mb-4 flex-wrap no-print">
+                  {[['todos', 'Todos'], ['op', 'OP'], ['rc', 'RC'], ['etx', 'Etiqueta Externa'], ['eac', 'Etiqueta de Acessório']].map(([k, lbl]) => (
+                    <button
+                      key={k}
+                      onClick={() => setFiltroDocErro(k)}
+                      className={cn('text-xs px-3 py-1 rounded-full border transition-colors', filtroDocErro === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
                 {tiposErroLista.length === 0 ? (
-                  <div className="text-sm text-muted-foreground text-center py-8">Nenhum erro registrado no período</div>
+                  <div className="text-sm text-muted-foreground text-center py-8">Nenhum erro registrado {filtroDocErro !== 'todos' ? 'neste documento ' : ''}no período</div>
                 ) : (
                   <BarChart items={tiposErroLista.map(([k, v]) => ({ label: k, value: v }))} />
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Problemas na OP por estágio/inspeção — decisão 15/07/2026 */}
+            <Card id="chart-op-estagio" className="lg:col-span-2">
+              <CardHeader>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-sm">Problemas na OP por estágio / inspeção</CardTitle>
+                    <CardDescription>Em qual estágio da OP (ou inspeção do estágio) a não conformidade foi apontada pelo agente. Ajuda a localizar o ponto do processo que mais falha (cronologia, inspeção ausente ou reprovada).</CardDescription>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarBarChartPNG(`Problemas na OP — ${viewOpChart === 'inspecao' ? 'por inspeção' : 'por estágio'}`, opChartLista.map(([k, v]) => ({ label: k, value: v })))} title="Exportar este gráfico em PNG">
+                      <Icon name="download" className="h-3.5 w-3.5" />PNG
+                    </Button>
+                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => handleExportarGrafico('Problemas_na_OP', '#chart-op-estagio')} title="Exportar este gráfico em PDF">
+                      <Icon name="download" className="h-3.5 w-3.5" />PDF
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-1 mb-4 flex-wrap no-print">
+                  {[['estagio', 'Por estágio'], ['inspecao', 'Por inspeção do estágio']].map(([k, lbl]) => (
+                    <button
+                      key={k}
+                      onClick={() => setViewOpChart(k)}
+                      className={cn('text-xs px-3 py-1 rounded-full border transition-colors', viewOpChart === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+                {opChartLista.length === 0 ? (
+                  <div className="text-sm text-muted-foreground text-center py-8">Nenhuma NC de OP com {viewOpChart === 'inspecao' ? 'inspeção' : 'estágio'} identificado no período</div>
+                ) : (
+                  <BarChart items={opChartLista.map(([k, v]) => ({ label: k, value: v }))} />
                 )}
               </CardContent>
             </Card>
@@ -4103,9 +4186,14 @@
       return sugestoes;
     }
 
-    function analisarConciliacao({ docs, produto, identificacao, corpus, formApprovalDate, opReprocessoAnexado = false, rncAnexado = false }) {
+    function analisarConciliacao({ docs, produto, identificacao, corpus, formApprovalDate, opReprocessoAnexado = false, rncAnexado = false, operadores = [] }) {
       const op = docs.op, et = docs.etiqueta, rc = docs.rc;
       const etAcs = docs.etAcessorios || [];
+      // Colaboradores cadastrados por estágio (para a conferência de aptidão). Lista
+      // completa (inclui inativos) — a validade histórica não depende de o colaborador
+      // ainda estar ativo. Coletor de "não cadastrados" para a re-análise por cadastro.
+      const cadastroOperadores = Array.isArray(operadores) ? operadores : [];
+      const cadastrosPendentes = [];
 
       // FORM-GQ-0047 — desde a migração para template embutido (Rev. 8 oficial),
       // a plataforma SEMPRE gera o FORM preenchido a partir do template + Ficha
@@ -4143,9 +4231,19 @@
         if (status === 'nao_conforme') ncMaior++;
         if (status === 'ressalva') ncMenor++;
       };
-      const apontar = (severidade, camada, documento, descricao, recomendacao, normaRef) => {
+      const apontar = (severidade, camada, documento, descricao, recomendacao, normaRef, extra = null) => {
         const codigo = severidade === 'nao_conforme' ? `NC-${String(apontamentos.filter(a => a.severidade === 'nao_conforme').length + 1).padStart(2, '0')}` : `R-${String(apontamentos.filter(a => a.severidade === 'ressalva').length + 1).padStart(2, '0')}`;
-        apontamentos.push({ codigo, severidade, camada, documento_afetado: documento, referencia_normativa: normaRef, descricao, recomendacao });
+        const ap = { codigo, severidade, camada, documento_afetado: documento, referencia_normativa: normaRef, descricao, recomendacao };
+        // Tag opcional de estágio/inspeção da OP (alimenta o gráfico "Problemas na OP
+        // por estágio/inspeção" no dashboard). Só é anexado quando conhecido.
+        if (extra && Array.isArray(extra.estagios) && extra.estagios.length) ap.estagios = [...new Set(extra.estagios)];
+        if (extra && Array.isArray(extra.inspecoes) && extra.inspecoes.length) ap.inspecoes = [...new Set(extra.inspecoes)];
+        apontamentos.push(ap);
+      };
+      // Rótulo amigável de um estágio a partir do número (usa a lista de estágios variáveis).
+      const nomeEstagio = (n) => {
+        const e = ESTAGIOS_VARIAVEIS.find((v) => v.estagioNum === n);
+        return e ? `${n} — ${e.nome}` : `Estágio ${n}`;
       };
 
       // ============ CAMADA 2: Conformidade vs Ficha Mestre ============
@@ -4755,10 +4853,17 @@
           });
           add(C1, 'Cronologia coerente entre inspeções e operações', 'nao_conforme',
             `${detalhes.length} incoerência(s) cronológica(s) detectada(s): ${detalhes.join('; ')}.`);
+          const cronEst = new Set(), cronInsp = new Set();
+          for (const inc of incoerencias) {
+            if (inc.opEst != null) cronEst.add(nomeEstagio(inc.opEst));
+            if (inc.inspEst != null) cronEst.add(nomeEstagio(inc.inspEst));
+            if (inc.inspNum != null) cronInsp.add(`#${inc.inspNum} · Est. ${inc.inspEst}`);
+          }
           apontar('nao_conforme', 1, 'OP',
             `Cronologia incoerente: ${detalhes.join('; ')}. Um estágio posterior não pode começar antes da inspeção do estágio anterior ser concluída.`,
             'Investigar o registro de datas/horas no Sapiens. Pode indicar retrabalho não documentado, correção de data pós-fato ou erro operacional na sequência de estágios. Emitir RNC quando aplicável.',
-            'ISO 13485 §7.5.1 (controle de produção) + §7.5.9 (rastreabilidade)');
+            'ISO 13485 §7.5.1 (controle de produção) + §7.5.9 (rastreabilidade)',
+            { estagios: [...cronEst], inspecoes: [...cronInsp] });
         } else {
           add(C1, 'Cronologia coerente entre inspeções e operações', 'conforme',
             `Todas as ${insps.length} inspeções foram concluídas antes do início dos estágios seguintes.`);
@@ -4778,6 +4883,7 @@
           porNumero.get(insp.numero).push(insp);
         }
         const dupsFora = [];
+        const dupEst = new Set(), dupInsp = new Set();
         for (const [numero, lista] of porNumero.entries()) {
           if (lista.length < 2) continue;
           // Ordena pela ordem em que aparecem no PDF (já vem nessa ordem)
@@ -4790,6 +4896,9 @@
             if (t1 == null || t2 == null) continue;
             if (t2 < t1) {
               dupsFora.push(`Inspeção #${numero} tem 2 registros com inspetores diferentes (${lista[k-1].inspetor} em ${lista[k-1].data} ${lista[k-1].hora}, ${lista[k].inspetor} em ${lista[k].data} ${lista[k].hora}) mas o segundo é ANTERIOR ao primeiro`);
+              const est = lista[k].estagio != null ? lista[k].estagio : lista[k-1].estagio;
+              if (est != null) dupEst.add(nomeEstagio(est));
+              dupInsp.add(`#${numero}${est != null ? ` · Est. ${est}` : ''}`);
             }
           }
         }
@@ -4799,7 +4908,8 @@
           apontar('nao_conforme', 1, 'OP',
             `Inspeções duplicadas fora de ordem cronológica: ${dupsFora.join('; ')}.`,
             'Investigar registro no Sapiens: quando a mesma inspeção é feita por 2 inspetores, o segundo registro deve ser posterior ao primeiro.',
-            'ISO 13485 §7.5.9 (rastreabilidade)');
+            'ISO 13485 §7.5.9 (rastreabilidade)',
+            { estagios: [...dupEst], inspecoes: [...dupInsp] });
         }
       }
 
@@ -4844,7 +4954,8 @@
           apontar('nao_conforme', 1, 'OP',
             `Inspeção(ões) obrigatória(s) ausente(s) na OP: ${nomes}.`,
             'Verificar no Sapiens se a inspeção foi realmente executada e registrada. Se falha de processo, emitir RNC. Se a inspeção migrou pra outro estágio, atualizar a Ficha Mestre.',
-            'ISO 13485 §8.2.4 (monitoramento e medição do produto)');
+            'ISO 13485 §8.2.4 (monitoramento e medição do produto)',
+            { estagios: faltantes.map(nomeEstagio) });
         }
         // 2) Extras: inspeção presente na OP mas estágio NÃO declarado na ficha
         const extras = [];
@@ -4882,21 +4993,97 @@
           add(C1, 'Status das inspeções da OP', 'conforme',
             `Todas as ${op.inspecoes.length} inspeções com status "Conforme"${listaDet}.`);
         } else {
-          const detalhesNC = (op?.inspecoesDetalhe || [])
-            .filter((i) => naoConforme.some((n) => n.numero === i.numero))
+          const detalhesInsp = (op?.inspecoesDetalhe || [])
+            .filter((i) => naoConforme.some((n) => n.numero === i.numero));
+          const detalhesNC = detalhesInsp
             .map((i) => `#${i.numero} (Estágio ${i.estagio}, ${i.inspetor || 'inspetor não identificado'})`);
           add(C1, 'Status das inspeções da OP', 'nao_conforme',
             `${naoConforme.length} inspeção(ões) reprovada(s): ${detalhesNC.length ? detalhesNC.join('; ') : naoConforme.map((i) => `#${i.numero}`).join('; ')}.`);
+          const repEst = new Set(), repInsp = new Set();
+          for (const i of detalhesInsp) {
+            if (i.estagio != null) repEst.add(nomeEstagio(i.estagio));
+            repInsp.add(`#${i.numero}${i.estagio != null ? ` · Est. ${i.estagio}` : ''}`);
+          }
           apontar('nao_conforme', 1, 'OP',
             `Inspeções reprovadas: ${detalhesNC.length ? detalhesNC.join('; ') : naoConforme.map((i) => i.numero).join(', ')}. Exige OP de Reprocesso.`,
             'Anexar OP de Reprocesso correspondente ou emitir RNC.',
-            'ISO 13485 §8.3');
+            'ISO 13485 §8.3',
+            { estagios: [...repEst], inspecoes: [...repInsp] });
         }
       } else if (op?.aprovados > 0 && op?.reprovados === 0) {
         add(C1, 'Status das inspeções da OP', 'conforme', `${op.aprovados} marcações "Aprovado" detectadas.`);
       } else if (op?.reprovados > 0) {
         add(C1, 'Status das inspeções da OP', 'nao_conforme', `${op.reprovados} ocorrência(s) de "Reprovado".`);
         apontar('nao_conforme', 1, 'OP', `${op.reprovados} reprovação(ões) detectada(s).`, 'Investigar e exigir OP de Reprocesso e/ou RNC.', 'ISO 13485 §8.3');
+      }
+
+      // === CONFERÊNCIA: aptidão de operadores e inspetores por estágio (15/07/2026) ===
+      // Cruza operações (por matrícula) e inspeções (por nome/apelido) da OP com o
+      // cadastro de operadores. Regras:
+      //   - Cadastrado mas SEM o estágio (N) / inspeção (Ni) na lista → NC (corrigir a OP).
+      //   - NÃO cadastrado (pessoa nova) → RESSALVA (cadastrar e refazer → vira conforme).
+      // Só roda se houver cadastro (senão não há base para conferir e não gera falso positivo).
+      if (cadastroOperadores.length > 0 && ((op?.operacoes || []).length > 0 || (op?.inspecoesDetalhe || []).length > 0)) {
+        const normOpr = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const porCodigo = new Map();
+        for (const o of cadastroOperadores) { const c = String(o.codigo || '').trim(); if (c) porCodigo.set(c, o); }
+        const acharPorNome = (nome) => {
+          const nn = normOpr(nome); if (!nn) return null;
+          return cadastroOperadores.find((o) => normOpr(o.nome) === nn || (o.apelidos || []).some((a) => normOpr(a) === nn)) || null;
+        };
+        const temEstagio = (o, num, role) => ((role === 'insp' ? o.estagios_inspecao : o.estagios) || []).map(Number).includes(num);
+        const jaPendente = (nome, est, role) => cadastrosPendentes.some((p) => p.estagio === est && p.role === role && normOpr(p.nome) === normOpr(nome));
+
+        const ncOp = new Set(), ncInsp = new Set(), ncOpEst = new Set(), ncInspEst = new Set();
+
+        for (const o of (op?.operacoes || [])) {
+          const est = o.estagio_numero; if (est == null) continue;
+          const cod = String(o.operador_id || '').trim();
+          const nome = (o.operador_nome || '').trim();
+          const cadastrado = (cod && porCodigo.get(cod)) || acharPorNome(nome);
+          if (!cadastrado) {
+            if (!jaPendente(nome, est, 'op')) cadastrosPendentes.push({ nome, codigo: cod || null, estagio: est, role: 'op' });
+            continue;
+          }
+          if (!temEstagio(cadastrado, est, 'op')) { ncOp.add(`${nome || cadastrado.nome} (Estágio ${est})`); ncOpEst.add(nomeEstagio(est)); }
+        }
+        for (const i of (op?.inspecoesDetalhe || [])) {
+          const est = i.estagio; if (est == null) continue;
+          const nome = (i.inspetor || '').trim(); if (!nome) continue;
+          const cadastrado = acharPorNome(nome);
+          if (!cadastrado) {
+            if (!jaPendente(nome, est, 'insp')) cadastrosPendentes.push({ nome, codigo: null, estagio: est, role: 'insp' });
+            continue;
+          }
+          if (!temEstagio(cadastrado, est, 'insp')) { ncInsp.add(`${nome} (Inspeção ${est}i)`); ncInspEst.add(nomeEstagio(est)); }
+        }
+
+        if (ncOp.size > 0) {
+          add(C1, 'Aptidão do operador ao estágio', 'nao_conforme', `Operador(es) executaram estágio para o qual não estão aptos: ${[...ncOp].join('; ')}.`);
+          apontar('nao_conforme', 1, 'OP',
+            `Operador não autorizado no estágio: ${[...ncOp].join('; ')}. O colaborador não está apto (conforme cadastro) a executar este estágio.`,
+            'Corrigir a OP (operador correto) ou, se a autorização mudou, atualizar o cadastro de operadores do estágio.',
+            'ISO 13485 §6.2 (competência) + §7.5.1',
+            { estagios: [...ncOpEst] });
+        }
+        if (ncInsp.size > 0) {
+          add(C1, 'Aptidão do inspetor à inspeção', 'nao_conforme', `Inspetor(es) fizeram inspeção para a qual não estão aptos: ${[...ncInsp].join('; ')}.`);
+          apontar('nao_conforme', 1, 'OP',
+            `Inspetor não autorizado na inspeção: ${[...ncInsp].join('; ')}. O colaborador não está apto (conforme cadastro) a inspecionar este estágio.`,
+            'Corrigir a OP (inspetor correto) ou, se a autorização mudou, atualizar o cadastro de inspetores do estágio.',
+            'ISO 13485 §6.2 (competência) + §8.2.4',
+            { estagios: [...ncInspEst] });
+        }
+        if (cadastrosPendentes.length > 0) {
+          const descr = cadastrosPendentes.map((p) => `${p.nome || '(sem nome)'}${p.codigo ? ' #' + p.codigo : ''} — ${p.role === 'insp' ? 'inspeção ' + p.estagio + 'i' : 'estágio ' + p.estagio}`).join('; ');
+          const estRess = [...new Set(cadastrosPendentes.map((p) => nomeEstagio(p.estagio)))];
+          add(C1, 'Colaboradores cadastrados', 'ressalva', `Colaborador(es) não cadastrado(s) no quadro de operadores/inspetores: ${descr}.`);
+          apontar('ressalva', 1, 'OP',
+            `Operador/inspetor não cadastrado: ${descr}. Cadastre no quadro de operadores do estágio para liberar a conferência.`,
+            'Cadastrar o(s) colaborador(es) no quadro do estágio/inspeção correspondente e refazer a análise (não conta como correção).',
+            'ISO 13485 §6.2 (competência)',
+            { estagios: estRess });
+        }
       }
 
       // === Medições críticas — validação numérica contra faixa [Vlr_Min, Vlr_Max] ===
@@ -5420,6 +5607,7 @@
         cruzamento_marcacoes: cruzamento,
         camadas: { camada_1: C1, camada_2: C2, camada_3: C3 },
         apontamentos,
+        cadastros_pendentes: cadastrosPendentes,
         recomendacoes_melhoria: recos,
         sugestoes_regulatorias: sugestoesRegulatorias,
       };
@@ -5544,9 +5732,16 @@
       // Detecta se o usuário anexou OP de Reprocesso ou RNC (qualquer arquivo nesses slots)
       const opReprocessoAnexado = !!(slots.op_reprocesso?.file || slots.op_reprocesso?.text);
       const rncAnexado          = !!(slots.rnc?.file          || slots.rnc?.text);
+      // Carrega o cadastro de operadores (para a conferência de aptidão por estágio).
+      // Best-effort: se falhar/estiver vazio, a conferência é simplesmente pulada.
+      let operadores = [];
+      try {
+        const { data: opsData } = await supabase.from('operadores').select('nome, codigo, apelidos, estagios, estagios_inspecao, ativo');
+        operadores = opsData || [];
+      } catch (e) { console.warn('Falha ao carregar operadores para a conferência:', e?.message || e); }
       const parecer = analisarConciliacao({
         docs, produto, identificacao, corpus, formApprovalDate,
-        opReprocessoAnexado, rncAnexado,
+        opReprocessoAnexado, rncAnexado, operadores,
       });
 
       // 4) Salvar no Supabase — limpando campos voláteis (Uint8Array não serializa em jsonb)
@@ -5825,10 +6020,16 @@
               </div>
             }
           />
+          <DropZone
+            onFiles={(arqs) => { if (carregando) return; const f = arqs.find((x) => /\.(xlsx|xls)$/i.test(x.name)) || arqs[0]; if (f) importar(f); }}
+            disabled={carregando}
+            className="block rounded-lg transition-colors"
+          >
           {itens.length === 0 ? (
             <Card>
               <CardContent className="py-10 text-center text-sm text-muted-foreground space-y-2">
                 <div>Nenhuma OP pendente na lista.</div>
+                <div className="text-xs text-accent">Você também pode arrastar a planilha do Sapiens para esta área.</div>
                 <div className="max-w-xl mx-auto text-xs">
                   No Sapiens, abra <strong>“Consulta de movimentos de O.P. com Inspeção pendente (SGQ)”</strong>, filtre Origem 070 / Estágio 60 / a data desejada, clique em <strong>Mostrar</strong>, e exporte o relatório (botão direito → extrair). Depois importe o .xlsx aqui.
                 </div>
@@ -5875,6 +6076,7 @@
               </CardContent>
             </Card>
           )}
+          </DropZone>
         </div>
       );
     }
@@ -6267,15 +6469,21 @@
                   multiple
                   onChange={(e) => { if (e.target.files?.length) processarPasta(e.target.files); e.target.value = ''; }}
                 />
-                <div className="rounded-lg border border-dashed border-accent/50 bg-accent/5 p-3 flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm">
-                    <div className="font-semibold flex items-center gap-2"><Icon name="upload" className="h-4 w-4 text-accent" />Enviar a pasta inteira da OP (detecção automática)</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">A plataforma separa sozinha OP, RC, etiqueta externa, etiquetas de acessório, reprocesso, RNC e FORM. Você também pode enviar cada arquivo individualmente abaixo.</div>
-                  </div>
-                  <Button variant="outline" size="sm" disabled={classificandoPasta} onClick={() => folderInputRef.current && folderInputRef.current.click()}>
-                    {classificandoPasta ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Classificando…</>) : (<><Icon name="upload" className="h-4 w-4" />Selecionar pasta</>)}
-                  </Button>
-                </div>
+                <DropZone
+                  onFiles={(arquivos) => { if (!classificandoPasta) processarPasta(arquivos); }}
+                  disabled={classificandoPasta}
+                  className="rounded-lg border border-dashed border-accent/50 bg-accent/5 p-3 flex items-center justify-between gap-3 flex-wrap transition-colors"
+                >
+                  {(dragging) => (<>
+                    <div className="text-sm">
+                      <div className="font-semibold flex items-center gap-2"><Icon name="upload" className="h-4 w-4 text-accent" />Enviar a pasta inteira da OP (detecção automática)</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">{dragging ? 'Solte a pasta ou os arquivos aqui — a plataforma classifica sozinha.' : 'Arraste a pasta (ou os arquivos) para cá, ou clique em Selecionar. A plataforma separa sozinha OP, RC, etiqueta externa, etiquetas de acessório, reprocesso, RNC e FORM.'}</div>
+                    </div>
+                    <Button variant="outline" size="sm" disabled={classificandoPasta} onClick={() => folderInputRef.current && folderInputRef.current.click()}>
+                      {classificandoPasta ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Classificando…</>) : (<><Icon name="upload" className="h-4 w-4" />Selecionar pasta</>)}
+                    </Button>
+                  </>)}
+                </DropZone>
                 <UploadSlotV2
                   label="Ordem de Produção (OP)"
                   formats="PDF"
@@ -6412,6 +6620,71 @@
             state={prefilling}
             onClose={() => setPrefilling(null)}
           />
+        </div>
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Drag-and-drop reutilizável: lê arquivos de um evento de "drop",
+    // inclusive quando o que foi arrastado é uma PASTA (traversal recursivo
+    // via webkitGetAsEntry). Sempre devolve uma lista plana de File.
+    // ------------------------------------------------------------------
+    function coletarArquivosDrop(dataTransfer) {
+      const items = dataTransfer && dataTransfer.items;
+      const semEntry = !items || !items.length || typeof items[0].webkitGetAsEntry !== 'function';
+      if (semEntry) return Promise.resolve(Array.from((dataTransfer && dataTransfer.files) || []));
+      const entries = [];
+      for (let i = 0; i < items.length; i++) {
+        const ent = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+        if (ent) entries.push(ent);
+      }
+      if (!entries.length) return Promise.resolve(Array.from(dataTransfer.files || []));
+      const out = [];
+      const lerEntry = (entry) => new Promise((resolve) => {
+        if (entry.isFile) {
+          entry.file((f) => {
+            // preserva o caminho relativo (útil ao classificar arquivos de pasta)
+            try {
+              if (entry.fullPath && !f.webkitRelativePath) {
+                Object.defineProperty(f, 'webkitRelativePath', { value: entry.fullPath.replace(/^\//, ''), configurable: true });
+              }
+            } catch (e) { /* ignora navegadores que não permitem */ }
+            out.push(f); resolve();
+          }, () => resolve());
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const lerLote = () => reader.readEntries((subs) => {
+            if (!subs.length) return resolve();
+            Promise.all(subs.map(lerEntry)).then(lerLote);
+          }, () => resolve());
+          lerLote();
+        } else { resolve(); }
+      });
+      return Promise.all(entries.map(lerEntry)).then(() => out);
+    }
+
+    // Wrapper visual que aceita arrastar-e-soltar. Passa a lista de File para
+    // onFiles. `children` pode ser função (recebe o estado `dragging`) ou nós.
+    function DropZone({ onFiles, disabled = false, className, activeClassName = 'ring-2 ring-accent ring-offset-2 ring-offset-background', children, ...rest }) {
+      const [dragging, setDragging] = useState(false);
+      const aoArrastar = (e) => { e.preventDefault(); e.stopPropagation(); if (!disabled) setDragging(true); };
+      const aoSair = (e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); };
+      const aoSoltar = async (e) => {
+        e.preventDefault(); e.stopPropagation(); setDragging(false);
+        if (disabled) return;
+        const arquivos = await coletarArquivosDrop(e.dataTransfer);
+        if (arquivos && arquivos.length) onFiles(arquivos);
+      };
+      return (
+        <div
+          className={cn(className, dragging && activeClassName)}
+          onDragOver={aoArrastar}
+          onDragEnter={aoArrastar}
+          onDragLeave={aoSair}
+          onDrop={aoSoltar}
+          {...rest}
+        >
+          {typeof children === 'function' ? children(dragging) : children}
         </div>
       );
     }
@@ -6882,7 +7155,7 @@
 
     function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId }) {
       const toast = useToast();
-      const { perfil: usuarioAtual, can } = usePerm();
+      const { perfil: usuarioAtual, can, isAdmin } = usePerm();
       const { pedirOuExecutar } = useSolic();
       // Mantém o parecer em estado local para refletir justificativas/re-análises sem recarregar
       const [parecer, setParecer] = useState(parecerInicial);
@@ -6933,7 +7206,10 @@
           const etqInfo = parecer.documentos_analisados?.find((s) => typeof s === 'string' && s.includes(codigo || '___'));
           const nomeMatch = ap?.descricao?.match(/([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÁ-ÿ /\-]+?)\s*\(\s*[A-Z]{2,5}\d{4,5}\s*\)/);
           const nome = nomeMatch ? nomeMatch[1].trim() : (codigo || 'acessório');
-          return { slotKey, codigo, nome, slotDisplayKey: codigo ? `${slotKey}:${codigo}` : slotKey };
+          // Chave sempre presente: quando não há código Sapiens (ex.: etiqueta
+          // AUSENTE), usa um token para manter o formato de MAPA e evitar quebra.
+          const chave = codigo || '__sem_codigo__';
+          return { slotKey, codigo, nome, chave, slotDisplayKey: `${slotKey}:${chave}` };
         }
         return { slotKey, codigo: null, nome: null, slotDisplayKey: slotKey };
       };
@@ -7069,12 +7345,15 @@
         // modoFicha=true: refaz a análise SEM corrigir documento — a causa da NC era
         // uma FICHA MESTRE DESATUALIZADA que já foi atualizada. Não conta como correção.
         const modoFicha = opts && opts.modoFicha === true;
+        // modoCadastro=true: refaz a análise após cadastrar operador/inspetor que estava
+        // faltando (a documentação estava conforme). Não conta como correção.
+        const modoCadastro = opts && opts.modoCadastro === true;
         // Conta quantos slots foram corrigidos (acessórios contam por código)
         const slotKeysCorrigidos = Object.keys(docsCorrigidos).filter((k) => {
           if (k === 'etiqueta_acessorio') return Object.keys(docsCorrigidos[k] || {}).length > 0;
           return !!docsCorrigidos[k];
         });
-        if (!modoFicha && slotKeysCorrigidos.length === 0 && etiquetasRemovidas.size === 0) {
+        if (!modoFicha && !modoCadastro && slotKeysCorrigidos.length === 0 && etiquetasRemovidas.size === 0) {
           toast.error('Nenhum documento corrigido anexado nem etiqueta marcada para remoção.');
           return;
         }
@@ -7160,19 +7439,28 @@
           }
 
           const novoParecer = await executarAnaliseLocal(slotsParaParse, { permitirRefazer: true });
-          if (modoFicha) {
-            // Ajuste por ficha desatualizada: vincula à original (rastreabilidade)
-            // mas marca como 'atualizacao_ficha' para NÃO contar como correção.
+          if (modoFicha || modoCadastro) {
+            // Ajuste sem correção de documento (ficha desatualizada OU cadastro de
+            // operador/inspetor). Vincula à original (rastreabilidade) mas NÃO conta
+            // como correção no dashboard.
+            const tipo = modoCadastro ? 'atualizacao_cadastro' : 'atualizacao_ficha';
+            const motivoPadrao = modoCadastro
+              ? (opts.motivoCadastro || 'Operador/inspetor cadastrado no quadro do estágio — a documentação do lote estava conforme.')
+              : (opts.motivoFicha || 'Ficha mestre atualizada (nova revisão) — a documentação do lote estava conforme.');
             if (novoParecer._analiseId && analiseId) {
               await supabase.from('analises').update({
                 analise_origem_id: analiseId,
-                tipo_reanalise: 'atualizacao_ficha',
+                tipo_reanalise: tipo,
                 doc_substituido: null,
-                motivo_reanalise: opts.motivoFicha || 'Ficha mestre atualizada (nova revisão) — a documentação do lote estava conforme.',
+                motivo_reanalise: motivoPadrao,
               }).eq('id', novoParecer._analiseId);
             }
-            registrarLog(usuarioAtual, 'atualizar_ficha_reanalise', 'analise', `OP ${opNum}${serieStr ? ' / ' + serieStr : ''}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} atualizou a ficha mestre e refez a análise da OP ${opNum} (novo resultado: ${(novoParecer.resultado_geral || '').toUpperCase()}; não conta como correção)`);
-            toast.success('Ficha atualizada e análise refeita. Não contabilizada como correção.');
+            const acaoLog = modoCadastro ? 'atualizar_cadastro_reanalise' : 'atualizar_ficha_reanalise';
+            const descLog = modoCadastro
+              ? `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} cadastrou operador/inspetor e refez a análise da OP ${opNum} (novo resultado: ${(novoParecer.resultado_geral || '').toUpperCase()}; não conta como correção)`
+              : `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} atualizou a ficha mestre e refez a análise da OP ${opNum} (novo resultado: ${(novoParecer.resultado_geral || '').toUpperCase()}; não conta como correção)`;
+            registrarLog(usuarioAtual, acaoLog, 'analise', `OP ${opNum}${serieStr ? ' / ' + serieStr : ''}`, descLog);
+            toast.success(modoCadastro ? 'Colaborador(es) cadastrado(s) e análise refeita. Não contabilizada como correção.' : 'Ficha atualizada e análise refeita. Não contabilizada como correção.');
             setParecer(novoParecer);
             setDocsCorrigidos({});
             setEtiquetasRemovidas(new Set());
@@ -8014,6 +8302,44 @@ ${parecer.parecer_tecnico ? `
       const [fichaEditorData, setFichaEditorData] = useState(null); // { ficha, produto }
       const [carregandoFicha, setCarregandoFicha] = useState(false);
       const SEL_FICHA = `*, produto:produtos(id, equipamento, modelo, codigo_referencia, codigo_sapiens, registro_anvisa), acessorios:acessorios_aplicaveis(ordem, descricao, codigo_sapiens, obrigatorio, is_fabricante_confiance, esteril, pode_sair_apenas_na_nf, grupo_alternativo)`;
+      // Colaboradores identificados na OP que não estão no cadastro de operadores.
+      const cadastrosPendentes = parecer.cadastros_pendentes || [];
+      const [cadastrando, setCadastrando] = useState(false);
+      // Cadastra os operadores/inspetores faltantes no quadro do estágio e refaz a
+      // análise (sem contar como correção — vira conforme, igual ao ajuste de ficha).
+      const cadastrarPendentesERefazer = async () => {
+        if (!(isAdmin || can('config_editar'))) { toast.error('Sem permissão para cadastrar operadores. Peça a um administrador ou faça em Configurações → Operadores por estágio.'); return; }
+        if (cadastrosPendentes.length === 0) return;
+        setCadastrando(true);
+        try {
+          const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+          const { data: existentesRaw } = await supabase.from('operadores').select('*');
+          const existentes = existentesRaw || [];
+          const autorNome = usuarioAtual?.nome_completo || usuarioAtual?.email || null;
+          for (const p of cadastrosPendentes) {
+            const col = p.role === 'insp' ? 'estagios_inspecao' : 'estagios';
+            const cod = (p.codigo || '').trim();
+            let alvo = cod ? existentes.find((o) => String(o.codigo || '').trim() === cod) : null;
+            if (!alvo) alvo = existentes.find((o) => norm(o.nome) === norm(p.nome));
+            if (alvo) {
+              const est = [...new Set([...((alvo[col] || []).map(Number)), p.estagio])].sort((a, b) => a - b);
+              await supabase.from('operadores').update({ [col]: est, codigo: cod || alvo.codigo || null, ativo: true, updated_at: new Date().toISOString(), updated_by: autorNome }).eq('id', alvo.id);
+              alvo[col] = est; alvo.ativo = true;
+            } else {
+              const ins = { nome: p.nome || '(sem nome)', codigo: cod || null, apelidos: [], estagios: p.role === 'op' ? [p.estagio] : [], estagios_inspecao: p.role === 'insp' ? [p.estagio] : [], ativo: true, updated_by: autorNome };
+              const { data: novo } = await supabase.from('operadores').insert(ins).select().single();
+              if (novo) existentes.push(novo);
+            }
+            await registrarLog(usuarioAtual, 'cadastrar_operador', 'operador', p.nome || '(sem nome)', `${autorNome || 'Usuário'} cadastrou ${p.nome}${cod ? ' #' + cod : ''} em ${p.role === 'insp' ? p.estagio + 'i' : 'estágio ' + p.estagio} a partir da conferência da OP`);
+          }
+          await handleReanalisar({ modoCadastro: true });
+        } catch (e) {
+          toast.error('Erro ao cadastrar operador(es): ' + (e?.message || e));
+          setCadastrando(false);
+        }
+      };
+      useEffect(() => { if (!reanalisando) setCadastrando(false); }, [parecer]);
+
       const abrirAtualizarFicha = async () => {
         if (!can('cadastro_fichas')) { toast.error('Você não tem permissão para editar fichas mestres.'); return; }
         setCarregandoFicha(true);
@@ -8058,6 +8384,28 @@ ${parecer.parecer_tecnico ? `
 
       return (
         <div>
+          {/* Banner: operador/inspetor não cadastrado (ressalva) → cadastrar e refazer */}
+          {cadastrosPendentes.length > 0 && (
+            <div className="no-print mb-4 rounded-md border-l-4 px-4 py-3" style={{ borderLeftColor: 'hsl(var(--status-ressalva))', backgroundColor: 'hsl(var(--status-ressalva) / 0.10)' }}>
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="text-sm">
+                  <div className="font-semibold flex items-center gap-2"><Icon name="alertTriangle" className="h-4 w-4" style={{ color: 'hsl(var(--status-ressalva))' }} />{cadastrosPendentes.length} colaborador(es) não cadastrado(s) no quadro de operadores</div>
+                  <div className="text-muted-foreground mt-0.5 text-xs">
+                    {cadastrosPendentes.map((p, i) => (
+                      <div key={i}><strong>{p.nome || '(sem nome)'}</strong>{p.codigo ? ` #${p.codigo}` : ''} — {p.role === 'insp' ? `inspeção ${p.estagio}i` : `estágio ${p.estagio}`}</div>
+                    ))}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-1">Ao cadastrar, a análise é refeita e a ressalva vira conforme (não conta como correção).</div>
+                </div>
+                {(isAdmin || can('config_editar')) && (
+                  <Button variant="outline" onClick={cadastrarPendentesERefazer} disabled={cadastrando || reanalisando} title="Cadastra os colaboradores no quadro do estágio/inspeção e refaz a análise.">
+                    {(cadastrando || reanalisando) ? (<><Icon name="loader" className="animate-spin" />Cadastrando e refazendo…</>) : (<><Icon name="plus" />Cadastrar e refazer análise</>)}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* === ACTION BUTTONS (não imprime) === */}
           <div className="no-print mb-4 flex flex-wrap items-center justify-end gap-2">
             {apontAbertos.length > 0 && can('cadastro_fichas') && (
@@ -8117,6 +8465,7 @@ ${parecer.parecer_tecnico ? `
               if (k === 'etiqueta_acessorio') {
                 for (const cod of Object.keys(docsCorrigidos[k] || {})) {
                   const v = docsCorrigidos[k][cod];
+                  if (!v || typeof v !== 'object' || !('fileName' in v)) continue; // ignora formas inesperadas
                   itensCorrigidos.push({ label: `${labelSlot[k]}${v.nome ? ' (' + v.nome + ')' : ''}`, fileName: v.fileName });
                 }
               } else {
@@ -8281,6 +8630,7 @@ ${parecer.parecer_tecnico ? `
                         apIdx: c.apIdx,
                         slotKey: info.slotKey,
                         codigo: info.codigo,
+                        chave: info.chave,
                         nome: info.nome,
                         slotDisplayKey: info.slotDisplayKey,
                         fileNameOriginal: original,
@@ -8623,9 +8973,11 @@ ${parecer.parecer_tecnico ? `
                 {/* Identificação do arquivo a substituir */}
                 <div className="text-sm p-3 rounded-md border" style={{ backgroundColor: 'hsl(var(--accent) / 0.06)', borderColor: 'hsl(var(--accent) / 0.3)' }}>
                   <div className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Documento a substituir</div>
-                  <div className="font-semibold mt-0.5">{targetLabel}</div>
-                  {targetSubtitulo && <div className="text-xs text-muted-foreground">Acessório: <strong>{targetSubtitulo}</strong></div>}
-                  {fileNameToReplace && <div className="text-xs text-muted-foreground mt-1">Arquivo original: <strong className="font-mono">{fileNameToReplace}</strong></div>}
+                  <div className="font-semibold mt-0.5 font-mono break-all">{fileNameToReplace || targetLabel}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    {targetLabel}{targetSubtitulo ? ` · ${targetSubtitulo}` : ''}
+                    {!fileNameToReplace && ' · (documento ausente na análise original)'}
+                  </div>
                 </div>
                 {/* Resumo da NC apontada */}
                 <div className="text-xs p-3 rounded-md bg-muted/40 border">
@@ -8634,11 +8986,11 @@ ${parecer.parecer_tecnico ? `
                 </div>
                 <div>
                   <Label>Arquivo corrigido * <span className="text-xs text-muted-foreground font-normal ml-1">(aceita: {acceptSlot[reanalisarModal.slotKey] || 'qualquer formato'})</span></Label>
-                  <input
-                    type="file"
-                    accept={acceptSlot[reanalisarModal.slotKey] || '*'}
-                    onChange={async (e) => {
-                      const f = e.target.files?.[0];
+                  {(() => {
+                    const acc = acceptSlot[reanalisarModal.slotKey] || '';
+                    const accList = acc.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+                    const aceito = (f) => !accList.length || accList.includes('.' + (f.name || '').split('.').pop().toLowerCase());
+                    const lerArquivo = async (f) => {
                       if (!f) return;
                       try {
                         setSaving(true);
@@ -8649,9 +9001,24 @@ ${parecer.parecer_tecnico ? `
                       } finally {
                         setSaving(false);
                       }
-                    }}
-                    className="w-full mt-1 text-sm"
-                  />
+                    };
+                    return (
+                      <DropZone
+                        onFiles={(arqs) => { const f = arqs.find(aceito) || arqs[0]; if (f) lerArquivo(f); }}
+                        className="mt-1 rounded-md border border-dashed p-2 transition-colors"
+                      >
+                        {(dragging) => (<>
+                          <input
+                            type="file"
+                            accept={acceptSlot[reanalisarModal.slotKey] || '*'}
+                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; lerArquivo(f); }}
+                            className="w-full text-sm"
+                          />
+                          <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte o arquivo aqui' : 'ou arraste o arquivo para cá'}</div>
+                        </>)}
+                      </DropZone>
+                    );
+                  })()}
                   {reanalisarModal.fileName && (
                     <div className="mt-1.5 text-xs text-muted-foreground">
                       Arquivo lido: <strong>{reanalisarModal.fileName}</strong> · {reanalisarModal.text?.length || 0} caracteres extraídos
@@ -8681,8 +9048,9 @@ ${parecer.parecer_tecnico ? `
                           nome: reanalisarModal.nome || null,
                           codigo: reanalisarModal.codigo || null,
                         };
-                        if (reanalisarModal.slotKey === 'etiqueta_acessorio' && reanalisarModal.codigo) {
-                          return { ...prev, etiqueta_acessorio: { ...(prev.etiqueta_acessorio || {}), [reanalisarModal.codigo]: item } };
+                        if (reanalisarModal.slotKey === 'etiqueta_acessorio') {
+                          const chave = reanalisarModal.chave || reanalisarModal.codigo || '__sem_codigo__';
+                          return { ...prev, etiqueta_acessorio: { ...(prev.etiqueta_acessorio || {}), [chave]: item } };
                         }
                         return { ...prev, [reanalisarModal.slotKey]: item };
                       });
@@ -9212,8 +9580,8 @@ ${parecer.parecer_tecnico ? `
         setParsing(false);
       };
 
-      const handleFile = async (e) => {
-        const f = e.target.files?.[0];
+      const handleFile = async (fileOrEvent) => {
+        const f = fileOrEvent && fileOrEvent.target ? fileOrEvent.target.files?.[0] : fileOrEvent;
         if (!f) return;
         setFile(f);
         await parseXlsx(f);
@@ -9436,7 +9804,16 @@ ${parecer.parecer_tecnico ? `
                   <Icon name="download" className="h-3.5 w-3.5" />Baixar template
                 </Button>
               </div>
-              <Input type="file" accept=".xlsx" onChange={handleFile} disabled={parsing || saving} />
+              <DropZone
+                onFiles={(arqs) => { if (parsing || saving) return; const f = arqs.find((x) => /\.xlsx$/i.test(x.name)) || arqs[0]; if (f) handleFile(f); }}
+                disabled={parsing || saving}
+                className="rounded-md border border-dashed p-2 transition-colors"
+              >
+                {(dragging) => (<>
+                  <Input type="file" accept=".xlsx" onChange={handleFile} disabled={parsing || saving} />
+                  <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte o .xlsx aqui' : 'ou arraste o arquivo .xlsx para cá'}</div>
+                </>)}
+              </DropZone>
               <p className="text-xs text-muted-foreground mt-1">Não tem o arquivo? Clique em <strong>Baixar template</strong> acima — ele vem com as instruções e exemplos.</p>
             </div>
             {parsing && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Lendo planilha…</div>}
@@ -10820,9 +11197,10 @@ ${parecer.parecer_tecnico ? `
         new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout: a ${label} demorou mais de ${ms/1000}s. Verifique sua conexão e se o bucket "form-templates" foi criado no Supabase.`)), ms)),
       ]);
 
-      const handleUpload = async (e) => {
-        const file = e.target.files[0];
-        e.target.value = '';
+      const handleUpload = async (fileOrEvent) => {
+        let file;
+        if (fileOrEvent && fileOrEvent.target) { file = fileOrEvent.target.files[0]; fileOrEvent.target.value = ''; }
+        else { file = fileOrEvent; }
         if (!file) return;
         if (!file.name.toLowerCase().endsWith('.xlsx')) {
           toast.error('Arquivo precisa ser .xlsx');
@@ -10919,6 +11297,11 @@ ${parecer.parecer_tecnico ? `
               </CardDescription>
             </CardHeader>
             <CardContent>
+             <DropZone
+               onFiles={(arqs) => { if (status.uploading) return; const f = arqs.find((x) => /\.xlsx$/i.test(x.name)) || arqs[0]; if (f) handleUpload(f); }}
+               disabled={status.uploading}
+               className="rounded-lg transition-colors"
+             >
               {status.loading ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Icon name="loader" className="h-4 w-4 animate-spin" />
@@ -10979,6 +11362,7 @@ ${parecer.parecer_tecnico ? `
                 className="hidden"
                 onChange={handleUpload}
               />
+             </DropZone>
             </CardContent>
           </Card>
 
@@ -11291,6 +11675,17 @@ ${parecer.parecer_tecnico ? `
       { nome: 'Ordem de Produção de Reprocesso', slotKey: 'op_reprocesso',  textoFORM: 'Ordem de Produção de Reprocesso' },
       { nome: 'RNCs associados',                  slotKey: 'rnc',           textoFORM: 'RNCs associados' },
     ];
+
+    // Estágios oferecidos no cadastro de operadores (os que têm operação/inspeção na OP):
+    // os variáveis + Embalagem (50) e Conciliação da Produção (60), que são fixos universais.
+    const ESTAGIOS_OPERADOR = [
+      ...ESTAGIOS_VARIAVEIS.map((e) => ({ num: e.estagioNum, nome: e.nome })),
+      { num: 50, nome: 'Embalagem' },
+      { num: 60, nome: 'Conciliação da Produção' },
+    ].sort((a, b) => a.num - b.num);
+    // Estágios que NÃO possuem inspeção (não têm "Ni"): Separação (5) e Preparação (7).
+    const ESTAGIOS_SEM_INSPECAO = new Set([5, 7]);
+    const temInspecao = (num) => !ESTAGIOS_SEM_INSPECAO.has(num);
 
     function CollapsibleSection({ title, description, open, onToggle, children, badge }) {
       return (
@@ -12163,9 +12558,12 @@ ${parecer.parecer_tecnico ? `
 
       const SimpleSlot = ({ label, hint, accept, file, onSelect, onClear }) => {
         const inputRef = useRef();
+        const acceptList = (accept || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const aceito = (f) => !acceptList.length || acceptList.includes('.' + (f.name || '').split('.').pop().toLowerCase());
         return (
-          <div
-            className={cn('flex items-center justify-between gap-4 rounded-lg border p-3', file ? '' : 'border-dashed')}
+          <DropZone
+            onFiles={(arqs) => { const f = arqs.find(aceito); if (f) onSelect(f); }}
+            className={cn('flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors', file ? '' : 'border-dashed')}
             style={file ? { borderColor: 'hsl(var(--status-conforme) / 0.5)', backgroundColor: 'hsl(var(--status-conforme) / 0.05)' } : {}}
           >
             <div className="min-w-0 flex-1">
@@ -12173,7 +12571,7 @@ ${parecer.parecer_tecnico ? `
                 {label}
                 {file && <Icon name="check" className="h-4 w-4" style={{ color: 'hsl(var(--status-conforme))' }} />}
               </div>
-              <div className="text-xs text-muted-foreground truncate">{file ? file.name : hint}</div>
+              <div className="text-xs text-muted-foreground truncate">{file ? file.name : `${hint} · arraste ou selecione`}</div>
             </div>
             <input ref={inputRef} type="file" accept={accept} className="hidden"
               onChange={(e) => { if (e.target.files[0]) onSelect(e.target.files[0]); e.target.value = ''; }} />
@@ -12187,22 +12585,28 @@ ${parecer.parecer_tecnico ? `
                 <Icon name="upload" className="h-3.5 w-3.5" />{file ? 'Trocar' : 'Selecionar'}
               </Button>
             </div>
-          </div>
+          </DropZone>
         );
       };
 
       const MultiSlot = ({ label, hint, accept, files, onSelect, onClearOne }) => {
         const inputRef = useRef();
         const hasItems = files.length > 0;
+        const acceptList = (accept || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const aceito = (f) => !acceptList.length || acceptList.includes('.' + (f.name || '').split('.').pop().toLowerCase());
         return (
-          <div className={cn('rounded-lg border p-3', hasItems ? '' : 'border-dashed')} style={hasItems ? { borderColor: 'hsl(var(--status-conforme) / 0.5)', backgroundColor: 'hsl(var(--status-conforme) / 0.05)' } : {}}>
+          <DropZone
+            onFiles={(arqs) => { const ok = arqs.filter(aceito); if (ok.length) onSelect(ok); }}
+            className={cn('rounded-lg border p-3 transition-colors', hasItems ? '' : 'border-dashed')}
+            style={hasItems ? { borderColor: 'hsl(var(--status-conforme) / 0.5)', backgroundColor: 'hsl(var(--status-conforme) / 0.05)' } : {}}
+          >
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium flex items-center gap-2">
                   {label}
                   {hasItems && <Icon name="check" className="h-4 w-4" style={{ color: 'hsl(var(--status-conforme))' }} />}
                 </div>
-                <div className="text-xs text-muted-foreground">{hasItems ? `${files.length} arquivo(s) selecionado(s)` : hint}</div>
+                <div className="text-xs text-muted-foreground">{hasItems ? `${files.length} arquivo(s) selecionado(s)` : `${hint} · arraste ou selecione`}</div>
               </div>
               <input ref={inputRef} type="file" accept={accept} multiple className="hidden"
                 onChange={(e) => { if (e.target.files.length > 0) onSelect(Array.from(e.target.files)); e.target.value = ''; }} />
@@ -12222,7 +12626,7 @@ ${parecer.parecer_tecnico ? `
                 ))}
               </div>
             )}
-          </div>
+          </DropZone>
         );
       };
 
@@ -12665,7 +13069,7 @@ ${parecer.parecer_tecnico ? `
       return (
         <div>
           <PageHeader title="Configurações" description="Preferências do sistema de conciliação da produção." />
-          <div className="grid grid-cols-1 gap-4 max-w-3xl">
+          <div className="grid grid-cols-1 gap-4">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><Icon name="package" className="h-5 w-5 text-accent" />Pasta de destino do pacote</CardTitle>
@@ -12693,9 +13097,270 @@ ${parecer.parecer_tecnico ? `
               </CardContent>
             </Card>
 
+            <GestaoOperadores perfil={perfil} podeEditar={podeEditar} />
+
             {podeGerenciarUsuarios && <GestaoUsuarios perfil={perfil} />}
           </div>
         </div>
+      );
+    }
+
+    /* ====================================================================
+       CADASTRO DE OPERADORES (admin) — colaboradores × estágios autorizados
+       Lista global (vale para todos os produtos). Demissão = inativar (mantém
+       os vínculos de estágio para não invalidar OPs antigas na re-análise).
+       ==================================================================== */
+    function GestaoOperadores({ perfil, podeEditar }) {
+      const toast = useToast();
+      const [lista, setLista] = useState([]);
+      const [carregando, setCarregando] = useState(true);
+      const [reload, setReload] = useState(0);
+      const [abertos, setAbertos] = useState(() => new Set()); // estágios expandidos
+      const [forms, setForms] = useState({}); // { [num]: {nome, codigo, apelidos} }
+      // Gestão de colaboradores (ativar/inativar, editar código/apelidos)
+      const [gerirAberto, setGerirAberto] = useState(false);
+      const [mostrarInativos, setMostrarInativos] = useState(false);
+      const [editId, setEditId] = useState(null);
+      const [editApelidos, setEditApelidos] = useState('');
+      const [editCodigo, setEditCodigo] = useState('');
+
+      useRealtime('operadores', () => setReload((r) => r + 1));
+      useEffect(() => {
+        (async () => {
+          setCarregando(true);
+          const { data } = await supabase.from('operadores').select('*').order('nome', { ascending: true });
+          setLista(data || []);
+          setCarregando(false);
+        })();
+      }, [reload]);
+
+      const autor = () => perfil?.nome_completo || perfil?.email || 'Usuário';
+      const parseApelidos = (s) => String(s || '').split(/[;,]/).map((x) => x.trim()).filter(Boolean);
+      const normalize = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      // Papéis: 'op' (executa o estágio N) e 'insp' (faz a inspeção Ni).
+      const colDe = (role) => role === 'insp' ? 'estagios_inspecao' : 'estagios';
+      const listaDe = (op, role) => (op[colDe(role)] || []).map(Number);
+      const estagiosDe = (op) => listaDe(op, 'op');
+      const noEstagio = (role, num) => lista.filter((op) => listaDe(op, role).includes(num));
+      const tagDe = (role, num) => role === 'insp' ? `${num}i` : `${num}`;
+      const getForm = (n) => forms[n] || { nome: '', codigo: '', apelidos: '' };
+      const setForm = (n, patch) => setForms((f) => ({ ...f, [n]: { ...getForm(n), ...patch } }));
+      const toggleAberto = (n) => setAbertos((prev) => { const s = new Set(prev); s.has(n) ? s.delete(n) : s.add(n); return s; });
+
+      // Casa por código (se informado) e, na ausência, por nome normalizado.
+      const acharExistente = ({ codigo, nome }) => {
+        const c = (codigo || '').trim();
+        if (c) { const m = lista.find((o) => (o.codigo || '').trim() === c); if (m) return m; }
+        const nn = normalize(nome);
+        return nn ? (lista.find((o) => normalize(o.nome) === nn) || null) : null;
+      };
+
+      const alterar = async (op, campos, descricao) => {
+        try {
+          const { error } = await supabase.from('operadores').update({ ...campos, updated_at: new Date().toISOString(), updated_by: autor() }).eq('id', op.id);
+          if (error) throw error;
+          await registrarLog(perfil, 'editar_operador', 'operador', op.nome, descricao);
+          setReload((r) => r + 1);
+        } catch (e) { toast.error('Erro ao alterar operador: ' + (e?.message || e)); }
+      };
+
+      // Adiciona (ou vincula) um colaborador a UM estágio no papel indicado.
+      const addAo = async (role, num) => {
+        const key = `${num}|${role}`; const f = getForm(key); const nm = (f.nome || '').trim();
+        if (!nm) { toast.error('Informe o nome do colaborador.'); return; }
+        const existente = acharExistente({ codigo: f.codigo, nome: nm });
+        const col = colDe(role); const tag = tagDe(role, num);
+        try {
+          if (existente) {
+            const est = [...new Set([...listaDe(existente, role), num])].sort((a, b) => a - b);
+            const apel = [...new Set([...(existente.apelidos || []), ...parseApelidos(f.apelidos)])];
+            const { error } = await supabase.from('operadores').update({
+              [col]: est, apelidos: apel,
+              codigo: (f.codigo || '').trim() || existente.codigo || null,
+              ativo: true, updated_at: new Date().toISOString(), updated_by: autor(),
+            }).eq('id', existente.id);
+            if (error) throw error;
+            await registrarLog(perfil, 'editar_operador', 'operador', existente.nome, `${autor()} vinculou ${existente.nome} a ${tag}`);
+            toast.success(`${existente.nome} vinculado a ${tag}.`);
+          } else {
+            const { error } = await supabase.from('operadores').insert({
+              nome: nm, codigo: (f.codigo || '').trim() || null, apelidos: parseApelidos(f.apelidos),
+              estagios: role === 'op' ? [num] : [], estagios_inspecao: role === 'insp' ? [num] : [],
+              ativo: true, updated_by: autor(),
+            });
+            if (error) throw error;
+            await registrarLog(perfil, 'cadastrar_operador', 'operador', nm, `${autor()} cadastrou ${nm} em ${tag}`);
+            toast.success(`${nm} adicionado a ${tag}.`);
+          }
+          setForm(key, { nome: '', codigo: '', apelidos: '' });
+          setReload((r) => r + 1);
+        } catch (e) { toast.error('Erro: ' + (e?.message || e)); }
+      };
+
+      const vincular = async (op, role, num) => {
+        const est = [...new Set([...listaDe(op, role), num])].sort((a, b) => a - b);
+        await alterar(op, { [colDe(role)]: est, ativo: true }, `${autor()} vinculou ${op.nome} a ${tagDe(role, num)}`);
+      };
+      const removerDe = async (op, role, num) => {
+        const tag = tagDe(role, num);
+        if (!confirm(`Remover ${op.nome} de ${tag}?`)) return;
+        const est = listaDe(op, role).filter((n) => n !== num);
+        await alterar(op, { [colDe(role)]: est }, `${autor()} removeu ${op.nome} de ${tag}`);
+      };
+
+      // Renderiza um bloco de papel (operação/inspeção) dentro do card do estágio.
+      // É função (não componente) para os inputs não perderem o foco a cada tecla.
+      const renderRole = (e, role, titulo) => {
+        const num = e.num; const tag = tagDe(role, num);
+        const ativos = noEstagio(role, num).filter((op) => op.ativo);
+        const disponiveis = lista.filter((op) => op.ativo && !listaDe(op, role).includes(num));
+        const key = `${num}|${role}`; const f = getForm(key);
+        return (
+          <div className="space-y-2">
+            <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{titulo} <span className="font-mono">({tag})</span> · {ativos.length}</div>
+            {ativos.length === 0 ? (
+              <div className="text-xs text-muted-foreground">Ninguém autorizado em {tag} ainda.</div>
+            ) : (
+              <div className="rounded-md border divide-y">
+                {ativos.map((op) => (
+                  <div key={op.id} className="flex items-center justify-between gap-3 p-2.5">
+                    <div className="min-w-0 text-sm">
+                      <span className="font-medium">{op.nome}</span>
+                      {op.codigo && <span className="text-xs font-mono text-muted-foreground ml-2">#{op.codigo}</span>}
+                      {(op.apelidos || []).length > 0 && <span className="text-xs text-muted-foreground ml-2">({(op.apelidos || []).join(', ')})</span>}
+                    </div>
+                    {podeEditar && (
+                      <Button variant="ghost" size="sm" onClick={() => removerDe(op, role, num)} title={`Remover de ${tag}`}><Icon name="x" className="h-3.5 w-3.5" /></Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {podeEditar && (
+              <div className="rounded-md border border-dashed p-3 space-y-2">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                  <Input value={f.nome} onChange={(ev) => setForm(key, { nome: ev.target.value })} placeholder="Nome do colaborador *" />
+                  <Input value={f.codigo} onChange={(ev) => setForm(key, { codigo: ev.target.value })} placeholder="Código / matrícula" />
+                  <Input value={f.apelidos} onChange={(ev) => setForm(key, { apelidos: ev.target.value })} placeholder="Apelidos (ex.: J. Silva; Joao)" />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={() => addAo(role, num)}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar a {tag}</Button>
+                  {disponiveis.length > 0 && (
+                    <select
+                      className="text-sm border rounded-md px-2 py-1 bg-background"
+                      value=""
+                      onChange={(ev) => { const op = lista.find((o) => o.id === ev.target.value); if (op) vincular(op, role, num); ev.target.value = ''; }}
+                      title={`Vincular um colaborador já cadastrado a ${tag}`}
+                    >
+                      <option value="">Vincular já cadastrado…</option>
+                      {disponiveis.map((op) => (<option key={op.id} value={op.id}>{op.nome}{op.codigo ? ` (#${op.codigo})` : ''}</option>))}
+                    </select>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      const abrirEdicao = (op) => {
+        if (editId === op.id) { setEditId(null); return; }
+        setEditId(op.id); setEditApelidos((op.apelidos || []).join(', ')); setEditCodigo(op.codigo || '');
+      };
+      const salvarEdicao = async (op) => {
+        await alterar(op, { apelidos: parseApelidos(editApelidos), codigo: (editCodigo || '').trim() || null }, `${autor()} editou dados de ${op.nome}`);
+        setEditId(null); toast.success(`${op.nome} atualizado.`);
+      };
+
+      const gerenciaveis = lista.filter((op) => mostrarInativos || op.ativo);
+
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Icon name="database" className="h-5 w-5 text-accent" />Operadores por estágio</CardTitle>
+            <CardDescription>Abra um estágio e cadastre, separadamente, quem <strong>executa</strong> o estágio (N) e quem faz a <strong>inspeção</strong> dele (Ni). Lista global. O código é a matrícula do Sapiens (casa as operações); apelidos ajudam a casar o nome do inspetor. Admissão = adicionar; demissão = inativar (na seção "Todos os colaboradores"), mantendo o histórico das OPs já produzidas.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {carregando && <div className="text-sm text-muted-foreground">Carregando…</div>}
+
+            {ESTAGIOS_OPERADOR.map((e) => {
+              const comInsp = temInspecao(e.num);
+              const nOp = noEstagio('op', e.num).filter((op) => op.ativo).length;
+              const nInsp = comInsp ? noEstagio('insp', e.num).filter((op) => op.ativo).length : 0;
+              return (
+                <CollapsibleSection
+                  key={e.num}
+                  title={`Estágio ${e.num} — ${e.nome}`}
+                  badge={comInsp ? `${nOp} op · ${nInsp} insp` : `${nOp} op · sem inspeção`}
+                  open={abertos.has(e.num)}
+                  onToggle={() => toggleAberto(e.num)}
+                >
+                  <div className={cn('grid grid-cols-1 gap-4', comInsp && 'lg:grid-cols-2')}>
+                    {renderRole(e, 'op', 'Operação')}
+                    {comInsp && renderRole(e, 'insp', 'Inspeção')}
+                  </div>
+                  {podeEditar && <div className="text-[11px] text-muted-foreground mt-2">Se o colaborador já existir (mesmo código ou nome), ele é apenas vinculado — sem duplicar.{comInsp ? ' Executar o estágio (N) e inspecioná-lo (Ni) são autorizações independentes.' : ' Este estágio não possui inspeção.'}</div>}
+                </CollapsibleSection>
+              );
+            })}
+
+            {/* Gestão de todos os colaboradores (ativar/inativar, editar dados) */}
+            <CollapsibleSection
+              title="Todos os colaboradores"
+              badge={`${lista.filter((o) => o.ativo).length} ativo(s)`}
+              open={gerirAberto}
+              onToggle={() => setGerirAberto((v) => !v)}
+            >
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                  <input type="checkbox" checked={mostrarInativos} onChange={(ev) => setMostrarInativos(ev.target.checked)} className="h-3.5 w-3.5" />
+                  Mostrar inativos
+                </label>
+                <div className="rounded-md border divide-y">
+                  {gerenciaveis.length === 0 && <div className="p-3 text-sm text-muted-foreground text-center">Nenhum colaborador cadastrado.</div>}
+                  {gerenciaveis.map((op) => (
+                    <div key={op.id} className="p-2.5">
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold flex items-center gap-2">
+                            {op.nome}
+                            {op.codigo && <span className="text-xs font-mono text-muted-foreground">#{op.codigo}</span>}
+                            {!op.ativo && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }}>inativo</span>}
+                          </div>
+                          <div className="flex flex-wrap gap-1 mt-1 items-center">
+                            {listaDe(op, 'op').sort((a, b) => a - b).map((n) => (
+                              <span key={'o' + n} className="text-[10px] px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.12)', color: 'hsl(var(--accent))' }} title={`Executa o estágio ${n}`}>{n}</span>
+                            ))}
+                            {listaDe(op, 'insp').sort((a, b) => a - b).map((n) => (
+                              <span key={'i' + n} className="text-[10px] px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }} title={`Inspeciona o estágio ${n}`}>{n}i</span>
+                            ))}
+                            {listaDe(op, 'op').length === 0 && listaDe(op, 'insp').length === 0 && <span className="text-xs text-muted-foreground">sem estágios</span>}
+                          </div>
+                        </div>
+                        {podeEditar && (
+                          <div className="flex items-center gap-1">
+                            <Button variant="outline" size="sm" onClick={() => abrirEdicao(op)}><Icon name="edit" className="h-3.5 w-3.5" />{editId === op.id ? 'Fechar' : 'Editar'}</Button>
+                            <Button variant="ghost" size="sm" onClick={() => alterar(op, { ativo: !op.ativo }, `${autor()} ${op.ativo ? 'inativou' : 'reativou'} o operador ${op.nome}`)} title={op.ativo ? 'Inativar (demissão)' : 'Reativar'}>
+                              {op.ativo ? 'Inativar' : 'Reativar'}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                      {editId === op.id && podeEditar && (
+                        <div className="mt-2 pt-2 border-t grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
+                          <div><Label className="text-xs">Código / matrícula</Label><Input value={editCodigo} onChange={(ev) => setEditCodigo(ev.target.value)} placeholder="matrícula Sapiens" /></div>
+                          <div><Label className="text-xs">Apelidos</Label><Input value={editApelidos} onChange={(ev) => setEditApelidos(ev.target.value)} placeholder="separe por vírgula" /></div>
+                          <div><Button size="sm" onClick={() => salvarEdicao(op)}><Icon name="check" className="h-3.5 w-3.5" />Salvar</Button></div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="text-[11px] text-muted-foreground">Os estágios de cada colaborador são gerenciados abrindo os cards de estágio acima.</div>
+              </div>
+            </CollapsibleSection>
+          </CardContent>
+        </Card>
       );
     }
 
@@ -13327,4 +13992,3 @@ ${parecer.parecer_tecnico ? `
   </script>
 </body>
 </html>
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
