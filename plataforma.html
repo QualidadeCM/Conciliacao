@@ -4238,6 +4238,9 @@
         // por estágio/inspeção" no dashboard). Só é anexado quando conhecido.
         if (extra && Array.isArray(extra.estagios) && extra.estagios.length) ap.estagios = [...new Set(extra.estagios)];
         if (extra && Array.isArray(extra.inspecoes) && extra.inspecoes.length) ap.inspecoes = [...new Set(extra.inspecoes)];
+        // Sugestão de "registro correto" (ex.: colaboradores aptos ao estágio) —
+        // usada como valor padrão no alerta de NC do Slack.
+        if (extra && extra.sugestaoCorreto) ap.sugestao_correto = String(extra.sugestaoCorreto);
         apontamentos.push(ap);
       };
       // Rótulo amigável de um estágio a partir do número (usa a lista de estágios variáveis).
@@ -5035,6 +5038,7 @@
         const jaPendente = (nome, est, role) => cadastrosPendentes.some((p) => p.estagio === est && p.role === role && normOpr(p.nome) === normOpr(nome));
 
         const ncOp = new Set(), ncInsp = new Set(), ncOpEst = new Set(), ncInspEst = new Set();
+        const ncOpEstNum = new Set(), ncInspEstNum = new Set();
 
         for (const o of (op?.operacoes || [])) {
           const est = o.estagio_numero; if (est == null) continue;
@@ -5045,7 +5049,7 @@
             if (!jaPendente(nome, est, 'op')) cadastrosPendentes.push({ nome, codigo: cod || null, estagio: est, role: 'op' });
             continue;
           }
-          if (!temEstagio(cadastrado, est, 'op')) { ncOp.add(`${nome || cadastrado.nome} (Estágio ${est})`); ncOpEst.add(nomeEstagio(est)); }
+          if (!temEstagio(cadastrado, est, 'op')) { ncOp.add(`${nome || cadastrado.nome} (Estágio ${est})`); ncOpEst.add(nomeEstagio(est)); ncOpEstNum.add(est); }
         }
         for (const i of (op?.inspecoesDetalhe || [])) {
           const est = i.estagio; if (est == null) continue;
@@ -5055,8 +5059,19 @@
             if (!jaPendente(nome, est, 'insp')) cadastrosPendentes.push({ nome, codigo: null, estagio: est, role: 'insp' });
             continue;
           }
-          if (!temEstagio(cadastrado, est, 'insp')) { ncInsp.add(`${nome} (Inspeção ${est}i)`); ncInspEst.add(nomeEstagio(est)); }
+          if (!temEstagio(cadastrado, est, 'insp')) { ncInsp.add(`${nome} (Inspeção ${est}i)`); ncInspEst.add(nomeEstagio(est)); ncInspEstNum.add(est); }
         }
+
+        // Lista de colaboradores APTOS a um estágio (por papel), para sugerir no alerta.
+        const aptosDoEstagio = (num, role) => {
+          const col = role === 'insp' ? 'estagios_inspecao' : 'estagios';
+          const nomes = cadastroOperadores
+            .filter((o) => o.ativo && (o[col] || []).map(Number).includes(num))
+            .map((o) => `${o.nome}${o.codigo ? ` (#${o.codigo})` : ''}`);
+          return nomes.length ? nomes.join(', ') : 'nenhum colaborador cadastrado para este estágio';
+        };
+        const sugestaoAptos = (nums, role) => [...nums].sort((a, b) => a - b)
+          .map((n) => `${role === 'insp' ? `Inspeção ${n}i` : `Estágio ${n}`}: ${aptosDoEstagio(n, role)}`).join(' | ');
 
         if (ncOp.size > 0) {
           add(C1, 'Aptidão do operador ao estágio', 'nao_conforme', `Operador(es) executaram estágio para o qual não estão aptos: ${[...ncOp].join('; ')}.`);
@@ -5064,7 +5079,7 @@
             `Operador não autorizado no estágio: ${[...ncOp].join('; ')}. O colaborador não está apto (conforme cadastro) a executar este estágio.`,
             'Corrigir a OP (operador correto) ou, se a autorização mudou, atualizar o cadastro de operadores do estágio.',
             'ISO 13485 §6.2 (competência) + §7.5.1',
-            { estagios: [...ncOpEst] });
+            { estagios: [...ncOpEst], sugestaoCorreto: `Aptos a executar — ${sugestaoAptos(ncOpEstNum, 'op')}.` });
         }
         if (ncInsp.size > 0) {
           add(C1, 'Aptidão do inspetor à inspeção', 'nao_conforme', `Inspetor(es) fizeram inspeção para a qual não estão aptos: ${[...ncInsp].join('; ')}.`);
@@ -5072,7 +5087,7 @@
             `Inspetor não autorizado na inspeção: ${[...ncInsp].join('; ')}. O colaborador não está apto (conforme cadastro) a inspecionar este estágio.`,
             'Corrigir a OP (inspetor correto) ou, se a autorização mudou, atualizar o cadastro de inspetores do estágio.',
             'ISO 13485 §6.2 (competência) + §8.2.4',
-            { estagios: [...ncInspEst] });
+            { estagios: [...ncInspEst], sugestaoCorreto: `Aptos a inspecionar — ${sugestaoAptos(ncInspEstNum, 'insp')}.` });
         }
         if (cadastrosPendentes.length > 0) {
           const descr = cadastrosPendentes.map((p) => `${p.nome || '(sem nome)'}${p.codigo ? ' #' + p.codigo : ''} — ${p.role === 'insp' ? 'inspeção ' + p.estagio + 'i' : 'estágio ' + p.estagio}`).join('; ');
@@ -8263,7 +8278,7 @@ ${parecer.parecer_tecnico ? `
               doc,
               responsavel: responsavelPorSlot(slotKey),
               erro: desc,
-              correto: extrairCorreto(desc),
+              correto: ap.sugestao_correto || extrairCorreto(desc),
               norma: ap.referencia_normativa || '',
               correcao: sep.imediata || 'Corrigir o documento conforme o registro correto.',
               corretiva: [sep.causa, sugerirAcaoCorretiva(cat, reincidente)].filter(Boolean).join(' '),
