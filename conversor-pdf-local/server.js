@@ -20,6 +20,36 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+
+// ---------------------------------------------------------------------------
+// Windows: esconde as "janelinhas" de console (prompt piscando) dos processos
+// filhos disparados durante a montagem do pacote — Ghostscript (gswin64c) e
+// LibreOffice (soffice), chamados internamente pelas libs. Injeta
+// windowsHide:true quando a chamada não especificou. Sem efeito fora do Windows.
+if (process.platform === 'win32') {
+  const cp = require('child_process');
+  const patchar = (fn) => {
+    const orig = cp[fn];
+    if (typeof orig !== 'function') return;
+    cp[fn] = function (...args) {
+      let idxOpts = -1;
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a && typeof a === 'object' && !Array.isArray(a) && typeof a !== 'function') { idxOpts = i; break; }
+      }
+      if (idxOpts >= 0) {
+        if (args[idxOpts].windowsHide === undefined) args[idxOpts].windowsHide = true;
+      } else {
+        const opts = { windowsHide: true };
+        if (typeof args[args.length - 1] === 'function') args.splice(args.length - 1, 0, opts);
+        else args.push(opts);
+      }
+      return orig.apply(this, args);
+    };
+  };
+  ['spawn', 'exec', 'execFile', 'spawnSync', 'execSync', 'execFileSync'].forEach(patchar);
+}
+
 const libre = require('libreoffice-convert');
 const AdmZip = require('adm-zip');
 const { createClient } = require('@supabase/supabase-js');
@@ -267,7 +297,7 @@ async function otimizarPdf(inputBytes) {
       '-dPreserveAnnots=true',
       `-sOutputFile=${outPath}`,
       inPath,
-    ], { maxBuffer: 1024 * 1024 * 64 });
+    ], { maxBuffer: 1024 * 1024 * 64, windowsHide: true });
     return fs.readFileSync(outPath);
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
