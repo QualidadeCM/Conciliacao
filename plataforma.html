@@ -5084,6 +5084,22 @@
             'ISO 13485 §6.2 (competência)',
             { estagios: estRess });
         }
+        // Itens CONFORME — registram explicitamente que a conferência foi feita e que
+        // todos estavam aptos (quando não houve NC nem pendência para aquele papel).
+        const opsChecadas = (op?.operacoes || []).filter((o) => o.estagio_numero != null).length;
+        const inspChecadas = (op?.inspecoesDetalhe || []).filter((i) => i.estagio != null && (i.inspetor || '').trim()).length;
+        const pendOp = cadastrosPendentes.filter((p) => p.role === 'op').length;
+        const pendInsp = cadastrosPendentes.filter((p) => p.role === 'insp').length;
+        const estOp = [...new Set((op?.operacoes || []).filter((o) => o.estagio_numero != null).map((o) => o.estagio_numero))].sort((a, b) => a - b);
+        const estInsp = [...new Set((op?.inspecoesDetalhe || []).filter((i) => i.estagio != null && (i.inspetor || '').trim()).map((i) => i.estagio))].sort((a, b) => a - b);
+        if (opsChecadas > 0 && ncOp.size === 0 && pendOp === 0) {
+          add(C1, 'Aptidão do operador ao estágio', 'conforme',
+            `Conferência de operadores realizada: ${opsChecadas} registro(s) de operação cruzado(s) com o cadastro. Todos os operadores estão aptos aos estágios que executaram${estOp.length ? ` (estágios ${estOp.join(', ')})` : ''}.`);
+        }
+        if (inspChecadas > 0 && ncInsp.size === 0 && pendInsp === 0) {
+          add(C1, 'Aptidão do inspetor à inspeção', 'conforme',
+            `Conferência de inspetores realizada: ${inspChecadas} inspeção(ões) cruzada(s) com o cadastro. Todos os inspetores estão aptos às inspeções que realizaram${estInsp.length ? ` (${estInsp.map((n) => n + 'i').join(', ')})` : ''}.`);
+        }
       }
 
       // === Medições críticas — validação numérica contra faixa [Vlr_Min, Vlr_Max] ===
