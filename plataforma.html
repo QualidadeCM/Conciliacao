@@ -982,18 +982,27 @@
       const [filtroDocErro, setFiltroDocErro] = useState('todos'); // 'todos'|'op'|'rc'|'etx'|'eac'
       // Visão do gráfico "Problemas na OP": por estágio ou por inspeção do estágio.
       const [viewOpChart, setViewOpChart] = useState('estagio'); // 'estagio'|'inspecao'
+      // Limiares de reincidência (carregados de config_app; defaults calibrados).
+      const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
 
       useEffect(() => {
         const load = async () => {
           setLoading(true);
-          const [aRes, pRes] = await Promise.all([
+          const [aRes, pRes, cRes] = await Promise.all([
             supabase.from('analises')
               .select('id, status, modelo, numero_op, numero_serie, created_at, parecer_completo, analise_origem_id, doc_substituido, motivo_reanalise, tipo_reanalise')
               .order('created_at', { ascending: false }),
             supabase.from('produtos').select('id, modelo, codigo_sapiens, equipamento'),
+            supabase.from('config_app').select('chave, valor').in('chave', ['reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto']),
           ]);
           setAnalises(aRes.data || []);
           setCatalogoProdutos(pRes.data || []);
+          const cm = Object.fromEntries((cRes.data || []).map((r) => [r.chave, r.valor]));
+          setReincThr({
+            piso: parseInt(cm.reinc_piso, 10) || 3,
+            incidencia: (parseFloat(cm.reinc_incidencia_pct) || 3) / 100,
+            fator: parseFloat(cm.reinc_fator_salto) || 3,
+          });
           setLoading(false);
         };
         load();
@@ -1305,7 +1314,61 @@
         const soma2 = meses.slice(meses.length - meio).reduce((s, m) => s + porMes[m], 0);
         let direcao = 'estável';
         if (meio > 0) { if (soma2 > soma1 * 1.15) direcao = 'em alta'; else if (soma2 < soma1 * 0.85) direcao = 'em queda'; }
-        return { barItems, topErros, topEquip, total, media, direcao };
+
+        // === Reincidência por CHAVE (categoria + equipamento + alvo) no período ===
+        // Conta a análise ORIGINAL de cada lote (erros que motivaram a NC), no período
+        // escolhido, e compara com a base histórica (12 meses antes do início).
+        const baseIni = (() => { try { const d = new Date(de + 'T00:00:00'); d.setFullYear(d.getFullYear() - 1); return isoDia(d); } catch (e) { return de; } })();
+        const equipDe = (a) => {
+          const prod = a.parecer_completo?.produto || {};
+          const e = (prod.equipamento || prod.familia || '').trim();
+          if (e) return e;
+          const m = String(a.modelo || '').toLowerCase();
+          return equipByModelo.get(m) || equipBySapiens.get(m) || a.modelo || '—';
+        };
+        const keyPer = new Map(), keyBase = new Map(); // chave -> Set(analiseId)
+        const lotesPer = new Set(), lotesBase = new Set();
+        const chaveMeta = new Map();
+        for (const a of analises) {
+          if (a.analise_origem_id) continue; // só a análise ORIGINAL de cada lote
+          const d = (a.created_at || '').slice(0, 10); if (!d) continue;
+          const bucket = (d >= de && d <= ate) ? 'per' : ((d >= baseIni && d < de) ? 'base' : null);
+          if (!bucket) continue;
+          (bucket === 'per' ? lotesPer : lotesBase).add(a.id);
+          const aps = a.parecer_completo?.apontamentos || [];
+          const equip = equipDe(a);
+          const chavesA = new Set();
+          for (const ap of aps) {
+            if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
+            const cat = categoriaDoTexto((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
+            const alvo = extrairAlvoErro(ap.descricao, ap.documento_afetado);
+            const chave = chaveReincidencia(cat, equip, alvo);
+            chavesA.add(chave);
+            if (!chaveMeta.has(chave)) chaveMeta.set(chave, { cat, equip, alvo });
+          }
+          for (const chave of chavesA) {
+            const mp = bucket === 'per' ? keyPer : keyBase;
+            if (!mp.has(chave)) mp.set(chave, new Set());
+            mp.get(chave).add(a.id);
+          }
+        }
+        const Lper = lotesPer.size || 1, Lbase = lotesBase.size || 1;
+        const rank = { reincidente: 3, emergente: 2, pontual: 1 };
+        const reincLinhas = [...keyPer.keys()].map((chave) => {
+          const ocorr = (keyPer.get(chave) || new Set()).size;
+          const ocorrBase = (keyBase.get(chave) || new Set()).size;
+          const incid = ocorr / Lper;
+          const base = ocorrBase / Lbase;
+          const nivel = classificarNivelReinc(ocorr, incid, base, reincThr);
+          return { chave, meta: chaveMeta.get(chave) || {}, ocorr, ocorrBase, incid, base, nivel };
+        }).sort((a, b) => (rank[b.nivel] - rank[a.nivel]) || (b.incid - a.incid) || (b.ocorr - a.ocorr));
+        const reincResumo = {
+          reincidentes: reincLinhas.filter((r) => r.nivel === 'reincidente').length,
+          emergentes: reincLinhas.filter((r) => r.nivel === 'emergente').length,
+          lotesPer: lotesPer.size,
+        };
+
+        return { barItems, topErros, topEquip, total, media, direcao, reincLinhas, reincResumo };
       })();
 
       // Últimas 5 análises (filtradas) — só MAIS RECENTE por OP/série (mesma lógica do Histórico)
@@ -1741,9 +1804,9 @@
             <CardHeader>
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
-                  <CardTitle className="text-sm">Análise de tendência de correções</CardTitle>
+                  <CardTitle className="text-sm">Análise de tendência e reincidência</CardTitle>
                   <CardDescription>
-                    Evolução das correções no período escolhido — {tendencia.total} correção(ões) · média {tendencia.media.toFixed(1)}/mês · tendência <strong>{tendencia.direcao}</strong>.
+                    Evolução das correções no período escolhido — {tendencia.total} correção(ões) · média {tendencia.media.toFixed(1)}/mês · tendência <strong>{tendencia.direcao}</strong>. Reincidência por erro: <strong>{tendencia.reincResumo.reincidentes}</strong> reincidente(s), <strong>{tendencia.reincResumo.emergentes}</strong> em alta.
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap no-print">
@@ -1774,6 +1837,35 @@
                   </div>
                 </div>
               )}
+
+              {/* Reincidência por chave (categoria · equipamento · alvo) no período */}
+              <div className="mt-6 pt-4 border-t">
+                <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Reincidência no período · categoria × equipamento × alvo</div>
+                  <div className="text-xs text-muted-foreground">{tendencia.reincResumo.reincidentes} reincidente(s) · {tendencia.reincResumo.emergentes} em alta · {tendencia.reincResumo.lotesPer} lote(s) analisado(s) no período</div>
+                </div>
+                {tendencia.reincLinhas.length === 0 ? (
+                  <div className="text-sm text-muted-foreground py-4 text-center">Nenhum erro registrado no período selecionado.</div>
+                ) : (
+                  <div className="rounded-md border divide-y max-h-[360px] overflow-y-auto">
+                    {tendencia.reincLinhas.slice(0, 50).map((r) => (
+                      <div key={r.chave} className="flex items-center justify-between gap-3 p-2.5">
+                        <div className="min-w-0">
+                          <div className="text-sm flex items-center gap-2 flex-wrap">
+                            <span className="font-medium">{r.meta.cat}</span>
+                            <span className="text-muted-foreground text-xs truncate">· {r.meta.equip}{r.meta.alvo ? ' · ' + r.meta.alvo : ''}</span>
+                            {r.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                            {r.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground mt-0.5">{r.ocorr} ocorrência(s) · {(r.incid * 100).toFixed(1)}% dos lotes · base histórica {(r.base * 100).toFixed(1)}%</div>
+                        </div>
+                        <div className="shrink-0 text-lg font-semibold" style={{ color: r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : r.nivel === 'emergente' ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="text-[11px] text-muted-foreground mt-2"><strong>REINCIDENTE</strong> = recorrente no período (≥ piso de ocorrências e incidência acima do mínimo). <strong>EM ALTA</strong> = incidência acima da base histórica (indica que algo mudou). Ajuste os limiares em Configurações → Reincidência.</div>
+              </div>
             </CardContent>
           </Card>
 
