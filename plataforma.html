@@ -7187,6 +7187,25 @@
       for (const c of CATEGORIAS_ERRO_SLACK) if (c.re.test(txt || '')) return c.nome;
       return 'Outros';
     }
+    // Alvo específico do erro (acessório/campo) extraído da descrição — para a chave
+    // de reincidência ficar no nível acionável (ex.: "Cabeça de Câmera CM-SCAM (IPM0023)").
+    function extrairAlvoErro(desc, documento) {
+      const t = String(desc || '') + ' ' + String(documento || '');
+      let m = t.match(/([A-Za-zÀ-ÿ][\wÀ-ÿ .\/-]{2,40}?)\s*\(\s*([A-Z]{2,6}[-\s]?\d{2,6}|IPM\d+)\s*\)/);
+      if (m) return `${m[1].trim()} (${m[2].replace(/\s/g, '')})`;
+      m = t.match(/\b(IPM\d+|[A-Z]{2,6}\d{3,6})\b/);
+      if (m) return m[1];
+      return '';
+    }
+    // Chave de reincidência: categoria de erro + equipamento + alvo específico.
+    const chaveReincidencia = (cat, equip, alvo) => [cat || 'Outros', equip || '—', alvo || '—'].join(' · ');
+    // Classifica o nível de reincidência de uma chave a partir das métricas da janela
+    // de 30 dias e da base histórica. thr = { piso, incidencia (fração), fator }.
+    function classificarNivelReinc(ocorr30d, incid30d, base, thr) {
+      if (ocorr30d >= thr.piso && incid30d >= thr.incidencia) return 'reincidente';
+      if (ocorr30d >= 2 && ((base <= 0.01 && incid30d >= thr.incidencia) || (base > 0 && incid30d >= thr.fator * base))) return 'emergente';
+      return 'pontual';
+    }
     function sugerirAcaoCorretiva(cat, reincidente) {
       const base = {
         'Registro ANVISA': 'Verificar se o registro ANVISA está incorreto em outros lotes/produtos e corrigir na origem (cadastro/ficha mestre); avaliar ajustar o modelo da etiqueta.',
@@ -8277,15 +8296,56 @@ ${parecer.parecer_tecnico ? `
         if (!ncsAbertas.length) { toast.error('Não há não conformidades para enviar.'); return; }
         setEnviandoSlack(true);
         try {
-          // Reincidência: categorias de NC/ressalva já vistas em OUTRAS análises.
-          const outras = new Set();
+          // === Reincidência baseada no ERRO (categoria + equipamento + alvo) ===
+          // Janela móvel de 30 dias + comparação com a base histórica (~12 meses
+          // anteriores). Limiares configuráveis (config_app), com defaults calibrados.
+          const thr = { piso: 3, incidencia: 0.03, fator: 3 };
+          const reincMap = new Map();
+          let equipMapRef = new Map();
           try {
-            const { data } = await supabase.from('apontamentos').select('analise_id, descricao, documento_afetado, severidade').in('severidade', ['nao_conforme', 'ressalva']).limit(3000);
-            for (const ap of (data || [])) {
-              if (analiseId && ap.analise_id === analiseId) continue; // ignora a própria análise
-              outras.add(categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || '')));
+            const { data: cfg } = await supabase.from('config_app').select('chave, valor').in('chave', ['reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto']);
+            const cm = Object.fromEntries((cfg || []).map((r) => [r.chave, r.valor]));
+            if (cm.reinc_piso) thr.piso = parseInt(cm.reinc_piso, 10) || thr.piso;
+            if (cm.reinc_incidencia_pct) thr.incidencia = (parseFloat(cm.reinc_incidencia_pct) || 3) / 100;
+            if (cm.reinc_fator_salto) thr.fator = parseFloat(cm.reinc_fator_salto) || thr.fator;
+          } catch (e) { /* usa defaults */ }
+          try {
+            const agora = Date.now();
+            const D30 = 30 * 864e5, DBASE = 395 * 864e5; // base: de -395d a -30d
+            const [mRes, aRes, pRes] = await Promise.all([
+              supabase.from('analises').select('id, created_at, modelo, numero_op, numero_serie').order('created_at', { ascending: false }).limit(6000),
+              supabase.from('apontamentos').select('analise_id, descricao, documento_afetado, severidade').in('severidade', ['nao_conforme', 'ressalva']).limit(9000),
+              supabase.from('produtos').select('modelo, equipamento'),
+            ]);
+            equipMapRef = new Map((pRes.data || []).map((p) => [String(p.modelo || '').toLowerCase(), p.equipamento]));
+            const metaById = new Map((mRes.data || []).map((m) => [m.id, m]));
+            const idade = (iso) => agora - new Date(iso).getTime();
+            const lotes30 = new Set(), lotesBase = new Set();
+            for (const m of (mRes.data || [])) {
+              const a = idade(m.created_at); const lote = `${m.numero_op || '?'}|${m.numero_serie || '?'}`;
+              if (a <= D30) lotes30.add(lote); else if (a <= DBASE) lotesBase.add(lote);
+            }
+            const key30 = new Map(), keyBase = new Map();
+            for (const ap of (aRes.data || [])) {
+              const m = metaById.get(ap.analise_id); if (!m) continue;
+              const a = idade(m.created_at); if (a > DBASE) continue;
+              const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
+              const equip = equipMapRef.get(String(m.modelo || '').toLowerCase()) || m.modelo || '—';
+              const chave = chaveReincidencia(cat, equip, extrairAlvoErro(ap.descricao, ap.documento_afetado));
+              const alvoMap = a <= D30 ? key30 : keyBase;
+              if (!alvoMap.has(chave)) alvoMap.set(chave, new Set());
+              alvoMap.get(chave).add(ap.analise_id);
+            }
+            const L30 = lotes30.size || 1, LB = lotesBase.size || 1;
+            for (const chave of new Set([...key30.keys(), ...keyBase.keys()])) {
+              const ocorr30d = (key30.get(chave) || new Set()).size;
+              const ocorrBase = (keyBase.get(chave) || new Set()).size;
+              const incid30d = ocorr30d / L30;
+              const base = ocorrBase / LB;
+              reincMap.set(chave, { ocorr30d, ocorrBase, incid30d, base, nivel: classificarNivelReinc(ocorr30d, incid30d, base, thr), L30, LB });
             }
           } catch (e) { /* reincidência é best-effort */ }
+          const equipAtual = parecer.produto?.equipamento || parecer.produto?.familia || equipMapRef.get(String(parecer.produto?.modelo || '').toLowerCase()) || parecer.produto?.modelo || '—';
           // Tenta extrair o REGISTRO CORRETO (valor de referência) da descrição — a
           // referência costuma vir após "RC", "ficha", "esperado", "correto", "deveria".
           const extrairCorreto = (desc) => {
@@ -8301,7 +8361,10 @@ ${parecer.parecer_tecnico ? `
             const { slotKey, nome } = mapApontamento(ap);
             const doc = (slotKey === 'etiqueta_acessorio' && nome) ? `Etiqueta de Acessório (${nome})` : (labelSlot[slotKey] || ap.documento_afetado || 'Documento');
             const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
-            const reincidente = outras.has(cat);
+            const alvo = extrairAlvoErro(ap.descricao, ap.documento_afetado);
+            const chave = chaveReincidencia(cat, equipAtual, alvo);
+            const info = reincMap.get(chave) || { nivel: 'pontual', ocorr30d: 0, incid30d: 0, base: 0 };
+            const reincidente = info.nivel !== 'pontual';
             const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
             const rec = String(ap.recomendacao || '').replace(/\s+/g, ' ').trim();
             const sep = separarRecomendacao(rec);
@@ -8315,6 +8378,9 @@ ${parecer.parecer_tecnico ? `
               correcao: sep.imediata || 'Corrigir o documento conforme o registro correto.',
               corretiva: [sep.causa, sugerirAcaoCorretiva(cat, reincidente)].filter(Boolean).join(' '),
               reincidente,
+              nivel: info.nivel,
+              reincChave: chave,
+              reincTexto: `${info.ocorr30d} em 30d · ${(info.incid30d * 100).toFixed(1)}% dos lotes · base ${(info.base * 100).toFixed(1)}%`,
             };
           });
           setSlackModal({ itens });
@@ -8332,7 +8398,7 @@ ${parecer.parecer_tecnico ? `
         try {
           const blocos = itens.map((it) => {
             const linhas = [
-              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${it.reincidente ? '  _(reincidente)_' : ''}`,
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${it.nivel === 'reincidente' ? '  _(reincidente: ' + it.reincTexto + ')_' : it.nivel === 'emergente' ? '  _(tendência emergente: ' + it.reincTexto + ')_' : ''}`,
               `   *O que está errado:* ${it.erro}`,
             ];
             if (it.correto) linhas.push(`   *Registro correto:* ${it.correto}`);
@@ -8350,7 +8416,7 @@ ${parecer.parecer_tecnico ? `
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
           const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }) });
           if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.error || `HTTP ${resp.status}`); }
-          const resumo = itens.map((it) => `${it.codigo} [${it.doc}]: ${it.erro}${it.correto ? ' | Correto: ' + it.correto : ''} | Correção: ${it.correcao} | Corretiva: ${it.corretiva}${it.reincidente ? ' (reincidente)' : ''}`).join(' || ');
+          const resumo = itens.map((it) => `${it.codigo} [${it.doc}]: ${it.erro}${it.correto ? ' | Correto: ' + it.correto : ''} | Correção: ${it.correcao} | Corretiva: ${it.corretiva}${it.nivel && it.nivel !== 'pontual' ? ' (' + it.nivel + ': ' + it.reincTexto + ')' : ''}`).join(' || ');
           await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} (${itens.length} NC). ${resumo}`);
           toast.success('Alerta enviado ao Slack.');
           setSlackModal(null);
@@ -9035,8 +9101,14 @@ ${parecer.parecer_tecnico ? `
                       <span className="font-semibold">{it.codigo}</span>
                       <span className="text-muted-foreground">· {it.doc}</span>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
-                      {it.reincidente && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                      {it.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                      {it.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>TENDÊNCIA EMERGENTE</span>}
                     </div>
+                    {it.nivel !== 'pontual' && (
+                      <div className="text-[11px] text-muted-foreground -mt-1">
+                        {it.reincChave} — <strong>{it.reincTexto}</strong>. {it.nivel === 'emergente' ? 'Subiu acima do histórico — investigar o que mudou (falha humana ou de sistema).' : 'Recorrente no período — priorizar análise de causa raiz e ação corretiva.'}
+                      </div>
+                    )}
                     <div className="text-xs"><span className="font-semibold text-muted-foreground">O que está errado:</span> {it.erro}</div>
                     <div>
                       <Label className="text-xs">Registro correto (o que deveria ser)</Label>
@@ -13149,6 +13221,11 @@ ${parecer.parecer_tecnico ? `
       const [porMes, setPorMes] = useState(() => localStorage.getItem('confiance_pasta_por_mes') === 'true');
       const [salvando, setSalvando] = useState(false);
       const [testando, setTestando] = useState(false);
+      // Limiares de reincidência (janela de 30 dias). Defaults calibrados p/ 100–300 OPs/mês.
+      const [reincPiso, setReincPiso] = useState('3');
+      const [reincPct, setReincPct] = useState('3');
+      const [reincFator, setReincFator] = useState('3');
+      const [salvandoReinc, setSalvandoReinc] = useState(false);
       const MESES_PT = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
 
       // Carrega a configuração COMPARTILHADA do banco (vale para todos os usuários).
@@ -13156,11 +13233,14 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
               if (map.pasta_por_mes != null) { const b = map.pasta_por_mes === 'true'; setPorMes(b); localStorage.setItem('confiance_pasta_por_mes', b ? 'true' : 'false'); }
+              if (map.reinc_piso != null && map.reinc_piso !== '') setReincPiso(String(map.reinc_piso));
+              if (map.reinc_incidencia_pct != null && map.reinc_incidencia_pct !== '') setReincPct(String(map.reinc_incidencia_pct));
+              if (map.reinc_fator_salto != null && map.reinc_fator_salto !== '') setReincFator(String(map.reinc_fator_salto));
             }
           } catch (e) { /* segue com o cache local */ }
         })();
@@ -13201,6 +13281,28 @@ ${parecer.parecer_tecnico ? `
         } finally { setTestando(false); }
       };
 
+      const salvarReinc = async () => {
+        setSalvandoReinc(true);
+        try {
+          const autor = perfil?.nome_completo || perfil?.email || null;
+          const agora = new Date().toISOString();
+          const piso = String(Math.max(1, parseInt(reincPiso, 10) || 3));
+          const pct = String(Math.max(0, parseFloat(reincPct) || 3));
+          const fator = String(Math.max(1, parseFloat(reincFator) || 3));
+          const { error } = await supabase.from('config_app').upsert([
+            { chave: 'reinc_piso', valor: piso, updated_at: agora, updated_by: autor },
+            { chave: 'reinc_incidencia_pct', valor: pct, updated_at: agora, updated_by: autor },
+            { chave: 'reinc_fator_salto', valor: fator, updated_at: agora, updated_by: autor },
+          ], { onConflict: 'chave' });
+          if (error) throw error;
+          setReincPiso(piso); setReincPct(pct); setReincFator(fator);
+          registrarLog(perfil, 'editar_config', 'config', 'reincidencia', `${autor || 'Usuário'} alterou os limiares de reincidência (piso ${piso}, incidência ${pct}%, fator ${fator}x)`);
+          toast.success('Limiares de reincidência salvos.');
+        } catch (e) {
+          toast.error('Erro ao salvar limiares: ' + (e?.message || e));
+        } finally { setSalvandoReinc(false); }
+      };
+
       return (
         <div>
           <PageHeader title="Configurações" description="Preferências do sistema de conciliação da produção." />
@@ -13229,6 +13331,34 @@ ${parecer.parecer_tecnico ? `
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">Serviço de conversão/salvamento: <code>{CONVERSAO_PDF_LOCAL || '(não configurado)'}</code></p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Icon name="alertTriangle" className="h-5 w-5 text-accent" />Reincidência (janela de 30 dias)</CardTitle>
+                <CardDescription>Como o alerta classifica um erro como reincidente ou tendência emergente. A chave é categoria do erro + equipamento + alvo (ex.: "Nº de série · câmera"). Incidência = ocorrências ÷ lotes analisados no período; a base histórica cobre ~12 meses anteriores.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <Label>Piso de ocorrências (30d)</Label>
+                    <Input type="number" min="1" value={reincPiso} onChange={(e) => setReincPiso(e.target.value)} disabled={!podeEditar} />
+                    <p className="text-xs text-muted-foreground mt-1">Mínimo de ocorrências para virar "reincidente".</p>
+                  </div>
+                  <div>
+                    <Label>Incidência mínima (%)</Label>
+                    <Input type="number" min="0" step="0.5" value={reincPct} onChange={(e) => setReincPct(e.target.value)} disabled={!podeEditar} />
+                    <p className="text-xs text-muted-foreground mt-1">% sobre os lotes analisados nos 30 dias.</p>
+                  </div>
+                  <div>
+                    <Label>Fator de salto vs. histórico</Label>
+                    <Input type="number" min="1" step="0.5" value={reincFator} onChange={(e) => setReincFator(e.target.value)} disabled={!podeEditar} />
+                    <p className="text-xs text-muted-foreground mt-1">Quantas vezes acima da base para "tendência emergente".</p>
+                  </div>
+                </div>
+                <Button onClick={salvarReinc} disabled={salvandoReinc || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar limiares</Button>
+                <p className="text-xs text-muted-foreground">Regra: <strong>reincidente</strong> = ≥ piso de ocorrências <em>e</em> incidência ≥ mínimo. <strong>Tendência emergente</strong> = incidência ≥ fator × base histórica (ou base quase zero e incidência ≥ mínimo), com ao menos 2 ocorrências. Abaixo disso, é pontual (só correção imediata).</p>
               </CardContent>
             </Card>
 
