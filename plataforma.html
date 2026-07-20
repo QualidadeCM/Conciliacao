@@ -1459,6 +1459,14 @@
         return { barItems, topErros, topEquip, total, media, direcao, reincLinhas, reincResumo };
       })();
 
+      // Os níveis (pontual/possível/reincidente/em alta) só valem para janela de até ~30
+      // dias (foi para isso que os limiares foram calibrados). Em períodos maiores, a
+      // seção de reincidência fica só para CONSULTA — mostra números, sem nível nem alerta.
+      const reincJanelaCurta = (() => {
+        try { return (new Date(trendAte + 'T00:00:00') - new Date(trendDe + 'T00:00:00')) / 864e5 <= 31; }
+        catch (e) { return true; }
+      })();
+
       // === Tratativa de reincidência: abre card editável e envia alerta ao Slack ===
       const nivelLabelReinc = { reincidente: 'REINCIDENTE', emergente: 'EM ALTA', possivel: 'POSSÍVEL REINCIDENTE' };
       const abrirTratativaReinc = (r) => {
@@ -1958,7 +1966,11 @@
               <div className="mt-6 pt-4 border-t">
                 <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                   <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Reincidência no período · categoria × equipamento × alvo <span className="font-normal normal-case">(erros que motivaram correção)</span></div>
-                  <span className="text-xs text-muted-foreground">{tendencia.reincResumo.reincidentes} reincidente(s) · {tendencia.reincResumo.emergentes} em alta · {tendencia.reincResumo.possiveis} possível(is) · {tendencia.reincResumo.lotesPer} lote(s)</span>
+                  <span className="text-xs text-muted-foreground">
+                    {reincJanelaCurta
+                      ? `${tendencia.reincResumo.reincidentes} reincidente(s) · ${tendencia.reincResumo.emergentes} em alta · ${tendencia.reincResumo.possiveis} possível(is) · ${tendencia.reincResumo.lotesPer} lote(s)`
+                      : `Consulta — os níveis valem só para janelas de até 30 dias · ${tendencia.reincResumo.lotesPer} lote(s)`}
+                  </span>
                 </div>
                 {tendencia.reincLinhas.length === 0 ? (
                   <div className="text-sm text-muted-foreground py-4 text-center">Nenhum erro registrado no período selecionado.</div>
@@ -1970,31 +1982,39 @@
                           <div className="text-sm flex items-center gap-2 flex-wrap">
                             <span className="font-medium">{r.meta.cat}</span>
                             <span className="text-muted-foreground text-xs truncate">· {r.meta.equip}{r.meta.alvo ? ' · ' + r.meta.alvo : ''}</span>
-                            {r.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
-                            {r.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
-                            {r.nivel === 'possivel' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.10)', color: 'hsl(var(--status-ressalva))' }}>POSSÍVEL</span>}
+                            {reincJanelaCurta && r.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                            {reincJanelaCurta && r.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
+                            {reincJanelaCurta && r.nivel === 'possivel' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.10)', color: 'hsl(var(--status-ressalva))' }}>POSSÍVEL</span>}
                           </div>
                           <div className="text-xs mt-0.5" style={{ color: 'hsl(var(--foreground))' }}>{descProblema(r.meta.cat)}</div>
                           <div className="text-[11px] text-muted-foreground mt-0.5">{r.ocorr} ocorrência(s) · {(r.incid * 100).toFixed(1)}% dos lotes · base histórica {(r.base * 100).toFixed(1)}%</div>
                         </div>
                         <div className="shrink-0 flex items-center gap-3">
-                          <span className="text-lg font-semibold" style={{ color: r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : (r.nivel === 'emergente' || r.nivel === 'possivel') ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</span>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="no-print h-7 px-2"
-                            disabled={r.nivel === 'pontual'}
-                            onClick={() => abrirTratativaReinc(r)}
-                            title={r.nivel === 'pontual' ? 'Disponível apenas para possível reincidente, reincidente ou em alta' : 'Abrir tratativa e enviar alerta ao Slack (PCP/Almoxarifado)'}
-                          >
-                            <Icon name="bell" className="h-3.5 w-3.5" />Alertar
-                          </Button>
+                          <span className="text-lg font-semibold" style={{ color: reincJanelaCurta && r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : reincJanelaCurta && (r.nivel === 'emergente' || r.nivel === 'possivel') ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</span>
+                          {reincJanelaCurta && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="no-print h-7 px-2"
+                              disabled={r.nivel === 'pontual'}
+                              onClick={() => abrirTratativaReinc(r)}
+                              title={r.nivel === 'pontual' ? 'Disponível apenas para possível reincidente, reincidente ou em alta' : 'Abrir tratativa e enviar alerta ao Slack (PCP/Almoxarifado)'}
+                            >
+                              <Icon name="bell" className="h-3.5 w-3.5" />Alertar
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
-                <div className="text-[11px] text-muted-foreground mt-2"><strong>REINCIDENTE</strong> = recorrente (≥ piso de ocorrências <em>e</em> incidência acima do mínimo). <strong>POSSÍVEL</strong> = só um dos gatilhos atingido (alerta precoce). <strong>EM ALTA</strong> = incidência acima da base histórica (algo mudou). Use "Relatório de causa raiz" para gerar a tratativa das chaves não pontuais. Ajuste os limiares em Configurações → Reincidência.</div>
+                <div className="text-[11px] text-muted-foreground mt-2">
+                  {reincJanelaCurta ? (
+                    <><strong>REINCIDENTE</strong> = recorrente (≥ piso de ocorrências <em>e</em> incidência acima do mínimo). <strong>POSSÍVEL</strong> = só um dos gatilhos atingido (alerta precoce). <strong>EM ALTA</strong> = incidência acima da base histórica (algo mudou). Clique em <strong>Alertar</strong> para tratar e avisar no Slack. Ajuste os limiares em Configurações → Reincidência.</>
+                  ) : (
+                    <>Período maior que 30 dias — modo <strong>consulta</strong>: mostra as ocorrências e a incidência, mas sem classificar em níveis nem alertar (os níveis foram calibrados para a janela de 30 dias). Use <strong>Última semana</strong> ou <strong>Últimos 30 dias</strong> para tratar/alertar.</>
+                  )}
+                </div>
               </div>
             </CardContent>
           </Card>
