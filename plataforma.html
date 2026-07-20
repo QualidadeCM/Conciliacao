@@ -997,6 +997,8 @@
       const [viewOpChart, setViewOpChart] = useState('estagio'); // 'estagio'|'inspecao'
       // Limiares de reincidência (carregados de config_app; defaults calibrados).
       const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
+      // Aba interna do Dashboard: gráficos | correções | tendência.
+      const [dashTab, setDashTab] = useState('graficos');
 
       useEffect(() => {
         const load = async () => {
@@ -1561,6 +1563,20 @@
             </CardContent>
           </Card>
 
+          {/* ===== Abas do Dashboard ===== */}
+          <div className="flex items-center gap-1 mb-6 border-b no-print flex-wrap">
+            {[['graficos', 'Gráficos'], ['correcoes', 'Histórico de correções'], ['tendencia', 'Tendência e reincidência']].map(([k, lbl]) => (
+              <button
+                key={k}
+                onClick={() => setDashTab(k)}
+                className={cn('text-sm px-4 py-2 -mb-px border-b-2 transition-colors', dashTab === k ? 'border-accent text-accent font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground')}
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+
+          {dashTab === 'graficos' && (<>
           {/* ===== Cards de métrica principais ===== */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <MetricCard icon="dashboard" label="Total de análises" value={loading ? '…' : totalOriginais} accent="default" hint="Lotes únicos no período (cada lote conta uma vez pelo estado mais recente)" />
@@ -1748,9 +1764,12 @@
               </CardContent>
             </Card>
           </div>
+          </>)}
 
           {/* ===== Histórico de correções ===== */}
-          {correcoesDetalhe.length > 0 && (
+          {dashTab === 'correcoes' && (correcoesDetalhe.length === 0 ? (
+            <Card className="mb-6"><CardContent className="py-10 text-center text-sm text-muted-foreground">Nenhuma correção registrada no período selecionado.</CardContent></Card>
+          ) : (
             <Card className="mb-6">
               <CardHeader>
                 <div className="flex items-start justify-between gap-3">
@@ -1810,9 +1829,10 @@
                 </div>
               </CardContent>
             </Card>
-          )}
+          ))}
 
           {/* ===== Análise de tendência de correções (período personalizado) ===== */}
+          {dashTab === 'tendencia' && (
           <Card className="mt-6" id="chart-tendencia">
             <CardHeader>
               <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -1894,8 +1914,10 @@
               </div>
             </CardContent>
           </Card>
+          )}
 
           {/* ===== Últimas análises ===== */}
+          {dashTab === 'graficos' && (
           <Card>
             <CardHeader>
               <CardTitle>Últimas análises</CardTitle>
@@ -1949,6 +1971,7 @@
               )}
             </CardContent>
           </Card>
+          )}
         </div>
       );
     }
@@ -4304,7 +4327,7 @@
       return sugestoes;
     }
 
-    function analisarConciliacao({ docs, produto, identificacao, corpus, formApprovalDate, opReprocessoAnexado = false, rncAnexado = false, operadores = [], operacoesLivres = [] }) {
+    function analisarConciliacao({ docs, produto, identificacao, corpus, formApprovalDate, opReprocessoAnexado = false, rncAnexado = false, operadores = [] }) {
       const op = docs.op, et = docs.etiqueta, rc = docs.rc;
       const etAcs = docs.etAcessorios || [];
       // Colaboradores cadastrados por estágio (para a conferência de aptidão). Lista
@@ -4312,11 +4335,6 @@
       // ainda estar ativo. Coletor de "não cadastrados" para a re-análise por cadastro.
       const cadastroOperadores = Array.isArray(operadores) ? operadores : [];
       const cadastrosPendentes = [];
-      // Exceções "operação livre" do equipamento deste lote (dispensam aptidão do estágio).
-      const _normEquip = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const _equipLote = _normEquip(produto?.equipamento || produto?.familia || '');
-      const operacoesLivresEquip = (Array.isArray(operacoesLivres) ? operacoesLivres : [])
-        .filter((x) => x.ativo !== false && _normEquip(x.equipamento) === _equipLote && _equipLote);
 
       // FORM-GQ-0047 — desde a migração para template embutido (Rev. 8 oficial),
       // a plataforma SEMPRE gera o FORM preenchido a partir do template + Ficha
@@ -5165,18 +5183,6 @@
 
         const ncOp = new Set(), ncInsp = new Set(), ncOpEst = new Set(), ncInspEst = new Set();
         const ncOpEstNum = new Set(), ncInspEstNum = new Set();
-        const ncOpOperacoes = []; // operações apontadas (para marcar como livre a partir da NC)
-
-        // Uma operação é "livre" quando há exceção do equipamento casando estágio +
-        // (número da operação OU descrição). Número é o casamento primário.
-        const ehOperacaoLivre = (est, numero, desc) => {
-          const num = String(numero || '').trim();
-          const d = _normEquip(desc);
-          return operacoesLivresEquip.some((x) => Number(x.estagio) === Number(est) && (
-            (x.operacao_numero != null && String(x.operacao_numero).trim() !== '' && String(x.operacao_numero).trim() === num) ||
-            (x.operacao_desc && _normEquip(x.operacao_desc) === d && d)
-          ));
-        };
 
         for (const o of (op?.operacoes || [])) {
           const est = o.estagio_numero; if (est == null) continue;
@@ -5187,13 +5193,9 @@
             if (!jaPendente(nome, est, 'op')) cadastrosPendentes.push({ nome, codigo: cod || null, estagio: est, role: 'op' });
             continue;
           }
-          // Exceção: operação livre → dispensa a aptidão do estágio.
-          if (ehOperacaoLivre(est, o.operacao_numero, o.operacao_desc)) continue;
           if (!temEstagio(cadastrado, est, 'op')) {
             ncOp.add(`${nome || cadastrado.nome} (Estágio ${est}, Op ${o.operacao_numero} ${o.operacao_desc || ''})`.trim());
             ncOpEst.add(nomeEstagio(est)); ncOpEstNum.add(est);
-            if (!ncOpOperacoes.some((x) => Number(x.estagio) === Number(est) && String(x.numero) === String(o.operacao_numero)))
-              ncOpOperacoes.push({ estagio: est, numero: o.operacao_numero, desc: o.operacao_desc || '', operador: nome || cadastrado.nome });
           }
         }
         for (const i of (op?.inspecoesDetalhe || [])) {
@@ -5224,7 +5226,7 @@
             `Operador fora da aptidão cadastrada no estágio: ${[...ncOp].join('; ')}. O colaborador não consta apto (conforme cadastro) a executar este estágio.`,
             'Justificar se o colaborador é treinado/instruído para esta etapa; se a operação é flexível, marcá-la como "operação livre" do equipamento; se a autorização é permanente, atualizar o cadastro do estágio; se foi engano, corrigir a OP.',
             'ISO 13485 §6.2 (competência) + §7.5.1',
-            { estagios: [...ncOpEst], sugestaoCorreto: `Aptos a executar — ${sugestaoAptos(ncOpEstNum, 'op')}.`, operacoesFlag: ncOpOperacoes, equipamento: produto?.equipamento || produto?.familia || '' });
+            { estagios: [...ncOpEst], sugestaoCorreto: `Aptos a executar — ${sugestaoAptos(ncOpEstNum, 'op')}.` });
         }
         if (ncInsp.size > 0) {
           add(C1, 'Aptidão do inspetor à inspeção', 'ressalva', `Inspetor(es) fizeram inspeção fora da aptidão cadastrada: ${[...ncInsp].join('; ')}. Conforme se justificado (colaborador treinado/instruído para a inspeção).`);
@@ -5911,18 +5913,13 @@
       // Carrega o cadastro de operadores (para a conferência de aptidão por estágio).
       // Best-effort: se falhar/estiver vazio, a conferência é simplesmente pulada.
       let operadores = [];
-      let operacoesLivres = [];
       try {
         const { data: opsData } = await supabase.from('operadores').select('nome, codigo, apelidos, estagios, estagios_inspecao, ativo');
         operadores = opsData || [];
       } catch (e) { console.warn('Falha ao carregar operadores para a conferência:', e?.message || e); }
-      try {
-        const { data: livresData } = await supabase.from('operacoes_livres').select('equipamento, estagio, operacao_numero, operacao_desc, ativo');
-        operacoesLivres = livresData || [];
-      } catch (e) { /* tabela opcional — segue sem exceções */ }
       const parecer = analisarConciliacao({
         docs, produto, identificacao, corpus, formApprovalDate,
-        opReprocessoAnexado, rncAnexado, operadores, operacoesLivres,
+        opReprocessoAnexado, rncAnexado, operadores,
       });
 
       // 4) Salvar no Supabase — limpando campos voláteis (Uint8Array não serializa em jsonb)
@@ -8609,52 +8606,6 @@ ${parecer.parecer_tecnico ? `
       };
       useEffect(() => { if (!reanalisando) setCadastrando(false); }, [parecer]);
 
-      // Operações apontadas por aptidão de operador (candidatas a "operação livre").
-      const opsAptidaoFlag = [];
-      let equipFlag = '';
-      for (const ap of (parecer.apontamentos || [])) {
-        if (Array.isArray(ap.operacoes_flag) && ap.operacoes_flag.length) {
-          equipFlag = ap.equipamento || equipFlag;
-          for (const o of ap.operacoes_flag) {
-            if (!opsAptidaoFlag.some((x) => Number(x.estagio) === Number(o.estagio) && String(x.numero) === String(o.numero)))
-              opsAptidaoFlag.push({ estagio: o.estagio, numero: o.numero, desc: o.desc || '', operador: o.operador || '', equip: ap.equipamento || '' });
-          }
-        }
-      }
-      const [opsLivresSel, setOpsLivresSel] = useState(() => new Set());
-      const [marcandoLivre, setMarcandoLivre] = useState(false);
-      useEffect(() => {
-        setOpsLivresSel(new Set(opsAptidaoFlag.map((o) => `${o.estagio}|${o.numero}`)));
-        if (!reanalisando) setMarcandoLivre(false);
-      }, [parecer]);
-      const toggleOpLivre = (key) => setOpsLivresSel((prev) => { const s = new Set(prev); s.has(key) ? s.delete(key) : s.add(key); return s; });
-
-      // Marca as operações selecionadas como "livres" para o equipamento e refaz a
-      // análise (não conta como correção — vira conforme).
-      const marcarOpsLivresERefazer = async () => {
-        if (!(isAdmin || can('config_editar'))) { toast.error('Sem permissão. Peça a um administrador ou use Configurações → Operações livres.'); return; }
-        const selec = opsAptidaoFlag.filter((o) => opsLivresSel.has(`${o.estagio}|${o.numero}`));
-        if (selec.length === 0) { toast.error('Selecione ao menos uma operação.'); return; }
-        setMarcandoLivre(true);
-        try {
-          const autorNome = usuarioAtual?.nome_completo || usuarioAtual?.email || null;
-          for (const o of selec) {
-            const equip = o.equip || equipFlag;
-            if (!equip) continue;
-            const { data: existe } = await supabase.from('operacoes_livres').select('id')
-              .eq('equipamento', equip).eq('estagio', o.estagio).eq('operacao_numero', String(o.numero)).limit(1);
-            if (!existe || existe.length === 0) {
-              await supabase.from('operacoes_livres').insert({ equipamento: equip, estagio: o.estagio, operacao_numero: String(o.numero), operacao_desc: o.desc || null, ativo: true, updated_by: autorNome });
-            }
-            await registrarLog(usuarioAtual, 'marcar_operacao_livre', 'operacao_livre', `${equip} · Est.${o.estagio}/Op ${o.numero}`, `${autorNome || 'Usuário'} marcou a operação "${o.desc || o.numero}" (Estágio ${o.estagio}) como livre para ${equip}`);
-          }
-          await handleReanalisar({ modoCadastro: true, motivoCadastro: 'Operação(ões) marcada(s) como livre para o equipamento — a documentação do lote estava conforme.' });
-        } catch (e) {
-          toast.error('Erro ao marcar operação livre: ' + (e?.message || e));
-          setMarcandoLivre(false);
-        }
-      };
-
       const abrirAtualizarFicha = async () => {
         if (!can('cadastro_fichas')) { toast.error('Você não tem permissão para editar fichas mestres.'); return; }
         setCarregandoFicha(true);
@@ -8718,32 +8669,6 @@ ${parecer.parecer_tecnico ? `
                   </Button>
                 )}
               </div>
-            </div>
-          )}
-
-          {/* Banner: operações apontadas por aptidão → marcar como operação livre */}
-          {opsAptidaoFlag.length > 0 && (
-            <div className="no-print mb-4 rounded-md border-l-4 px-4 py-3" style={{ borderLeftColor: 'hsl(var(--accent))', backgroundColor: 'hsl(var(--accent) / 0.08)' }}>
-              <div className="text-sm font-semibold flex items-center gap-2"><Icon name="alertTriangle" className="h-4 w-4" style={{ color: 'hsl(var(--accent))' }} />Operação flexível? Marque como "operação livre" do equipamento{equipFlag ? ` (${equipFlag})` : ''}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5 mb-2">Selecione as operações que podem ser executadas por colaboradores fora da aptidão do estágio. Elas deixam de gerar NC neste e em futuros lotes deste equipamento; a análise é refeita e não conta como correção.</div>
-              <div className="space-y-1">
-                {opsAptidaoFlag.map((o) => {
-                  const key = `${o.estagio}|${o.numero}`;
-                  return (
-                    <label key={key} className="flex items-center gap-2 text-xs cursor-pointer">
-                      <input type="checkbox" checked={opsLivresSel.has(key)} onChange={() => toggleOpLivre(key)} className="h-3.5 w-3.5" />
-                      <span><strong>Estágio {o.estagio} · Op {o.numero}</strong> {o.desc}{o.operador ? ` — executada por ${o.operador}` : ''}</span>
-                    </label>
-                  );
-                })}
-              </div>
-              {(isAdmin || can('config_editar')) && (
-                <div className="mt-2">
-                  <Button variant="outline" size="sm" onClick={marcarOpsLivresERefazer} disabled={marcandoLivre || reanalisando || !equipFlag} title={equipFlag ? 'Registra a exceção do equipamento e refaz a análise.' : 'Equipamento não identificado.'}>
-                    {(marcandoLivre || reanalisando) ? (<><Icon name="loader" className="animate-spin" />Marcando e refazendo…</>) : (<><Icon name="check" />Marcar como operação livre e refazer</>)}
-                  </Button>
-                </div>
-              )}
             </div>
           )}
 
@@ -13510,8 +13435,6 @@ ${parecer.parecer_tecnico ? `
             </Card>
 
             <GestaoOperadores perfil={perfil} podeEditar={podeEditar} />
-
-            <GestaoOperacoesLivres perfil={perfil} podeEditar={podeEditar} />
 
             {podeGerenciarUsuarios && <GestaoUsuarios perfil={perfil} />}
           </div>
