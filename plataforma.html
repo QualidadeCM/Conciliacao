@@ -1179,9 +1179,15 @@
         { nome: 'Validade',            re: /validade/i },
         { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
         { nome: 'Acessório',           re: /acess[óo]rio/i },
-        { nome: 'Operador/estágio',    re: /operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|n[ãa]o cadastrado|aptid[ãa]o (do|ao)/i },
+        { nome: 'Componente/RC',       re: /\bcomponente|rela[çc][ãa]o de componentes|\brc\b/i },
+        { nome: 'Reprovação em inspeção', re: /reprova/i },
+        { nome: 'Cópia/revisão do FORM', re: /c[óo]pia controlada|revis[ãa]o do form/i },
+        { nome: 'Derivação/identificação do produto', re: /deriva[çc][ãa]o|identificar o produto|produto a partir dos documentos|cat[áa]logo de produtos/i },
+        { nome: 'Documento ausente/ilegível', re: /ausente|n[ãa]o anexad|n[ãa]o p[ôo]de ser parse|n[ãa]o parse[áa]vel|n[ãa]o extra[íi]d/i },
         { nome: 'Inspeção/Medição',   re: /inspe[çc][ãa]o|medi[çc]/i },
       ];
+      // Aptidão de operador/inspetor não é mais tratada como NC — excluída dos gráficos de erro.
+      const ehErroOperador = (ap) => /aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test((ap?.descricao || '') + ' ' + (ap?.documento_afetado || ''));
       // Calibração 18/06/2026: o gráfico de "Principais erros" mostra o que MOTIVOU
       // a correção — ou seja, os apontamentos NC/ressalva da análise ORIGINAL de cada
       // lote (e não do estado final, que pode já estar limpo). Para lotes sem correção,
@@ -1195,9 +1201,12 @@
         if (/\bop\b|ordem de produ/.test(d)) return 'op';
         return 'outros';
       };
-      const categoriaDoTexto = (txt) => {
+      const categoriaDoTexto = (descricao, documento) => {
+        const txt = (descricao || '') + ' ' + (documento || '');
         for (const cat of categorias) { if (cat.re.test(txt)) return cat.nome; }
-        return 'Outros';
+        // Sem palavra-chave: rotula pelo documento afetado (sempre descritivo aqui).
+        const doc = String(documento || '').trim();
+        return doc || 'Outros';
       };
       // Contagem por documento: { todos:{cat:n}, op:{}, rc:{}, etx:{}, eac:{} }.
       // Dedupe por (documento, categoria) DENTRO da mesma análise (igual à lógica antiga).
@@ -1213,8 +1222,8 @@
         const vistos = new Set(); // dedupe `${bucket}|${cat}` na MESMA análise
         for (const ap of aps) {
           if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
-          const txt = (ap.descricao || '') + ' ' + (ap.documento_afetado || '');
-          const cat = categoriaDoTexto(txt);
+          if (ehErroOperador(ap)) continue; // aptidão de operador não conta como erro
+          const cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
           const bucket = classificarDocApontamento(ap); // op|rc|etx|eac|outros
           const alvos = tiposErroPorDoc[bucket] ? ['todos', bucket] : ['todos'];
           for (const b of alvos) {
@@ -1256,7 +1265,7 @@
         // Ajuste por ficha desatualizada não representa erro do equipamento.
         const origem = ehAjusteFichaSomente(a) ? a : (findOriginal(a) || a);
         const aps = origem.parecer_completo?.apontamentos || [];
-        const ncs = aps.filter((ap) => ap.severidade === 'nao_conforme' || ap.severidade === 'ressalva').length;
+        const ncs = aps.filter((ap) => (ap.severidade === 'nao_conforme' || ap.severidade === 'ressalva') && !ehErroOperador(ap)).length;
         if (ncs === 0) continue;
         // O agente usa `familia`, o catálogo usa `equipamento` — aceita ambos.
         // Se nenhum vier no parecer, faz lookup no catálogo via modelo/sapiens.
@@ -1278,10 +1287,8 @@
         const set = new Set();
         for (const ap of (aps || [])) {
           if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
-          const txt = (ap.descricao || '') + ' ' + (ap.documento_afetado || '');
-          let achou = false;
-          for (const cat of categorias) { if (cat.re.test(txt)) { set.add(cat.nome); achou = true; break; } }
-          if (!achou) set.add('Outros');
+          if (ehErroOperador(ap)) continue; // aptidão de operador não conta como erro
+          set.add(categoriaDoTexto(ap.descricao, ap.documento_afetado));
         }
         return [...set];
       };
@@ -1358,7 +1365,7 @@
             const _txtAp = (ap.descricao || '') + ' ' + (ap.documento_afetado || '');
             // Aptidão de operador/inspetor não é mais tratada como NC — fora da reincidência.
             if (/aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test(_txtAp)) continue;
-            const cat = categoriaDoTexto(_txtAp);
+            const cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
             const alvo = extrairAlvoErro(ap.descricao, ap.documento_afetado);
             const chave = chaveReincidencia(cat, equip, alvo);
             chavesA.add(chave);
