@@ -978,6 +978,19 @@
       const isoDia = (d) => d.toISOString().slice(0, 10);
       const [trendDe, setTrendDe] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() - 5); d.setDate(1); return isoDia(d); });
       const [trendAte, setTrendAte] = useState(() => isoDia(new Date()));
+      // Recorte do painel de tendência: presets fixos + personalizado (De/Até).
+      const [trendPreset, setTrendPreset] = useState('semestre');
+      const aplicarPresetTrend = (p) => {
+        setTrendPreset(p);
+        if (p === 'personalizado') return;
+        const de = new Date(), ate = new Date();
+        if (p === 'semana') de.setDate(de.getDate() - 6);
+        else if (p === '30d') de.setDate(de.getDate() - 29);
+        else if (p === 'trimestre') de.setMonth(de.getMonth() - 3);
+        else if (p === 'semestre') de.setMonth(de.getMonth() - 6);
+        else if (p === 'ano') de.setFullYear(de.getFullYear() - 1);
+        setTrendDe(isoDia(de)); setTrendAte(isoDia(ate));
+      };
       // Filtro do gráfico "Erros que motivaram correção" por documento.
       const [filtroDocErro, setFiltroDocErro] = useState('todos'); // 'todos'|'op'|'rc'|'etx'|'eac'
       // Visão do gráfico "Problemas na OP": por estágio ou por inspeção do estágio.
@@ -1809,10 +1822,23 @@
                     Evolução das correções no período escolhido — {tendencia.total} correção(ões) · média {tendencia.media.toFixed(1)}/mês · tendência <strong>{tendencia.direcao}</strong>. Reincidência por erro: <strong>{tendencia.reincResumo.reincidentes}</strong> reincidente(s), <strong>{tendencia.reincResumo.emergentes}</strong> em alta.
                   </CardDescription>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap no-print">
-                  <label className="text-xs text-muted-foreground flex items-center gap-1">De <input type="date" value={trendDe} onChange={(e) => setTrendDe(e.target.value)} className="h-8 rounded-md border border-input bg-background px-2 text-sm" /></label>
-                  <label className="text-xs text-muted-foreground flex items-center gap-1">Até <input type="date" value={trendAte} onChange={(e) => setTrendAte(e.target.value)} className="h-8 rounded-md border border-input bg-background px-2 text-sm" /></label>
-                  <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => exportarBarChartPNG('Tendência de correções', tendencia.barItems)} title="Exportar o gráfico em PNG"><Icon name="download" className="h-3.5 w-3.5" />PNG</Button>
+                <div className="flex flex-col items-end gap-2 no-print">
+                  <div className="flex items-center gap-1 flex-wrap justify-end">
+                    {[['semana', 'Última semana'], ['30d', 'Últimos 30 dias'], ['trimestre', 'Último trimestre'], ['semestre', 'Último semestre'], ['ano', 'Último ano'], ['personalizado', 'Personalizado']].map(([k, lbl]) => (
+                      <button
+                        key={k}
+                        onClick={() => aplicarPresetTrend(k)}
+                        className={cn('text-xs px-2.5 py-1 rounded-full border transition-colors', trendPreset === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}
+                      >
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    <label className="text-xs text-muted-foreground flex items-center gap-1">De <input type="date" value={trendDe} onChange={(e) => { setTrendDe(e.target.value); setTrendPreset('personalizado'); }} className="h-8 rounded-md border border-input bg-background px-2 text-sm" /></label>
+                    <label className="text-xs text-muted-foreground flex items-center gap-1">Até <input type="date" value={trendAte} onChange={(e) => { setTrendAte(e.target.value); setTrendPreset('personalizado'); }} className="h-8 rounded-md border border-input bg-background px-2 text-sm" /></label>
+                    <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => exportarBarChartPNG('Tendência de correções', tendencia.barItems)} title="Exportar o gráfico em PNG"><Icon name="download" className="h-3.5 w-3.5" />PNG</Button>
+                  </div>
                 </div>
               </div>
             </CardHeader>
@@ -8460,6 +8486,19 @@ ${parecer.parecer_tecnico ? `
             const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
             const rec = String(ap.recomendacao || '').replace(/\s+/g, ' ').trim();
             const sep = separarRecomendacao(rec);
+            const incidPct = (info.incid30d * 100).toFixed(1);
+            const basePct = (info.base * 100).toFixed(1);
+            const causaRaiz = info.nivel !== 'pontual';
+            const nivelLabel = info.nivel === 'reincidente' ? 'Reincidente' : info.nivel === 'emergente' ? 'Em alta' : 'Pontual';
+            // A ação corretiva é DIRIGIDA pelo nível (incidência é o dado de entrada):
+            let corretiva;
+            if (info.nivel === 'reincidente') {
+              corretiva = [`Reincidente — incidência de ${incidPct}% dos lotes em 30 dias (${info.ocorr30d} ocorrência(s)). Requer análise de causa raiz e ação corretiva formal.`, sep.causa, sugerirAcaoCorretiva(cat, true)].filter(Boolean).join(' ');
+            } else if (info.nivel === 'emergente') {
+              corretiva = [`Tendência em alta — incidência de ${incidPct}% vs. base histórica de ${basePct}%. Investigar o que mudou (falha humana ou de sistema) e tratar a causa raiz antes que recorra.`, sep.causa, sugerirAcaoCorretiva(cat, true)].filter(Boolean).join(' ');
+            } else {
+              corretiva = `Evento pontual — incidência de ${incidPct}% dos lotes em 30 dias. Não requer análise de causa raiz; basta a correção imediata acima. Registrar para acompanhamento.`;
+            }
             return {
               codigo: ap.codigo || 'NC',
               doc,
@@ -8468,11 +8507,15 @@ ${parecer.parecer_tecnico ? `
               correto: ap.sugestao_correto || extrairCorreto(desc),
               norma: ap.referencia_normativa || '',
               correcao: sep.imediata || 'Corrigir o documento conforme o registro correto.',
-              corretiva: [sep.causa, sugerirAcaoCorretiva(cat, reincidente)].filter(Boolean).join(' '),
+              corretiva,
               reincidente,
               nivel: info.nivel,
+              nivelLabel,
+              causaRaiz,
+              incidPct,
+              basePct,
               reincChave: chave,
-              reincTexto: `${info.ocorr30d} em 30d · ${(info.incid30d * 100).toFixed(1)}% dos lotes · base ${(info.base * 100).toFixed(1)}%`,
+              reincTexto: `${info.ocorr30d} em 30d · ${incidPct}% dos lotes · base ${basePct}%`,
             };
           });
           setSlackModal({ itens });
@@ -8490,7 +8533,8 @@ ${parecer.parecer_tecnico ? `
         try {
           const blocos = itens.map((it) => {
             const linhas = [
-              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${it.nivel === 'reincidente' ? '  _(reincidente: ' + it.reincTexto + ')_' : it.nivel === 'emergente' ? '  _(tendência emergente: ' + it.reincTexto + ')_' : ''}`,
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*`,
+              `   *Nível:* ${it.nivelLabel} · incidência ${it.incidPct}% dos lotes em 30d (base ${it.basePct}%) · causa raiz: ${it.causaRaiz ? 'necessária' : 'não necessária'}`,
               `   *O que está errado:* ${it.erro}`,
             ];
             if (it.correto) linhas.push(`   *Registro correto:* ${it.correto}`);
@@ -9194,13 +9238,13 @@ ${parecer.parecer_tecnico ? `
                       <span className="text-muted-foreground">· {it.doc}</span>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
                       {it.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
-                      {it.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>TENDÊNCIA EMERGENTE</span>}
+                      {it.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
+                      {it.nivel === 'pontual' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-conforme) / 0.15)', color: 'hsl(var(--status-conforme))' }}>PONTUAL</span>}
                     </div>
-                    {it.nivel !== 'pontual' && (
-                      <div className="text-[11px] text-muted-foreground -mt-1">
-                        {it.reincChave} — <strong>{it.reincTexto}</strong>. {it.nivel === 'emergente' ? 'Subiu acima do histórico — investigar o que mudou (falha humana ou de sistema).' : 'Recorrente no período — priorizar análise de causa raiz e ação corretiva.'}
-                      </div>
-                    )}
+                    <div className="text-[11px] rounded-md px-2 py-1.5" style={{ backgroundColor: it.causaRaiz ? 'hsl(var(--status-nao-conforme) / 0.06)' : 'hsl(var(--muted))' }}>
+                      <span className="font-semibold">Nível: {it.nivelLabel}</span> · incidência <strong>{it.incidPct}%</strong> dos lotes em 30d · base {it.basePct}% · <span className="text-muted-foreground">{it.reincChave}</span>
+                      <div className="mt-0.5">Análise de causa raiz: <strong>{it.causaRaiz ? 'necessária' : 'não necessária (evento pontual)'}</strong>.</div>
+                    </div>
                     <div className="text-xs"><span className="font-semibold text-muted-foreground">O que está errado:</span> {it.erro}</div>
                     <div>
                       <Label className="text-xs">Registro correto (o que deveria ser)</Label>
