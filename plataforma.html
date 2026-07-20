@@ -1481,8 +1481,7 @@
       // === Tratativa de reincidência: abre card editável e envia alerta ao Slack ===
       const nivelLabelReinc = { reincidente: 'REINCIDENTE', emergente: 'EM ALTA', possivel: 'POSSÍVEL REINCIDENTE' };
       const abrirTratativaReinc = (r) => {
-        const causaSug = `Necessária a verificação de análise de causa raiz e possível ação corretiva (5 porquês / Ishikawa: método, máquina, material, mão de obra, medição, meio).`;
-        setReincModal({ r, setor: setorPorCategoria(r.meta.cat), causa: causaSug, acao: sugAcaoCorretivaCat(r.meta.cat) });
+        setReincModal({ r, setor: setorPorCategoria(r.meta.cat) });
       };
       const enviarTratativaReinc = async () => {
         if (!reincModal) return;
@@ -1498,15 +1497,14 @@
             `Problema: ${descProblema(r.meta.cat)}`,
             `Ocorrências: ${r.ocorr} · incidência ${(r.incid * 100).toFixed(1)}% dos lotes · base histórica ${(r.base * 100).toFixed(1)}%`,
             `Período: ${brDate(trendDe)} a ${brDate(trendAte)} · Lotes: ${lotesTxt}`,
-            `*Responsável pela análise de causa:* ${reincModal.setor}`,
+            `Responsável pela análise de causa: *${reincModal.setor}*`,
             '',
-            `*Análise de causa raiz:* ${reincModal.causa}`,
-            `*Ação corretiva (possível):* ${reincModal.acao}`,
+            `Necessária a verificação de análise de causa raiz e possível ação corretiva.`,
           ].join('\n');
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
           const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }) });
           if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || `HTTP ${resp.status}`); }
-          await registrarLog(perfil, 'notificar_slack', 'reincidencia', `${r.meta.cat} · ${r.meta.equip}${r.meta.alvo ? ' · ' + r.meta.alvo : ''}`, `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou alerta de reincidência ao Slack (${nivelLabelReinc[r.nivel] || r.nivel}; ${r.ocorr} ocorrências; resp.: ${reincModal.setor}). Causa: ${reincModal.causa} | Ação: ${reincModal.acao}`);
+          await registrarLog(perfil, 'notificar_slack', 'reincidencia', `${r.meta.cat} · ${r.meta.equip}${r.meta.alvo ? ' · ' + r.meta.alvo : ''}`, `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou alerta de reincidência ao Slack (${nivelLabelReinc[r.nivel] || r.nivel}; ${r.ocorr} ocorrências; resp.: ${reincModal.setor})`);
           toast.success('Alerta de reincidência enviado ao Slack.');
           setReincModal(null);
         } catch (e) {
@@ -2110,13 +2108,8 @@
                     <option value="Almoxarifado">Almoxarifado</option>
                   </select>
                 </div>
-                <div>
-                  <Label className="text-xs">Análise de causa raiz (edite conforme a investigação)</Label>
-                  <Textarea rows={4} value={reincModal.causa} onChange={(e) => setReincModal((m) => ({ ...m, causa: e.target.value }))} />
-                </div>
-                <div>
-                  <Label className="text-xs">Ação corretiva (sugestão — edite)</Label>
-                  <Textarea rows={4} value={reincModal.acao} onChange={(e) => setReincModal((m) => ({ ...m, acao: e.target.value }))} />
+                <div className="text-xs p-3 rounded-md border bg-muted/40">
+                  O alerta pede ao setor responsável a <strong>verificação de análise de causa raiz e possível ação corretiva</strong>. A causa e a ação são trazidas pelo setor depois (ex.: respondendo no canal) — o alerta não sugere nada.
                 </div>
                 <div className="flex justify-end gap-2 pt-1">
                   <Button variant="outline" onClick={() => setReincModal(null)} disabled={enviandoReinc}>Cancelar</Button>
