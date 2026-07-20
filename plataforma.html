@@ -1208,6 +1208,31 @@
         const doc = String(documento || '').trim();
         return doc || 'Outros';
       };
+      // Descrição genérica do problema típico de cada categoria (para o painel de reincidência).
+      const descProblema = (cat) => ({
+        'Nº de série': 'número de série incorreto/divergente',
+        'Lote/Código': 'lote ou código divergente',
+        'Registro ANVISA': 'registro ANVISA incorreto',
+        'Modelo': 'modelo divergente',
+        'Nome do produto': 'nome do produto divergente',
+        'CNPJ': 'CNPJ do fabricante divergente',
+        'Fabricante': 'dados do fabricante divergentes',
+        'Endereço': 'endereço do fabricante divergente',
+        'Telefone': 'telefone divergente',
+        'Responsável Técnico': 'responsável técnico divergente',
+        'CREA': 'CREA divergente',
+        'Responsável Legal': 'responsável legal divergente',
+        'Cronologia incoerente': 'cronologia de estágios incoerente',
+        'Data': 'data divergente ou não identificada',
+        'Validade': 'validade divergente',
+        'Acessório': 'divergência de acessório',
+        'Componente/RC': 'divergência de componente na RC',
+        'Reprovação em inspeção': 'inspeção reprovada',
+        'Cópia/revisão do FORM': 'cópia/revisão do FORM incorreta',
+        'Derivação/identificação do produto': 'identificação/derivação do produto incorreta',
+        'Documento ausente/ilegível': 'documento ausente ou ilegível',
+        'Inspeção/Medição': 'inspeção/medição com divergência',
+      }[cat] || `divergência em ${cat}`);
       // Contagem por documento: { todos:{cat:n}, op:{}, rc:{}, etx:{}, eac:{} }.
       // Dedupe por (documento, categoria) DENTRO da mesma análise (igual à lógica antiga).
       const tiposErroPorDoc = { todos: {}, op: {}, rc: {}, etx: {}, eac: {} };
@@ -1875,6 +1900,7 @@
                             {r.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
                             {r.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
                           </div>
+                          <div className="text-xs mt-0.5" style={{ color: 'hsl(var(--foreground))' }}>{descProblema(r.meta.cat)}</div>
                           <div className="text-[11px] text-muted-foreground mt-0.5">{r.ocorr} ocorrência(s) · {(r.incid * 100).toFixed(1)}% dos lotes · base histórica {(r.base * 100).toFixed(1)}%</div>
                         </div>
                         <div className="shrink-0 text-lg font-semibold" style={{ color: r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : r.nivel === 'emergente' ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</div>
