@@ -1699,44 +1699,6 @@
               </CardContent>
             </Card>
 
-            {/* Problemas na OP por estágio/inspeção — decisão 15/07/2026 */}
-            <Card id="chart-op-estagio" className="lg:col-span-2">
-              <CardHeader>
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <CardTitle className="text-sm">Problemas na OP por estágio / inspeção</CardTitle>
-                    <CardDescription>Em qual estágio da OP (ou inspeção do estágio) a não conformidade foi apontada pelo agente. Ajuda a localizar o ponto do processo que mais falha (cronologia, inspeção ausente ou reprovada).</CardDescription>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarBarChartPNG(`Problemas na OP — ${viewOpChart === 'inspecao' ? 'por inspeção' : 'por estágio'}`, opChartLista.map(([k, v]) => ({ label: k, value: v })))} title="Exportar este gráfico em PNG">
-                      <Icon name="download" className="h-3.5 w-3.5" />PNG
-                    </Button>
-                    <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => handleExportarGrafico('Problemas_na_OP', '#chart-op-estagio')} title="Exportar este gráfico em PDF">
-                      <Icon name="download" className="h-3.5 w-3.5" />PDF
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-1 mb-4 flex-wrap no-print">
-                  {[['estagio', 'Por estágio'], ['inspecao', 'Por inspeção do estágio']].map(([k, lbl]) => (
-                    <button
-                      key={k}
-                      onClick={() => setViewOpChart(k)}
-                      className={cn('text-xs px-3 py-1 rounded-full border transition-colors', viewOpChart === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}
-                    >
-                      {lbl}
-                    </button>
-                  ))}
-                </div>
-                {opChartLista.length === 0 ? (
-                  <div className="text-sm text-muted-foreground text-center py-8">Nenhuma NC de OP com {viewOpChart === 'inspecao' ? 'inspeção' : 'estágio'} identificado no período</div>
-                ) : (
-                  <BarChart items={opChartLista.map(([k, v]) => ({ label: k, value: v }))} />
-                )}
-              </CardContent>
-            </Card>
-
             {/* Erros por tipo de equipamento — decisão 23/06/2026 */}
             <Card id="chart-erros-equipamento" className="lg:col-span-2">
               <CardHeader>
