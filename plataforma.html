@@ -1373,17 +1373,28 @@
           const m = String(a.modelo || '').toLowerCase();
           return equipByModelo.get(m) || equipBySapiens.get(m) || a.modelo || '—';
         };
-        const keyPer = new Map(), keyBase = new Map(); // chave -> Set(analiseId)
+        const keyPer = new Map(), keyBase = new Map(); // chave -> Set(id do lote original)
         const lotesPer = new Set(), lotesBase = new Set();
         const chaveMeta = new Map();
+        const inPer = (d) => d >= de && d <= ate;
+        const inBase = (d) => d >= baseIni && d < de;
+        // Denominador: todos os lotes (análises originais) analisados no período/base.
         for (const a of analises) {
-          if (a.analise_origem_id) continue; // só a análise ORIGINAL de cada lote
+          if (a.analise_origem_id) continue;
           const d = (a.created_at || '').slice(0, 10); if (!d) continue;
-          const bucket = (d >= de && d <= ate) ? 'per' : ((d >= baseIni && d < de) ? 'base' : null);
-          if (!bucket) continue;
-          (bucket === 'per' ? lotesPer : lotesBase).add(a.id);
-          const aps = a.parecer_completo?.apontamentos || [];
-          const equip = equipDe(a);
+          if (inPer(d)) lotesPer.add(a.id); else if (inBase(d)) lotesBase.add(a.id);
+        }
+        // Numerador: SÓ erros de lotes que tiveram CORREÇÃO real (reanálise com documento
+        // substituído — exclui ajuste de ficha/cadastro), pela DATA da correção. Dedup por lote.
+        for (const r of analises) {
+          if (!r.analise_origem_id) continue;
+          if (r.tipo_reanalise === 'atualizacao_ficha' || r.tipo_reanalise === 'atualizacao_cadastro') continue;
+          const d = (r.created_at || '').slice(0, 10); if (!d) continue;
+          const keyMap = inPer(d) ? keyPer : inBase(d) ? keyBase : null;
+          if (!keyMap) continue;
+          const orig = findOriginal(byId.get(r.id)) || byId.get(r.id) || r;
+          const aps = orig.parecer_completo?.apontamentos || [];
+          const equip = equipDe(orig);
           const chavesA = new Set();
           for (const ap of aps) {
             if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
@@ -1397,9 +1408,8 @@
             if (!chaveMeta.has(chave)) chaveMeta.set(chave, { cat, equip, alvo });
           }
           for (const chave of chavesA) {
-            const mp = bucket === 'per' ? keyPer : keyBase;
-            if (!mp.has(chave)) mp.set(chave, new Set());
-            mp.get(chave).add(a.id);
+            if (!keyMap.has(chave)) keyMap.set(chave, new Set());
+            keyMap.get(chave).add(orig.id); // dedup por lote (várias correções do mesmo lote = 1)
           }
         }
         const Lper = lotesPer.size || 1, Lbase = lotesBase.size || 1;
@@ -1884,7 +1894,7 @@
               {/* Reincidência por chave (categoria · equipamento · alvo) no período */}
               <div className="mt-6 pt-4 border-t">
                 <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Reincidência no período · categoria × equipamento × alvo</div>
+                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Reincidência no período · categoria × equipamento × alvo <span className="font-normal normal-case">(erros que motivaram correção)</span></div>
                   <div className="text-xs text-muted-foreground">{tendencia.reincResumo.reincidentes} reincidente(s) · {tendencia.reincResumo.emergentes} em alta · {tendencia.reincResumo.lotesPer} lote(s) analisado(s) no período</div>
                 </div>
                 {tendencia.reincLinhas.length === 0 ? (
