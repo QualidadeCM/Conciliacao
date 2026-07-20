@@ -1355,7 +1355,10 @@
           const chavesA = new Set();
           for (const ap of aps) {
             if (ap.severidade !== 'nao_conforme' && ap.severidade !== 'ressalva') continue;
-            const cat = categoriaDoTexto((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
+            const _txtAp = (ap.descricao || '') + ' ' + (ap.documento_afetado || '');
+            // Aptidão de operador/inspetor não é mais tratada como NC — fora da reincidência.
+            if (/aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test(_txtAp)) continue;
+            const cat = categoriaDoTexto(_txtAp);
             const alvo = extrairAlvoErro(ap.descricao, ap.documento_afetado);
             const chave = chaveReincidencia(cat, equip, alvo);
             chavesA.add(chave);
