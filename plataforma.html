@@ -999,6 +999,9 @@
       const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
       // Aba interna do Dashboard: gráficos | correções | tendência.
       const [dashTab, setDashTab] = useState('graficos');
+      // Tratativa de reincidência (card editável antes de enviar ao Slack).
+      const [reincModal, setReincModal] = useState(null); // { r, causa, acao }
+      const [enviandoReinc, setEnviandoReinc] = useState(false);
 
       useEffect(() => {
         const load = async () => {
@@ -1233,6 +1236,23 @@
         'Documento ausente/ilegível': 'documento ausente ou ilegível',
         'Inspeção/Medição': 'inspeção/medição com divergência',
       }[cat] || `divergência em ${cat}`);
+      // Sugestão de ação corretiva por categoria (edite antes de enviar).
+      const sugAcaoCorretivaCat = (cat) => ({
+        'Nº de série': 'Revisar a geração/gravação do número de série no processo (Sapiens) e a conferência; verificar os demais lotes.',
+        'Lote/Código': 'Revisar o controle de lote/código e a baixa de componentes; conferir cadastro.',
+        'Registro ANVISA': 'Corrigir o registro ANVISA na origem (cadastro/ficha/modelo de etiqueta) e revisar os demais produtos.',
+        'Modelo': 'Revisar o modelo/template da etiqueta e o cadastro do produto.',
+        'Nome do produto': 'Corrigir o nome do produto no modelo da etiqueta e no cadastro.',
+        'CNPJ': 'Corrigir o CNPJ no cadastro do fabricante e nas etiquetas.',
+        'Cronologia incoerente': 'Investigar o registro de datas/horas no Sapiens; revisar o sequenciamento de estágios e treinar a produção.',
+        'Data': 'Revisar o registro de datas no processo e a legibilidade nos documentos.',
+        'Acessório': 'Revisar a BOM/ficha mestre e a conferência de acessórios; verificar lotes correlatos.',
+        'Componente/RC': 'Investigar com a produção o desvio de componente e revisar a RC.',
+        'Reprovação em inspeção': 'Tratar com RNC/reprocesso e investigar a causa do defeito no processo.',
+        'Inspeção/Medição': 'Revisar o plano de inspeção/medição e a calibração/identificação de instrumentos.',
+        'Cópia/revisão do FORM': 'Padronizar o uso da revisão vigente do FORM e o controle de cópias.',
+        'Derivação/identificação do produto': 'Revisar o cadastro de derivações/produtos e o cruzamento com a OP.',
+      }[cat] || 'Avaliar a causa raiz e definir a ação corretiva para evitar recorrência.');
       // Contagem por documento: { todos:{cat:n}, op:{}, rc:{}, etx:{}, eac:{} }.
       // Dedupe por (documento, categoria) DENTRO da mesma análise (igual à lógica antiga).
       const tiposErroPorDoc = { todos: {}, op: {}, rc: {}, etx: {}, eac: {} };
@@ -1439,90 +1459,39 @@
         return { barItems, topErros, topEquip, total, media, direcao, reincLinhas, reincResumo };
       })();
 
-      // === Relatório de causa raiz e ação corretiva (Markdown) ===
-      // Reúne as chaves em possível reincidente / reincidente / em alta e monta um
-      // roteiro de tratativa (lotes afetados + 5 porquês + sugestão de ação corretiva).
-      const gerarRelatorioReincidencia = () => {
-        const linhas = (tendencia.reincLinhas || []).filter((r) => r.nivel !== 'pontual');
-        if (linhas.length === 0) { toast.error('Nenhuma chave em possível reincidente, reincidente ou em alta no período selecionado.'); return; }
-        const nivelTxt = { reincidente: 'REINCIDENTE', emergente: 'EM ALTA', possivel: 'POSSÍVEL REINCIDENTE' };
-        const brDate = (d) => (d ? String(d).split('-').reverse().join('/') : '—');
-        const sugAcao = (cat) => ({
-          'Nº de série': 'Revisar a geração/gravação do número de série no processo (Sapiens) e a conferência; verificar os demais lotes.',
-          'Lote/Código': 'Revisar o controle de lote/código e a baixa de componentes; conferir cadastro.',
-          'Registro ANVISA': 'Corrigir o registro ANVISA na origem (cadastro/ficha/modelo de etiqueta) e revisar os demais produtos.',
-          'Modelo': 'Revisar o modelo/template da etiqueta e o cadastro do produto.',
-          'Nome do produto': 'Corrigir o nome do produto no modelo da etiqueta e no cadastro.',
-          'CNPJ': 'Corrigir o CNPJ no cadastro do fabricante e nas etiquetas.',
-          'Cronologia incoerente': 'Investigar o registro de datas/horas no Sapiens; revisar o sequenciamento de estágios e treinar a produção.',
-          'Data': 'Revisar o registro de datas no processo e a legibilidade nos documentos.',
-          'Acessório': 'Revisar a BOM/ficha mestre e a conferência de acessórios; verificar lotes correlatos.',
-          'Componente/RC': 'Investigar com a produção o desvio de componente e revisar a RC.',
-          'Reprovação em inspeção': 'Tratar com RNC/reprocesso e investigar a causa do defeito no processo.',
-          'Inspeção/Medição': 'Revisar o plano de inspeção/medição e a calibração/identificação de instrumentos.',
-          'Cópia/revisão do FORM': 'Padronizar o uso da revisão vigente do FORM e o controle de cópias.',
-          'Derivação/identificação do produto': 'Revisar o cadastro de derivações/produtos e o cruzamento com a OP.',
-        }[cat] || 'Avaliar a causa raiz e definir a ação corretiva para evitar recorrência.');
-        const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const corNivel = { reincidente: '#dc2626', emergente: '#d97706', possivel: '#d97706' };
-        const cardsHtml = linhas.map((r) => {
-          const cor = corNivel[r.nivel] || '#6b7280';
-          const lotesHtml = (r.lotes || []).length
-            ? (r.lotes || []).map((l) => `<li>OP ${esc(l.op)} / série ${esc(l.serie)} <span class="muted">(correção em ${esc(brDate(l.data))})</span></li>`).join('')
-            : '<li class="muted">(não identificados)</li>';
-          return `
-          <div class="card" style="border-left:4pt solid ${cor}">
-            <div class="card-h">${esc(r.meta.cat)} · ${esc(r.meta.equip)}${r.meta.alvo ? ' · ' + esc(r.meta.alvo) : ''}
-              <span class="badge" style="background:${cor}1a;color:${cor}">${esc(nivelTxt[r.nivel] || r.nivel)}</span></div>
-            <div class="prob">${esc(descProblema(r.meta.cat))}</div>
-            <div class="met">${r.ocorr} ocorrência(s) · ${(r.incid * 100).toFixed(1)}% dos lotes · base histórica ${(r.base * 100).toFixed(1)}%</div>
-            <div class="sub">Lotes afetados</div><ul>${lotesHtml}</ul>
-            <div class="sub">Análise de causa raiz (5 porquês)</div>
-            <ol class="whys"><li>Por quê? </li><li>Por quê? </li><li>Por quê? </li><li>Por quê? </li><li>Por quê? </li></ol>
-            <div class="linha"><strong>Eixos (Ishikawa):</strong> Método · Máquina · Material · Mão de obra · Medição · Meio.</div>
-            <div class="linha"><strong>Causa raiz identificada:</strong> <span class="fill"></span></div>
-            <div class="linha"><strong>Ação corretiva definida:</strong> ${esc(sugAcao(r.meta.cat))}</div>
-            <div class="linha"><strong>Responsável:</strong> <span class="fill sm"></span> &nbsp; <strong>Prazo:</strong> <span class="fill sm"></span> &nbsp; <strong>Status:</strong> ( ) Aberta ( ) Concluída</div>
-          </div>`;
-        }).join('');
-        const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Relatório de reincidência</title>
-        <style>
-          @page { size: A4 portrait; margin: 16mm 14mm; }
-          * { box-sizing: border-box; }
-          body { font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; font-size: 10.5pt; margin: 0; }
-          .header { background: hsl(222,45%,22%); color:#fff; padding:14pt; border-radius:6pt; }
-          .header h1 { margin:0; font-size:15pt; }
-          .header .meta { font-size:8.5pt; opacity:.85; margin-top:4pt; }
-          .card { border:0.5pt solid #d4d4d4; border-radius:4pt; padding:10pt 12pt; margin:10pt 0; page-break-inside:avoid; }
-          .card-h { font-weight:bold; font-size:11pt; }
-          .badge { font-size:7.5pt; padding:2pt 7pt; border-radius:8pt; margin-left:6pt; font-weight:600; }
-          .prob { color:#374151; margin-top:2pt; }
-          .met { color:#6b7280; font-size:9pt; margin-top:2pt; }
-          .sub { font-size:8pt; text-transform:uppercase; letter-spacing:.3pt; color:#6b7280; font-weight:bold; margin-top:8pt; }
-          ul, ol { margin:3pt 0 0; padding-left:18pt; }
-          li { margin:1pt 0; }
-          .whys li { padding:3pt 0; border-bottom:0.4pt dotted #cbd5e1; }
-          .muted { color:#9ca3af; }
-          .linha { margin-top:6pt; }
-          .fill { display:inline-block; border-bottom:0.6pt solid #94a3b8; min-width:60%; height:11pt; vertical-align:bottom; }
-          .fill.sm { min-width:22%; }
-          .footer { margin-top:14pt; padding-top:8pt; border-top:0.5pt solid #d4d4d4; font-size:7.5pt; color:#6b7280; text-align:center; }
-        </style></head><body>
-          <div class="header">
-            <h1>RELATÓRIO DE REINCIDÊNCIA E AÇÃO CORRETIVA</h1>
-            <div class="meta">Plataforma de Conciliação da Produção · Confiance Medical · ISO 13485:2016 §8.5.2</div>
-            <div class="meta">Período: ${esc(brDate(trendDe))} a ${esc(brDate(trendAte))} · Gerado em ${esc(new Date().toLocaleString('pt-BR'))}</div>
-            <div class="meta">Base: erros que motivaram correção · ${tendencia.reincResumo.lotesPer} lote(s) analisado(s) · ${tendencia.reincResumo.reincidentes} reincidente(s), ${tendencia.reincResumo.emergentes} em alta, ${tendencia.reincResumo.possiveis} possível(is)</div>
-          </div>
-          ${cardsHtml}
-          <div class="footer">Documento de apoio à decisão de causa raiz e ação corretiva. A tratativa final é de responsabilidade da Garantia da Qualidade / RT.</div>
-          <script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script>
-        </body></html>`;
-        const win = window.open('', '_blank');
-        if (!win) { toast.error('O navegador bloqueou a janela de impressão. Permita pop-ups para gerar o PDF.'); return; }
-        win.document.open(); win.document.write(html); win.document.close();
-        registrarLog(perfil, 'exportar_relatorio', 'reincidencia', `${trendDe}..${trendAte}`, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório de reincidência/causa raiz (${linhas.length} chave(s))`);
-        toast.success('Relatório aberto — use "Salvar como PDF" na janela de impressão.');
+      // === Tratativa de reincidência: abre card editável e envia alerta ao Slack ===
+      const nivelLabelReinc = { reincidente: 'REINCIDENTE', emergente: 'EM ALTA', possivel: 'POSSÍVEL REINCIDENTE' };
+      const abrirTratativaReinc = (r) => {
+        const causaSug = `Investigar a causa raiz (5 porquês / Ishikawa: método, máquina, material, mão de obra, medição, meio). ${descProblema(r.meta.cat)} recorrente em ${r.meta.equip}${r.meta.alvo ? ' (' + r.meta.alvo + ')' : ''}.`;
+        setReincModal({ r, causa: causaSug, acao: sugAcaoCorretivaCat(r.meta.cat) });
+      };
+      const enviarTratativaReinc = async () => {
+        if (!reincModal) return;
+        if (!CONVERSAO_PDF_LOCAL) { toast.error('Serviço não configurado — não é possível enviar ao Slack.'); return; }
+        const r = reincModal.r;
+        setEnviandoReinc(true);
+        try {
+          const brDate = (d) => (d ? String(d).split('-').reverse().join('/') : '—');
+          const lotesTxt = (r.lotes || []).slice(0, 12).map((l) => `OP ${l.op}/${l.serie}`).join(', ') || '—';
+          const texto = [
+            `:repeat: *ALERTA DE REINCIDÊNCIA — ${nivelLabelReinc[r.nivel] || r.nivel}*`,
+            `*${r.meta.cat} · ${r.meta.equip}${r.meta.alvo ? ' · ' + r.meta.alvo : ''}*`,
+            `Problema: ${descProblema(r.meta.cat)}`,
+            `Ocorrências: ${r.ocorr} · incidência ${(r.incid * 100).toFixed(1)}% dos lotes · base histórica ${(r.base * 100).toFixed(1)}%`,
+            `Período: ${brDate(trendDe)} a ${brDate(trendAte)} · Lotes: ${lotesTxt}`,
+            '',
+            `*Análise de causa raiz:* ${reincModal.causa}`,
+            `*Ação corretiva:* ${reincModal.acao}`,
+          ].join('\n');
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto }) });
+          if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || `HTTP ${resp.status}`); }
+          await registrarLog(perfil, 'notificar_slack', 'reincidencia', `${r.meta.cat} · ${r.meta.equip}${r.meta.alvo ? ' · ' + r.meta.alvo : ''}`, `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou alerta de reincidência ao Slack (${nivelLabelReinc[r.nivel] || r.nivel}; ${r.ocorr} ocorrências). Causa: ${reincModal.causa} | Ação: ${reincModal.acao}`);
+          toast.success('Alerta de reincidência enviado ao Slack.');
+          setReincModal(null);
+        } catch (e) {
+          toast.error('Falha ao enviar ao Slack: ' + (e?.message || e));
+        } finally { setEnviandoReinc(false); }
       };
 
       // Últimas 5 análises (filtradas) — só MAIS RECENTE por OP/série (mesma lógica do Histórico)
@@ -1989,12 +1958,7 @@
               <div className="mt-6 pt-4 border-t">
                 <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                   <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Reincidência no período · categoria × equipamento × alvo <span className="font-normal normal-case">(erros que motivaram correção)</span></div>
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <span className="text-xs text-muted-foreground">{tendencia.reincResumo.reincidentes} reincidente(s) · {tendencia.reincResumo.emergentes} em alta · {tendencia.reincResumo.possiveis} possível(is) · {tendencia.reincResumo.lotesPer} lote(s)</span>
-                    <Button variant="outline" size="sm" className="no-print h-7 px-2" onClick={gerarRelatorioReincidencia} title="Gerar relatório de causa raiz e ação corretiva das chaves em possível reincidente, reincidente ou em alta">
-                      <Icon name="download" className="h-3.5 w-3.5" />Relatório de causa raiz
-                    </Button>
-                  </div>
+                  <span className="text-xs text-muted-foreground">{tendencia.reincResumo.reincidentes} reincidente(s) · {tendencia.reincResumo.emergentes} em alta · {tendencia.reincResumo.possiveis} possível(is) · {tendencia.reincResumo.lotesPer} lote(s)</span>
                 </div>
                 {tendencia.reincLinhas.length === 0 ? (
                   <div className="text-sm text-muted-foreground py-4 text-center">Nenhum erro registrado no período selecionado.</div>
@@ -2013,7 +1977,19 @@
                           <div className="text-xs mt-0.5" style={{ color: 'hsl(var(--foreground))' }}>{descProblema(r.meta.cat)}</div>
                           <div className="text-[11px] text-muted-foreground mt-0.5">{r.ocorr} ocorrência(s) · {(r.incid * 100).toFixed(1)}% dos lotes · base histórica {(r.base * 100).toFixed(1)}%</div>
                         </div>
-                        <div className="shrink-0 text-lg font-semibold" style={{ color: r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : (r.nivel === 'emergente' || r.nivel === 'possivel') ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</div>
+                        <div className="shrink-0 flex items-center gap-3">
+                          <span className="text-lg font-semibold" style={{ color: r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : (r.nivel === 'emergente' || r.nivel === 'possivel') ? 'hsl(var(--status-ressalva))' : 'hsl(var(--foreground))' }}>{r.ocorr}</span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="no-print h-7 px-2"
+                            disabled={r.nivel === 'pontual'}
+                            onClick={() => abrirTratativaReinc(r)}
+                            title={r.nivel === 'pontual' ? 'Disponível apenas para possível reincidente, reincidente ou em alta' : 'Abrir tratativa e enviar alerta ao Slack (PCP/Almoxarifado)'}
+                          >
+                            <Icon name="bell" className="h-3.5 w-3.5" />Alertar
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2079,6 +2055,38 @@
               )}
             </CardContent>
           </Card>
+          )}
+
+          {/* === Modal de tratativa de reincidência (editável antes de enviar ao Slack) === */}
+          {reincModal && (
+            <Modal open onClose={() => !enviandoReinc && setReincModal(null)}
+              title="Tratar reincidência — alerta ao Slack"
+              description="Revise a análise de causa raiz e a ação corretiva antes de enviar ao canal (PCP/Almoxarifado).">
+              <div className="space-y-3">
+                <div className="text-sm p-3 rounded-md border" style={{ backgroundColor: 'hsl(var(--accent) / 0.06)', borderColor: 'hsl(var(--accent) / 0.3)' }}>
+                  <div className="font-semibold flex items-center gap-2 flex-wrap">
+                    {reincModal.r.meta.cat} · {reincModal.r.meta.equip}{reincModal.r.meta.alvo ? ' · ' + reincModal.r.meta.alvo : ''}
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: reincModal.r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme) / 0.15)' : 'hsl(var(--status-ressalva) / 0.18)', color: reincModal.r.nivel === 'reincidente' ? 'hsl(var(--status-nao-conforme))' : 'hsl(var(--status-ressalva))' }}>{nivelLabelReinc[reincModal.r.nivel] || reincModal.r.nivel}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">{descProblema(reincModal.r.meta.cat)}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">{reincModal.r.ocorr} ocorrência(s) · {(reincModal.r.incid * 100).toFixed(1)}% dos lotes · base histórica {(reincModal.r.base * 100).toFixed(1)}%</div>
+                </div>
+                <div>
+                  <Label className="text-xs">Análise de causa raiz (sugestão — edite)</Label>
+                  <Textarea rows={4} value={reincModal.causa} onChange={(e) => setReincModal((m) => ({ ...m, causa: e.target.value }))} />
+                </div>
+                <div>
+                  <Label className="text-xs">Ação corretiva (sugestão — edite)</Label>
+                  <Textarea rows={4} value={reincModal.acao} onChange={(e) => setReincModal((m) => ({ ...m, acao: e.target.value }))} />
+                </div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" onClick={() => setReincModal(null)} disabled={enviandoReinc}>Cancelar</Button>
+                  <Button onClick={enviarTratativaReinc} disabled={enviandoReinc}>
+                    {enviandoReinc ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Enviando…</>) : (<><Icon name="bell" className="h-4 w-4" />Enviar ao Slack</>)}
+                  </Button>
+                </div>
+              </div>
+            </Modal>
           )}
         </div>
       );
