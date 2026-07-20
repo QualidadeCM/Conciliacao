@@ -976,10 +976,10 @@
       // Análise de tendência — período personalizado (independente do filtro acima).
       // Padrão: últimos 6 meses.
       const isoDia = (d) => d.toISOString().slice(0, 10);
-      const [trendDe, setTrendDe] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() - 5); d.setDate(1); return isoDia(d); });
+      const [trendDe, setTrendDe] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 6); return isoDia(d); });
       const [trendAte, setTrendAte] = useState(() => isoDia(new Date()));
-      // Recorte do painel de tendência: presets fixos + personalizado (De/Até).
-      const [trendPreset, setTrendPreset] = useState('semestre');
+      // Recorte do painel de tendência: presets fixos + personalizado (De/Até). Abre na última semana.
+      const [trendPreset, setTrendPreset] = useState('semana');
       const aplicarPresetTrend = (p) => {
         setTrendPreset(p);
         if (p === 'personalizado') return;
