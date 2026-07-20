@@ -8516,6 +8516,8 @@ ${parecer.parecer_tecnico ? `
               basePct,
               reincChave: chave,
               reincTexto: `${info.ocorr30d} em 30d · ${incidPct}% dos lotes · base ${basePct}%`,
+              // Por padrão, casos PONTUAIS já vêm desmarcados (normalmente não precisam ir ao Slack).
+              enviar: info.nivel !== 'pontual',
             };
           });
           setSlackModal({ itens });
@@ -8528,7 +8530,9 @@ ${parecer.parecer_tecnico ? `
       const confirmarEnvioSlack = async () => {
         if (!slackModal) return;
         const p = parecer.produto || {};
-        const itens = slackModal.itens;
+        // Só envia as NCs marcadas (pontuais vêm desmarcadas por padrão).
+        const itens = slackModal.itens.filter((it) => it.enviar);
+        if (itens.length === 0) { toast.error('Nenhuma NC marcada para envio. Marque ao menos uma (ou cancele).'); return; }
         setEnviandoSlack(true);
         try {
           const blocos = itens.map((it) => {
@@ -9232,8 +9236,12 @@ ${parecer.parecer_tecnico ? `
             <Modal open onClose={() => !enviandoSlack && setSlackModal(null)} title="Enviar não conformidades ao Slack" description="Revise e edite a correção imediata e a ação corretiva de cada NC antes de enviar ao canal." size="xl">
               <div className="space-y-4 max-h-[62vh] overflow-y-auto">
                 {slackModal.itens.map((it, idx) => (
-                  <div key={idx} className="rounded-md border p-3 space-y-2">
+                  <div key={idx} className={cn('rounded-md border p-3 space-y-2 transition-opacity', !it.enviar && 'opacity-60')}>
                     <div className="flex items-center gap-2 flex-wrap text-sm">
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none mr-1" title="Incluir esta NC no envio ao Slack">
+                        <input type="checkbox" checked={it.enviar} onChange={(e) => setItemSlack(idx, 'enviar', e.target.checked)} className="h-4 w-4" />
+                        <span className="text-xs font-medium">Enviar</span>
+                      </label>
                       <span className="font-semibold">{it.codigo}</span>
                       <span className="text-muted-foreground">· {it.doc}</span>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
@@ -9262,12 +9270,15 @@ ${parecer.parecer_tecnico ? `
                   </div>
                 ))}
               </div>
+              {(() => { const sel = slackModal.itens.filter((it) => it.enviar).length; return (
               <div className="flex items-center justify-end gap-2 mt-4">
+                <span className="text-xs text-muted-foreground mr-auto">{sel} de {slackModal.itens.length} NC(s) marcada(s) para envio</span>
                 <Button variant="outline" onClick={() => setSlackModal(null)} disabled={enviandoSlack}>Cancelar</Button>
-                <Button onClick={confirmarEnvioSlack} disabled={enviandoSlack}>
-                  {enviandoSlack ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Enviando…</>) : (<><Icon name="bell" className="h-4 w-4" />Enviar ao Slack</>)}
+                <Button onClick={confirmarEnvioSlack} disabled={enviandoSlack || sel === 0}>
+                  {enviandoSlack ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Enviando…</>) : (<><Icon name="bell" className="h-4 w-4" />Enviar {sel > 0 ? sel + ' ' : ''}ao Slack</>)}
                 </Button>
               </div>
+              ); })()}
             </Modal>
           )}
 
