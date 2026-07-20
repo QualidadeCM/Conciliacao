@@ -7974,6 +7974,24 @@
             </table>`;
         };
 
+        // Seção de APONTAMENTOS (NC/ressalvas) com a justificativa do RT quando houver.
+        // Lê direto de parecer.apontamentos (não depende do casamento com a camada).
+        const apontsList = parecer.apontamentos || [];
+        const apontamentosHtml = apontsList.length === 0 ? '' : `
+          <div class="secao-titulo">APONTAMENTOS</div>
+          ${apontsList.map((ap) => {
+            const cor = ap.severidade === 'nao_conforme' ? '#dc2626' : ap.severidade === 'ressalva' ? '#d97706' : '#16a34a';
+            const just = ap.justificativa
+              ? `<div style="margin-top:4pt;padding:5pt 7pt;background:#dcfce7;border-radius:3pt;font-size:8.5pt;color:#166534;"><strong>Justificativa (RT):</strong> ${escapeHtml(ap.justificativa)}${ap.justificada_por ? ` — registrada por ${escapeHtml(ap.justificada_por)}${ap.justificada_em ? ' em ' + new Date(ap.justificada_em).toLocaleString('pt-BR') : ''}` : ''}</div>`
+              : (ap.severidade === 'ressalva' ? `<div style="margin-top:4pt;padding:5pt 7pt;background:#fef3c7;border-radius:3pt;font-size:8.5pt;color:#92400e;">Ressalva pendente de justificativa do Responsável Técnico.</div>` : '');
+            return `<div style="border:0.5pt solid #d4d4d4;border-left:3pt solid ${cor};border-radius:3pt;padding:7pt 9pt;margin-bottom:6pt;">
+              <div style="font-size:9pt;">${badge(ap.severidade)} &nbsp;<strong>${escapeHtml(ap.codigo || '')}</strong> · ${escapeHtml(ap.documento_afetado || '')}${ap.referencia_normativa ? ` · <span style="font-family:'Courier New',monospace;font-size:7.5pt;color:#6b7280;">${escapeHtml(ap.referencia_normativa)}</span>` : ''}</div>
+              <div style="font-size:8.5pt;margin-top:3pt;color:#374151;">${escapeHtml(ap.descricao || '')}</div>
+              ${ap.recomendacao ? `<div style="font-size:8.5pt;margin-top:3pt;color:#4b5563;"><strong>Ação:</strong> ${escapeHtml(ap.recomendacao)}</div>` : ''}
+              ${just}
+            </div>`;
+          }).join('')}`;
+
         return `<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="UTF-8"><title>Resumo da Análise · ${escapeHtml(p.numero_op || '')}</title>
 <style>
@@ -8069,6 +8087,8 @@ ${tabelaCamada('Camada 3 — Conformidade Regulatória', c3, true)}
     ${ncon > 0 && avaliados > 0 ? `<div style="width:${(ncon/avaliados)*100}%;background:#dc2626"></div>` : ''}
   </div>
 </div>
+
+${apontamentosHtml}
 
 ${parecer.parecer_tecnico ? `
 <div class="parecer-tecnico">
