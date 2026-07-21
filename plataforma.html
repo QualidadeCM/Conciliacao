@@ -1589,6 +1589,7 @@
           <ParecerView
             parecer={viewing.parecer_completo}
             analiseId={viewing.id}
+            dataAnalise={viewing.created_at}
             onBack={() => setViewing(null)}
             backLabel="Voltar ao Dashboard"
             backIcon="arrowLeft"
@@ -7500,7 +7501,7 @@
       return { imediata: imediata.join(' '), causa: causa.join(' ') };
     }
 
-    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId, autoBaixar = false, onAutoBaixarDone, onAutoBaixarErro }) {
+    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId, dataAnalise, autoBaixar = false, onAutoBaixarDone, onAutoBaixarErro }) {
       const toast = useToast();
       const { perfil: usuarioAtual, can, isAdmin } = usePerm();
       const { pedirOuExecutar } = useSolic();
@@ -8479,10 +8480,20 @@ ${parecer.parecer_tecnico ? `
             porMesCfg = map.pasta_por_mes === 'true';
           } catch (e) { /* segue sem config */ }
         }
-        // Opção: gravar dentro da subpasta do mês corrente (ex.: ...\Pendente de Assinatura\JULHO)
+        // Opção: gravar dentro da subpasta do MÊS DA ANÁLISE (ex.: ...\Pendente de
+        // Assinatura\JULHO). Usa a data da análise do lote — não a data de hoje — para
+        // que, no download em lote, cada análise caia no mês correto. Fallback: mês atual.
         if (destPathCfg && porMesCfg) {
           const MESES = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
-          destPathCfg = destPathCfg.replace(/[\\/]+$/, '') + '\\' + MESES[new Date().getMonth()];
+          const mesSubpasta = (() => {
+            const src = String(dataAnalise || '').trim();
+            let m = src.match(/^(\d{4})-(\d{2})-(\d{2})/);       // ISO: YYYY-MM-DD (created_at)
+            if (m) return parseInt(m[2], 10) - 1;
+            m = src.match(/^(\d{2})\/(\d{2})\/(\d{4})/);         // BR: DD/MM/AAAA
+            if (m) return parseInt(m[2], 10) - 1;
+            return new Date().getMonth();                        // fallback: mês atual
+          })();
+          destPathCfg = destPathCfg.replace(/[\\/]+$/, '') + '\\' + MESES[mesSubpasta];
         }
         if (CONVERSAO_PDF_LOCAL && destPathCfg) {
           try {
@@ -11312,6 +11323,7 @@ ${parecer.parecer_tecnico ? `
           <ParecerView
             parecer={viewing.parecer_completo}
             analiseId={viewing.id}
+            dataAnalise={viewing.created_at}
             onBack={() => { setViewing(null); setReloadKey((k) => k + 1); }}
             backLabel="Voltar ao Histórico"
             backIcon="arrowLeft"
@@ -11346,6 +11358,7 @@ ${parecer.parecer_tecnico ? `
                 key={batchList[batchIdx].id}
                 parecer={batchList[batchIdx].parecer_completo}
                 analiseId={batchList[batchIdx].id}
+                dataAnalise={batchList[batchIdx].created_at}
                 onBack={() => {}}
                 autoBaixar
                 onAutoBaixarDone={() => avancarBatch(true)}
@@ -13626,7 +13639,7 @@ ${parecer.parecer_tecnico ? `
                 </div>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={porMes} onChange={(e) => setPorMes(e.target.checked)} className="h-4 w-4" />
-                  Salvar dentro da subpasta do <strong>mês corrente</strong> (ex.: …\Pendente de Assinatura\{MESES_PT[new Date().getMonth()]})
+                  Salvar dentro da subpasta do <strong>mês da análise</strong> (ex.: …\Pendente de Assinatura\{MESES_PT[new Date().getMonth()]}). Assim, no download em lote, cada análise cai no mês certo.
                 </label>
                 <div className="flex items-center gap-2">
                   <Button onClick={salvar} disabled={salvando || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar</Button>
