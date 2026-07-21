@@ -5514,6 +5514,23 @@
         apontar('nao_conforme', 1, 'RC', `${rc.naoConformes} componente(s) "Não Conforme".`, 'Investigar e exigir RNC.', 'ISO 13485 §8.3');
       }
 
+      // === Correspondência RC × OP: a RC anexada é do mesmo lote da OP? ===
+      // A RC do Sapiens traz "O.P.: <número>". Cruza com a OP analisada para pegar
+      // RC de outro lote anexada por engano. (Detecção também exibida no import.)
+      if (rc && op) {
+        const opNumConf = String(op.op || '').replace(/\D/g, '');
+        const rcOpConf = String(rc.opRelacionada || '').replace(/\D/g, '');
+        if (rcOpConf && opNumConf && rcOpConf !== opNumConf) {
+          add(C1, 'Correspondência RC × OP', 'nao_conforme', `A RC informa O.P. ${rcOpConf}, mas o lote analisado é a OP ${opNumConf}.`);
+          apontar('nao_conforme', 1, 'RC', `RC não corresponde à OP: a Relação de Componentes é da O.P. ${rcOpConf}, mas o lote analisado é a OP ${opNumConf} — provável RC de outro lote anexada.`, 'Anexar a RC correta desta OP.', 'ISO 13485 §7.5.9 (rastreabilidade)');
+        } else if (rcOpConf && opNumConf && rcOpConf === opNumConf) {
+          add(C1, 'Correspondência RC × OP', 'conforme', `A RC corresponde à OP analisada (O.P. ${opNumConf}).`);
+        } else if (!rcOpConf) {
+          add(C1, 'Correspondência RC × OP', 'ressalva', 'Não foi possível identificar a O.P. informada na RC para cruzar com a OP analisada.');
+          apontar('ressalva', 1, 'RC', 'Não foi possível identificar a O.P. na RC para confirmar que ela é deste lote.', 'Conferir manualmente se a RC pertence a esta OP.', 'ISO 13485 §7.5.9');
+        }
+      }
+
       // === Etiqueta Externa — verificação consolidada de TODOS os campos ===
       // Gera UMA linha resumida no parecer com contagem de campos OK × problemas.
       // Apontamentos detalhados (com severidade própria) continuam indo pra lista abaixo.
@@ -6747,6 +6764,17 @@
         try { return parseOP(slots.op.text)?.dataConciliacao || null; } catch (e) { return null; }
       }, [slots.op?.status, slots.op?.text]);
 
+      // Detecta a OP a que a RC se refere (no import) e compara com a OP anexada/selecionada.
+      const opRcDetectada = useMemo(() => {
+        if (slots.rc?.status !== 'done' || !slots.rc?.text) return null;
+        try {
+          const rcOp = String(parseRC(slots.rc.text)?.opRelacionada || '').replace(/\D/g, '');
+          const opDoc = (slots.op?.status === 'done' && slots.op?.text) ? String(parseOP(slots.op.text)?.op || '').replace(/\D/g, '') : '';
+          const ref = opDoc || (opSelecionada ? String(opSelecionada).replace(/\D/g, '') : '');
+          return { rcOp, ref };
+        } catch (e) { return null; }
+      }, [slots.rc?.status, slots.rc?.text, slots.op?.status, slots.op?.text, opSelecionada]);
+
       // Se já temos parecer, mostra tela de resultado
       if (parecer) {
         return <ParecerView parecer={parecer} analiseId={parecer._analiseId} onBack={handleNovaAnalise} backLabel="Nova análise" backIcon="plus" />;
@@ -6826,7 +6854,22 @@
                       : { ok: false, texto: 'Data da conciliação não detectada — verificar manualmente' }
                   ) : null}
                 />
-                <UploadSlotV2 label="Relação de Componentes (RC)" formats="PDF, XLSX ou CSV" accept=".pdf,.xlsx,.csv" slot={slots.rc} onSelect={(f) => processSingle('rc', f)} onClear={() => clearSlot('rc')} onPreview={() => slots.rc?.status === 'done' && setPreviewing({ label: 'Relação de Componentes', text: slots.rc.text })} />
+                <UploadSlotV2
+                  label="Relação de Componentes (RC)"
+                  formats="PDF, XLSX ou CSV"
+                  accept=".pdf,.xlsx,.csv"
+                  slot={slots.rc}
+                  onSelect={(f) => processSingle('rc', f)}
+                  onClear={() => clearSlot('rc')}
+                  onPreview={() => slots.rc?.status === 'done' && setPreviewing({ label: 'Relação de Componentes', text: slots.rc.text })}
+                  infoExtra={slots.rc?.status === 'done' ? (
+                    !opRcDetectada || !opRcDetectada.rcOp
+                      ? { ok: false, texto: 'OP da RC não detectada — verificar manualmente' }
+                      : (opRcDetectada.ref && opRcDetectada.rcOp !== opRcDetectada.ref)
+                        ? { ok: false, texto: `RC é da OP ${opRcDetectada.rcOp} ≠ OP ${opRcDetectada.ref} — RC de outro lote?` }
+                        : { ok: true, texto: `OP da RC: ${opRcDetectada.rcOp}${opRcDetectada.ref ? ' (confere)' : ''}` }
+                  ) : null}
+                />
                 <UploadSlotV2 label="Etiqueta Externa do Produto" formats="DOCX" accept=".docx" slot={slots.etiqueta_externa} onSelect={(f) => processSingle('etiqueta_externa', f)} onClear={() => clearSlot('etiqueta_externa')} onPreview={() => slots.etiqueta_externa?.status === 'done' && setPreviewing({ label: 'Etiqueta Externa', text: slots.etiqueta_externa.text })} />
 
                 {/* Card dinâmico do FORM-GQ-0047: muda conforme o estado do preview gerado a partir da OP */}
