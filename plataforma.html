@@ -7500,12 +7500,13 @@
       return { imediata: imediata.join(' '), causa: causa.join(' ') };
     }
 
-    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId }) {
+    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId, autoBaixar = false, onAutoBaixarDone, onAutoBaixarErro }) {
       const toast = useToast();
       const { perfil: usuarioAtual, can, isAdmin } = usePerm();
       const { pedirOuExecutar } = useSolic();
       // Mantém o parecer em estado local para refletir justificativas/re-análises sem recarregar
       const [parecer, setParecer] = useState(parecerInicial);
+      const autoRanRef = useRef(false); // evita disparar o download automático (lote) mais de uma vez
       useEffect(() => { setParecer(parecerInicial); }, [parecerInicial]);
 
       // Modal de justificativa (para ressalvas) e modal de re-análise (para NCs)
@@ -8562,6 +8563,17 @@ ${parecer.parecer_tecnico ? `
           setZipStage('');
         }
       };
+
+      // Download automático (usado pelo lote do Histórico): ao montar com autoBaixar,
+      // roda o mesmo handleDownloadZip e avisa o pai quando termina/falha.
+      useEffect(() => {
+        if (!autoBaixar || autoRanRef.current) return;
+        autoRanRef.current = true;
+        (async () => {
+          try { await handleDownloadZip(); if (onAutoBaixarDone) onAutoBaixarDone(); }
+          catch (e) { if (onAutoBaixarErro) onAutoBaixarErro(e); else console.error(e); }
+        })();
+      }, [autoBaixar]);
 
       // === Alerta de NC no Slack (PCP corrige OP; Almoxarifado corrige etiquetas) ===
       // Responsável por documento afetado:
@@ -10922,8 +10934,13 @@ ${parecer.parecer_tecnico ? `
       const [filter, setFilter] = useState('');
       const [viewing, setViewing] = useState(null);
       const [reloadKey, setReloadKey] = useState(0);
+      // Download em lote dos pacotes pendentes (conformes) na pasta da rede.
+      const [batchList, setBatchList] = useState([]);
+      const [batchIdx, setBatchIdx] = useState(0);
+      const [batchAtivo, setBatchAtivo] = useState(false);
+      const [batchFalhas, setBatchFalhas] = useState(0);
       // Atualização em tempo real do histórico quando alguém cria/edita/exclui análise
-      useRealtime('analises', () => setReloadKey((k) => k + 1));
+      useRealtime('analises', () => { if (!batchAtivo) setReloadKey((k) => k + 1); });
       const [importOpen, setImportOpen] = useState(false);
       const [novaManualOpen, setNovaManualOpen] = useState(false);
       const [auditOpen, setAuditOpen] = useState(false);
@@ -11111,6 +11128,46 @@ ${parecer.parecer_tecnico ? `
         return [...porLote.values()].filter((a) => a.origem_analise !== 'manual' && !a.pacote_zip_path).length;
       }, [analises, filtroPeriodo, filtroAno, filtroMes]);
 
+      // Lotes CONFORMES (ou conforme corrigido) sem pacote — candidatos ao download em lote.
+      const pendentesConformes = useMemo(() => {
+        const idsCorrigidas = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
+        const porLote = new Map();
+        for (const a of analises) {
+          if (idsCorrigidas.has(a.id)) continue;
+          const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+          const atual = porLote.get(chave);
+          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(chave, a);
+        }
+        return [...porLote.values()].filter((a) =>
+          a.origem_analise !== 'manual' && !a.pacote_zip_path && a.parecer_completo &&
+          (a.status === 'conforme' || a.status === 'conforme_corrigido')
+        );
+      }, [analises]);
+
+      const iniciarBatchDownload = () => {
+        if (!CONVERSAO_PDF_LOCAL) { toast.error('Serviço de conversão não configurado — não é possível salvar na pasta.'); return; }
+        if (pendentesConformes.length === 0) { toast.error('Nenhum pacote conforme pendente para baixar.'); return; }
+        setBatchList(pendentesConformes);
+        setBatchIdx(0);
+        setBatchFalhas(0);
+        setBatchAtivo(true);
+      };
+      // Avança para o próximo item do lote; ao terminar, recarrega e resume.
+      const avancarBatch = (ok) => {
+        setBatchFalhas((f) => f + (ok ? 0 : 1));
+        setBatchIdx((i) => {
+          const prox = i + 1;
+          if (prox >= batchList.length) {
+            setBatchAtivo(false);
+            setReloadKey((k) => k + 1);
+            const falhasFinal = batchFalhas + (ok ? 0 : 1);
+            setTimeout(() => toast.success(`Lote concluído: ${batchList.length - falhasFinal}/${batchList.length} pacote(s) salvo(s) na pasta.${falhasFinal ? ` ${falhasFinal} falharam (mantidos como pendentes).` : ''}`, { duration: 10000 }), 100);
+            registrarLog(perfil, 'baixar_pacote', 'analise', 'lote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} baixou ${batchList.length - falhasFinal} pacote(s) pendente(s) em lote na pasta da rede`);
+          }
+          return prox;
+        });
+      };
+
       const handleDelete = async (id, op, serie) => {
         const ref = `OP ${op || '?'}${serie ? ' / ' + serie : ''}`;
         // Sem permissão → abre solicitação. Com permissão → exclui direto e registra no log.
@@ -11282,6 +11339,29 @@ ${parecer.parecer_tecnico ? `
 
       return (
         <div>
+          {/* Download em lote: dirige o ParecerView (oculto) por item, salvando na pasta da rede. */}
+          {batchAtivo && batchList[batchIdx] && (
+            <div style={{ position: 'fixed', width: 1, height: 1, overflow: 'hidden', left: -9999, top: -9999 }} aria-hidden="true">
+              <ParecerView
+                key={batchList[batchIdx].id}
+                parecer={batchList[batchIdx].parecer_completo}
+                analiseId={batchList[batchIdx].id}
+                onBack={() => {}}
+                autoBaixar
+                onAutoBaixarDone={() => avancarBatch(true)}
+                onAutoBaixarErro={() => avancarBatch(false)}
+              />
+            </div>
+          )}
+          {batchAtivo && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 no-print">
+              <div className="bg-card border rounded-xl shadow-xl px-6 py-5 text-center max-w-sm">
+                <Icon name="loader" className="h-6 w-6 animate-spin mx-auto text-accent" />
+                <div className="mt-3 font-semibold">Baixando pacotes {Math.min(batchIdx + 1, batchList.length)}/{batchList.length}…</div>
+                <div className="text-xs text-muted-foreground mt-1">Salvando na pasta da rede. Não feche esta aba.{batchFalhas > 0 ? ` (${batchFalhas} falha[s])` : ''}</div>
+              </div>
+            </div>
+          )}
           <PageHeader
             title="Histórico de análises"
             description="Consulta de todas as conciliações já executadas pelo agente."
@@ -11440,6 +11520,11 @@ ${parecer.parecer_tecnico ? `
                       <span className={cn('ml-1 px-1.5 rounded-full text-[10px] font-bold', filtroPendentes ? 'bg-white/25' : 'bg-orange-100 text-orange-800')}>{totalPendentes}</span>
                     )}
                   </button>
+                  {can('historico_baixar') && (
+                    <Button variant="outline" size="sm" className="h-8" onClick={iniciarBatchDownload} disabled={batchAtivo || pendentesConformes.length === 0} title="Gera e salva na pasta da rede os pacotes de todos os lotes conformes ainda pendentes de download">
+                      {batchAtivo ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Baixando…</>) : (<><Icon name="download" className="h-3.5 w-3.5" />Baixar pendentes na pasta{pendentesConformes.length > 0 ? ` (${pendentesConformes.length})` : ''}</>)}
+                    </Button>
+                  )}
                   <span className="text-muted-foreground ml-auto">{filtered.length} análise(s) no filtro</span>
                 </div>
               </div>
