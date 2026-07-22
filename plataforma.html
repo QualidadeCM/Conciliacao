@@ -1725,13 +1725,12 @@
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <CardTitle className="text-sm">Conciliações realizadas</CardTitle>
-                    <CardDescription>Quantas foram conformes direto, tiveram ressalvas e quantas precisaram ser corrigidas no período</CardDescription>
+                    <CardDescription>Quantas foram conformes direto e quantas precisaram ser corrigidas no período</CardDescription>
                   </div>
                   <div className="flex items-center gap-1">
                     <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarDonutPNG('Conciliações realizadas', [
                       { label: 'Conformes', value: categoriasLote.conformes, hex: '#16a34a' },
-                      { label: 'Com ressalvas', value: categoriasLote.ressalvas, hex: '#f59e0b' },
-                      { label: 'Precisaram correção', value: categoriasLote.corrigidas, hex: '#38bdf8' },
+                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, hex: '#38bdf8' },
                     ])} title="Exportar este gráfico em PNG">
                       <Icon name="download" className="h-3.5 w-3.5" />PNG
                     </Button>
@@ -1742,16 +1741,15 @@
                 </div>
               </CardHeader>
               <CardContent>
-                {totalStatus === 0 ? (
+                {(categoriasLote.conformes + categoriasLote.corrigidas) === 0 ? (
                   <div className="text-sm text-muted-foreground text-center py-8">Nenhuma conciliação no período</div>
                 ) : (
                   <DonutChart
                     segments={[
                       { label: 'Conformes', value: categoriasLote.conformes, color: 'hsl(var(--status-conforme))' },
-                      { label: 'Com ressalvas', value: categoriasLote.ressalvas, color: 'hsl(var(--status-ressalva))' },
-                      { label: 'Precisaram correção', value: categoriasLote.corrigidas, color: 'hsl(var(--accent))' },
+                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, color: 'hsl(var(--accent))' },
                     ]}
-                    total={totalStatus}
+                    total={categoriasLote.conformes + categoriasLote.corrigidas}
                   />
                 )}
               </CardContent>
