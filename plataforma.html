@@ -1143,19 +1143,19 @@
       // 3. Precisaram correção: original era NC (independente do estado final)
       const categoriasLote = { conformes: 0, ressalvas: 0, corrigidas: 0 };
       for (const a of lotesFinais) {
-        const original = findOriginal(a);
-        // Ajuste por ficha desatualizada: a documentação nunca esteve NC → classifica
-        // pelo estado FINAL (conforme), não como "precisou correção".
-        if (original?.status === 'nao_conforme' && !ehAjusteFichaSomente(a)) {
-          // Original tinha NC → precisou correção (em curso ou completa)
+        // "Precisou correção" usa o MESMO critério do KPI (temCorrecaoReal): o lote
+        // passou por uma correção real de documento (reanálise), independentemente de o
+        // original ser NC ou ressalva. Assim o donut bate com o cartão "Conciliações
+        // corrigidas". Ajuste de ficha/cadastro não conta (já excluído em temCorrecaoReal).
+        if (temCorrecaoReal(a)) {
+          categoriasLote.corrigidas++;
+        } else if (a.status === 'nao_conforme') {
+          // NC ainda aberta (sem correção concluída) — também precisa de correção.
           categoriasLote.corrigidas++;
         } else if (a.status === 'ressalva') {
           categoriasLote.ressalvas++;
-        } else if (a.status === 'conforme') {
-          categoriasLote.conformes++;
         } else {
-          // Edge case: NC sem original NC (raro) — conta como precisou correção
-          categoriasLote.corrigidas++;
+          categoriasLote.conformes++; // conforme ou conforme_corrigido sem correção real
         }
       }
       const totalStatus = categoriasLote.conformes + categoriasLote.ressalvas + categoriasLote.corrigidas;
