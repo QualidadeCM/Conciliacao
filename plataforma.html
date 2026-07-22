@@ -8285,7 +8285,7 @@
           };
           const linhas = itens.map(it => {
             // Retrocompatibilidade: registros antigos só têm item/observacao.
-            const oQue = escapeHtml(it.oQue || it.item);
+            const oQue = escapeHtml(frasearOQue(it.oQue || it.item));
             const valores = escapeHtml((it.valores != null && it.valores !== '') ? it.valores : (it.observacao || '—')) || '—';
             const normaLn = (mostrarNorma && it.norma) ? `<div class="td-norma">${escapeHtml(it.norma)}</div>` : '';
             return `
@@ -9902,21 +9902,27 @@ ${parecer.parecer_tecnico ? `
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b text-left uppercase text-muted-foreground">
-                    <th className="px-2 py-2 font-semibold w-[35%]">Item analisado</th>
+                    <th className="px-2 py-2 font-semibold w-[38%]">O que foi verificado</th>
+                    <th className="px-2 py-2 font-semibold">Valores lidos</th>
                     <th className="px-2 py-2 font-semibold w-[14%]">Status</th>
-                    {mostrarNorma && <th className="px-2 py-2 font-semibold w-[18%]">Norma</th>}
-                    <th className="px-2 py-2 font-semibold">Observação</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {itens.map((it, i) => (
+                  {itens.map((it, i) => {
+                    // Retrocompatibilidade: registros antigos só têm item/observacao.
+                    const oQue = frasearOQue(it.oQue || it.item);
+                    const valores = (it.valores != null && it.valores !== '') ? it.valores : it.observacao;
+                    return (
                     <tr key={i} className="border-b last:border-0">
-                      <td className="px-2 py-2.5 align-top text-sm font-medium">{it.item}</td>
+                      <td className="px-2 py-2.5 align-top text-sm font-medium">
+                        {oQue}
+                        {mostrarNorma && it.norma && <div className="text-xs font-mono text-muted-foreground mt-0.5">{it.norma}</div>}
+                      </td>
+                      <td className="px-2 py-2.5 align-top text-xs text-muted-foreground">{valores || '—'}</td>
                       <td className="px-2 py-2.5 align-top"><ResumoBadge status={it.status} /></td>
-                      {mostrarNorma && <td className="px-2 py-2.5 align-top text-xs font-mono text-muted-foreground">{it.norma || '—'}</td>}
-                      <td className="px-2 py-2.5 align-top text-xs text-muted-foreground">{it.observacao || '—'}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -9941,6 +9947,61 @@ ${parecer.parecer_tecnico ? `
       );
     }
 
+    // Mapa: rótulo curto da verificação → frase "Verificada a…" para a coluna
+    // "O que foi verificado". Centraliza o texto (tela nova, resumo e PDF) e vale
+    // também para análises antigas (que só têm o rótulo curto salvo).
+    const OQUE_FRASES = {
+      // Camada 1
+      'Etiqueta de acessório × RC': 'Verificada a correspondência da etiqueta de acessório com a RC',
+      'Classificação Fabricante/Fornecedor dos acessórios': 'Verificada a classificação Fabricante/Fornecedor dos acessórios',
+      'Validade dos acessórios estéreis': 'Verificada a validade dos acessórios estéreis',
+      'Descrição do acessório × Código Sapiens': 'Verificada a descrição do acessório contra o Código Sapiens',
+      'Data de fabricação — acessórios Confiance': 'Verificada a data de fabricação dos acessórios Confiance',
+      'OP — número, origem e tipo': 'Verificados o número, a origem e o tipo da OP',
+      'Nº de série — consistência e convenção': 'Verificada a consistência e a convenção do nº de série',
+      'Cronologia de estágios da OP': 'Verificada a cronologia de estágios da OP',
+      'Cronologia coerente entre inspeções e operações': 'Verificada a coerência cronológica entre inspeções e operações',
+      'Ordem de inspeções duplicadas': 'Verificada a ordem de inspeções duplicadas',
+      'Inspeções previstas pela Ficha Mestre': 'Verificadas as inspeções previstas pela Ficha Mestre',
+      'Inspeções não previstas na Ficha Mestre': 'Verificadas as inspeções não previstas na Ficha Mestre',
+      'Status das inspeções da OP': 'Verificado o status das inspeções da OP',
+      'Aptidão do operador ao estágio': 'Verificada a aptidão do operador ao estágio',
+      'Aptidão do inspetor à inspeção': 'Verificada a aptidão do inspetor à inspeção',
+      'Colaboradores cadastrados': 'Verificado o cadastro dos colaboradores',
+      'Medições críticas dentro da faixa': 'Verificadas as medições críticas dentro da faixa',
+      'Data da conciliação (estágio 60)': 'Verificada a data da conciliação (estágio 60)',
+      'FORM-GQ-0047': 'Verificada a presença do FORM-GQ-0047',
+      'FORM-GQ-0047 — geração, revisão e datas': 'Verificados a geração, a revisão e as datas do FORM-GQ-0047',
+      'RC anexada': 'Verificada a presença da RC',
+      'RC — sem componentes "Não Conforme"': 'Verificada a ausência de componentes "Não Conforme" na RC',
+      'Correspondência RC × OP': 'Verificada a correspondência entre a RC e a OP',
+      'Etiqueta Externa × Ficha Mestre': 'Verificada a Etiqueta Externa contra a Ficha Mestre',
+      // Camada 2
+      'Identificação do produto': 'Verificada a identificação do produto (OP × Ficha Mestre)',
+      'Derivação OP × Ficha': 'Verificada a derivação (OP × Ficha Mestre)',
+      'Registro ANVISA na etiqueta': 'Verificado o registro ANVISA na etiqueta contra a Ficha Mestre',
+      'Acessórios obrigatórios da Ficha': 'Verificados os acessórios obrigatórios da Ficha Mestre',
+      'Marcações N/A do FORM × Ficha Mestre': 'Verificadas as marcações N/A do FORM contra a Ficha Mestre',
+      'Etiqueta do acessório ausente na análise': 'Verificada a presença da etiqueta do acessório na análise',
+      'Acessórios opcionais não identificados': 'Verificados os acessórios opcionais não identificados',
+      'Grupo alternativo de acessórios ausente': 'Verificada a presença do grupo alternativo de acessórios',
+      'Etiqueta do grupo alternativo ausente': 'Verificada a presença da etiqueta do grupo alternativo',
+      'Grupos alternativos de acessórios': 'Verificados os grupos alternativos de acessórios',
+      // Camada 3
+      'Rastreabilidade do lote': 'Verificada a rastreabilidade do lote',
+      'Rotulagem regulatória': 'Verificada a rotulagem regulatória',
+      'Checklist de liberação (FORM-GQ-0047)': 'Verificado o checklist de liberação (FORM-GQ-0047)',
+      'Controle de processo (BPF)': 'Verificado o controle de processo (BPF)',
+      'OP de Reprocesso': 'Verificada a OP de Reprocesso',
+      'RNCs associados': 'Verificados os RNCs associados',
+    };
+    const frasearOQue = (texto) => {
+      const t = String(texto || '').trim();
+      if (!t) return '—';
+      if (/^Verificad[oa]s?\b/i.test(t)) return t; // já está no formato "Verificada…"
+      return OQUE_FRASES[t] || ('Verificação: ' + t);
+    };
+
     function CamadaCard({ titulo, itens, mostrarNorma }) {
       if (!itens || itens.length === 0) return null;
       const statusInfo = {
@@ -9962,7 +10023,7 @@ ${parecer.parecer_tecnico ? `
               <div className={th}>Status</div>
               {itens.map((it, i) => {
                 // Retrocompatibilidade: registros antigos só têm item/observacao.
-                const oQue = it.oQue || it.item;
+                const oQue = frasearOQue(it.oQue || it.item);
                 const valores = (it.valores != null && it.valores !== '') ? it.valores : it.observacao;
                 const si = statusInfo[it.status] || statusInfo.na;
                 const bordas = i < itens.length - 1 ? 'border-b' : '';
