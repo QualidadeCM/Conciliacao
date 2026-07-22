@@ -5366,9 +5366,9 @@
             const e = ESTAGIOS_VARIAVEIS.find((v) => v.estagioNum === n);
             return e ? `${n} — ${e.nome}` : `${n}`;
           }).join('; ');
-          add(C1, 'Inspeções previstas pela Ficha Mestre', 'nao_conforme',
+          add(C2, 'Inspeções previstas pela Ficha Mestre', 'nao_conforme',
             `Estágio(s) declarado(s) com inspeção mas SEM inspeção na OP: ${nomes}.`);
-          apontar('nao_conforme', 1, 'OP',
+          apontar('nao_conforme', 2, 'OP × Ficha Mestre',
             `Inspeção(ões) obrigatória(s) ausente(s) na OP: ${nomes}.`,
             'Verificar no Sapiens se a inspeção foi realmente executada e registrada. Se falha de processo, emitir RNC. Se a inspeção migrou pra outro estágio, atualizar a Ficha Mestre.',
             'ISO 13485 §8.2.4 (monitoramento e medição do produto)',
@@ -5384,7 +5384,7 @@
             const e = ESTAGIOS_VARIAVEIS.find((v) => v.estagioNum === n);
             return e ? `${n} — ${e.nome}` : `${n}`;
           }).join('; ');
-          add(C1, 'Inspeções não previstas na Ficha Mestre', 'ressalva',
+          add(C2, 'Inspeções não previstas na Ficha Mestre', 'ressalva',
             `Estágio(s) com inspeção na OP mas NÃO declarado(s) na Ficha: ${nomes}.`);
           apontar('ressalva', 2, 'Ficha Mestre',
             `Inspeção(ões) encontrada(s) em estágio(s) não previsto(s) pela ficha: ${nomes}.`,
@@ -5393,7 +5393,7 @@
         }
         if (faltantes.length === 0 && extras.length === 0) {
           const totalInsp = (op?.inspecoesDetalhe || []).length;
-          add(C1, 'Inspeções previstas pela Ficha Mestre', 'conforme',
+          add(C2, 'Inspeções previstas pela Ficha Mestre', 'conforme',
             `Todas as ${totalInsp} inspeções esperadas foram encontradas na OP (${decInsp.length} declaradas na ficha + estágios fixos 50 e 60). Nenhuma inspeção extra ou faltando.`);
         }
       }
@@ -5800,7 +5800,7 @@
         const msg = totalProblemas === 0
           ? `Todos os ${okCampos.length} campos da etiqueta estão corretos: ${okCampos.join(', ')}.`
           : `${okCampos.length} campo(s) OK${okCampos.length > 0 ? ' (' + okCampos.join(', ') + ')' : ''}. ${totalProblemas} problema(s): ${[...ncCampos, ...ressCampos].join('; ')}.`;
-        add(C1, 'Etiqueta Externa × Ficha Mestre', status, msg);
+        add(C2, 'Etiqueta Externa × Ficha Mestre', status, msg);
       }
 
       // ============ CAMADA 3: Conformidade Regulatória ============
