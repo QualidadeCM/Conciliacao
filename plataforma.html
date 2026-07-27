@@ -8787,11 +8787,14 @@ ${parecer.parecer_tecnico ? `
             const nivelLabel = info.nivel === 'reincidente' ? 'Reincidente' : info.nivel === 'emergente' ? 'Em alta' : info.nivel === 'possivel' ? 'Possível reincidente' : 'Pontual';
             // Slack = operacional: SÓ o que corrigir agora. Causa raiz e ação corretiva
             // saem do alerta e passam para o relatório de reincidência (aba Dashboard).
-            const setor = setorPorCategoriaSlack(cat);
+            // O canal segue o RESPONSÁVEL pela correção (dono do documento):
+            // etiqueta → Almoxarifado (almoxarifado_gq); OP/RC/FORM/etc → PCP (pcp_gq).
+            const responsavel = responsavelPorSlot(slotKey);
+            const setor = responsavel;
             return {
               codigo: ap.codigo || 'NC',
               doc,
-              responsavel: responsavelPorSlot(slotKey),
+              responsavel,
               erro: desc,
               correto: ap.sugestao_correto || extrairCorreto(desc),
               norma: ap.referencia_normativa || '',
