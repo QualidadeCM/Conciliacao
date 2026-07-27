@@ -5627,7 +5627,8 @@
         } else if (produto?.cnpj && !et.cnpj) {
           ressCampos.push('CNPJ ausente/ilegível na etiqueta');
         }
-        // 5. Endereço da fábrica — Etiqueta × Ficha (ressalva — strings podem variar)
+        // 5. Endereço da fábrica — Etiqueta × Ficha (NC se diverge — decisão 22/07/2026).
+        // Ausente/ilegível continua ressalva (não dá para afirmar que está errado).
         if (et.endereco && produto?.enderecoFabrica) {
           // Compara após remover pontuação. Se o endereço da Ficha está contido na
           // versão normalizada da etiqueta (ou vice-versa), considera OK.
@@ -5635,19 +5636,19 @@
           if (a === b || a.includes(b) || b.includes(a)) {
             okCampos.push('endereço');
           } else {
-            ressCampos.push(`endereço divergente: etq="${et.endereco}" × Ficha="${produto.enderecoFabrica}"`);
-            apontar('ressalva', 1, 'Etiqueta Externa', `Endereço na etiqueta diverge da Ficha. Etq: ${et.endereco}. Ficha: ${produto.enderecoFabrica}.`, 'Verificar se a divergência é só formatação ou se o endereço foi alterado.', 'RDC 665/2022');
+            ncCampos.push(`endereço divergente: etq="${et.endereco}" × Ficha="${produto.enderecoFabrica}"`);
+            apontar('nao_conforme', 1, 'Etiqueta Externa', `Endereço na etiqueta diverge da Ficha. Etq: ${et.endereco}. Ficha: ${produto.enderecoFabrica}.`, 'Corrigir o endereço na etiqueta para coincidir com a Ficha Mestre.', 'RDC 665/2022', { sugestaoCorreto: produto.enderecoFabrica });
           }
         } else if (produto?.enderecoFabrica && !et.endereco) {
           ressCampos.push('endereço ausente/ilegível na etiqueta');
         }
-        // 6. Telefone — Etiqueta × Ficha (ressalva)
+        // 6. Telefone — Etiqueta × Ficha (NC se diverge — decisão 22/07/2026)
         if (et.telefone && produto?.telefone) {
           if (normNum(et.telefone) === normNum(produto.telefone)) {
             okCampos.push('telefone');
           } else {
-            ressCampos.push(`telefone "${et.telefone}" ≠ Ficha "${produto.telefone}"`);
-            apontar('ressalva', 1, 'Etiqueta Externa', `Telefone na etiqueta (${et.telefone}) não confere com a Ficha (${produto.telefone}).`, 'Corrigir o telefone na etiqueta.', 'RDC 665/2022');
+            ncCampos.push(`telefone "${et.telefone}" ≠ Ficha "${produto.telefone}"`);
+            apontar('nao_conforme', 1, 'Etiqueta Externa', `Telefone na etiqueta (${et.telefone}) não confere com a Ficha (${produto.telefone}).`, 'Corrigir o telefone na etiqueta para coincidir com a Ficha Mestre.', 'RDC 665/2022', { sugestaoCorreto: produto.telefone });
           }
         }
         // 7. Responsável Técnico (nome) — Etiqueta × Ficha (NC)
@@ -5659,12 +5660,13 @@
             apontar('nao_conforme', 1, 'Etiqueta Externa', `Responsável Técnico na etiqueta (${et.rt}) não confere com a Ficha (${produto.rt}).`, 'Corrigir o nome do RT na etiqueta.', 'RDC 751/2022');
           }
         }
-        // 8. CREA da RT
+        // 8. CREA da RT (NC se diverge — decisão 22/07/2026, acompanha o RT)
         if (et.crea && produto?.creaRt) {
           if (normNum(et.crea) === normNum(produto.creaRt)) {
             okCampos.push(`CREA da RT (${et.crea})`);
           } else {
-            ressCampos.push(`CREA "${et.crea}" ≠ Ficha "${produto.creaRt}"`);
+            ncCampos.push(`CREA "${et.crea}" ≠ Ficha "${produto.creaRt}"`);
+            apontar('nao_conforme', 1, 'Etiqueta Externa', `CREA da RT na etiqueta (${et.crea}) não confere com a Ficha (${produto.creaRt}).`, 'Corrigir o CREA da RT na etiqueta para coincidir com a Ficha Mestre.', 'RDC 751/2022', { sugestaoCorreto: produto.creaRt });
           }
         }
         // 9. Responsável Legal — Etiqueta × Ficha (NC)
@@ -5691,12 +5693,13 @@
               { sugestaoCorreto: op.dataEmissao });
           }
         }
-        // 11. Validade INDETERMINADO (ressalva se outro valor)
+        // 11. Validade INDETERMINADO (NC se outro valor — decisão 22/07/2026)
         if (et.validade) {
           if (/INDETERMINAD/i.test(et.validade)) {
             okCampos.push('validade INDETERMINADO');
           } else {
-            ressCampos.push(`validade "${et.validade}" (esperado INDETERMINADO)`);
+            ncCampos.push(`validade "${et.validade}" (esperado INDETERMINADO)`);
+            apontar('nao_conforme', 1, 'Etiqueta Externa', `Validade na etiqueta ("${et.validade}") diferente do esperado (INDETERMINADO).`, 'Corrigir a validade na etiqueta para INDETERMINADO.', 'RDC 751/2022', { sugestaoCorreto: 'INDETERMINADO' });
           }
         }
 

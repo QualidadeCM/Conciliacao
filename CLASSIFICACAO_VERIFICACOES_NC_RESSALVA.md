@@ -73,13 +73,13 @@ diverge → o item é **NC**; se só houver campos de ressalva → **Ressalva**.
 | Série (× OP) | **NC** | — |
 | Fabricante | **NC** | Ressalva |
 | CNPJ | **NC** | Ressalva |
-| Endereço | Ressalva | Ressalva |
-| Telefone | Ressalva | — |
+| Endereço | **NC** *(alterado 22/07: era Ressalva)* | Ressalva |
+| Telefone | **NC** *(alterado 22/07: era Ressalva)* | — |
 | Responsável Técnico (RT) | **NC** | — |
-| CREA da RT | Ressalva | — |
+| CREA da RT | **NC** *(alterado 22/07: era Ressalva)* | — |
 | Responsável Legal | **NC** | — |
-| Data de fabricação (× Emissão OP) | **NC** | — | *(alterado 22/07: era Ressalva)* |
-| Validade (esperado INDETERMINADO) | Ressalva | — |
+| Data de fabricação (× Emissão OP) | **NC** *(alterado 22/07: era Ressalva)* | — |
+| Validade (esperado INDETERMINADO) | **NC** *(alterado 22/07: era Ressalva)* | — |
 
 ---
 
@@ -98,15 +98,14 @@ diverge → o item é **NC**; se só houver campos de ressalva → **Ressalva**.
 
 ## Pontos que valem discussão na revisão
 
-Alguns campos podem merecer reavaliação de severidade — deixo sinalizados para a Qualidade decidir:
+Decisões já aplicadas em 22/07/2026 (antes eram ressalva, agora são **NC** quando divergem):
+**Endereço**, **Telefone**, **CREA da RT** e **Validade (≠ INDETERMINADO)** da etiqueta.
+Campo **ausente/ilegível** continua ressalva.
 
-- **Endereço** e **Telefone** do fabricante divergentes hoje são **Ressalva**. Se for dado
-  cadastral crítico na etiqueta, poderiam virar NC (como Fabricante/CNPJ já são).
-- **CREA da RT** divergente é **Ressalva**, enquanto **RT** (nome) divergente é **NC**.
-  Avaliar se a divergência do número do CREA deveria acompanhar o RT como NC.
-- **Validade ≠ INDETERMINADO** é **Ressalva** — confirmar se algum produto pode ter
-  validade determinada legítima (senão, poderia ser NC).
-- **Aptidão do inspetor** e **Inspetor não cadastrado** são **Ressalva** por decisão
-  (conforme se justificado / cadastrar e refazer) — mantido assim de propósito.
+Mantidos como **Ressalva** por decisão (não são candidatos a NC):
 
-Se quiser, ajusto a severidade de qualquer um destes — é uma mudança pequena e pontual no motor.
+- **Aptidão do inspetor** e **Inspetor não cadastrado** — conforme se justificado /
+  cadastrar e refazer.
+- Campos da etiqueta **ausentes/ilegíveis** — não dá para afirmar que estão errados.
+
+Se quiser rever a severidade de qualquer verificação, é uma mudança pequena e pontual no motor.
