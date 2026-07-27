@@ -4514,6 +4514,13 @@
       return sugestoes;
     }
 
+    // Exibe datas no padrão brasileiro DD/MM/AAAA. Aceita ISO (AAAA-MM-DD) e
+    // devolve o texto original se não reconhecer o formato (não quebra nada).
+    function formatarDataBR(s) {
+      const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      return m ? `${m[3]}/${m[2]}/${m[1]}` : String(s == null ? '' : s);
+    }
+
     function analisarConciliacao({ docs, produto, identificacao, corpus, formApprovalDate, opReprocessoAnexado = false, rncAnexado = false, operadores = [] }) {
       const op = docs.op, et = docs.etiqueta, rc = docs.rc;
       const etAcs = docs.etAcessorios || [];
@@ -5057,9 +5064,9 @@
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
               if (!etq) continue;
               if (etq.dataFabNa || !etq.dataFabricacao || /^N\/?A$/i.test(etq.dataFabricacao)) {
-                datFabNc.push(`${a.descricao} (${a.codigoSapiens}): data "${etq.dataFabricacao || 'ausente'}"`);
+                datFabNc.push(`${a.descricao} (${a.codigoSapiens}): data "${etq.dataFabricacao ? formatarDataBR(etq.dataFabricacao) : 'ausente'}"`);
               } else {
-                datFabOk.push(`${a.descricao}: ${etq.dataFabricacao}`);
+                datFabOk.push(`${a.descricao}: ${formatarDataBR(etq.dataFabricacao)}`);
               }
             }
             if (datFabNc.length > 0) {
@@ -5126,8 +5133,8 @@
         if (re.test(s)) {
           okSerie.push(`convenção "${produto.serialPrefix}-AAAAMM-N" respeitada`);
         } else {
-          ressSerie.push(`fora da convenção "${produto.serialPrefix}-AAAAMM-N"`);
-          apontar('ressalva', 1, 'Série', `Série "${s}" não segue a convenção esperada.`, 'Validar se a convenção foi alterada ou se há erro de digitação.', '');
+          ncSerie.push(`fora da convenção "${produto.serialPrefix}-AAAAMM-N" da Ficha Mestre`);
+          apontar('nao_conforme', 1, 'Série', `Número de série "${s}" não segue a convenção da Ficha Mestre ("${produto.serialPrefix}-AAAAMM-N").`, 'Corrigir o número de série conforme a convenção da Ficha Mestre; se a convenção mudou, atualizar a Ficha e refazer a análise.', 'ISO 13485 §7.5.9');
         }
       }
       const serieStatus = ncSerie.length > 0 ? 'nao_conforme' : ressSerie.length > 0 ? 'ressalva' : 'conforme';
@@ -5492,22 +5499,22 @@
         // Revisão vs data conciliação
         if (dataConcil && fm.dataRevisaoForm) {
           if (fm.dataRevisaoForm > dataConcil) {
-            ressForm.push(`revisão (${fm.dataRevisaoForm}) posterior à conciliação (${dataConcil})`);
+            ressForm.push(`revisão (${formatarDataBR(fm.dataRevisaoForm)}) posterior à conciliação (${formatarDataBR(dataConcil)})`);
             apontar('ressalva', 1, 'FORM-GQ-0047', 'Data de revisão do FORM é posterior à data da conciliação.', 'Confirmar qual revisão era vigente no dia da conciliação.', '');
           } else {
-            okForm.push(`revisão vigente em ${dataConcil}`);
+            okForm.push(`revisão vigente em ${formatarDataBR(dataConcil)}`);
           }
         }
         // Datas conciliação OP × FORM
         if (dataConcilOP && dataConcilFORM) {
           if (dataConcilOP === dataConcilFORM) {
-            okForm.push(`data conciliação ${dataConcilOP} (OP=FORM)`);
+            okForm.push(`data conciliação ${formatarDataBR(dataConcilOP)} (OP=FORM)`);
           } else {
-            ressForm.push(`data conciliação divergente: OP=${dataConcilOP}, FORM=${dataConcilFORM}`);
-            apontar('ressalva', 1, 'OP × FORM-GQ-0047', `Data da conciliação na OP (${dataConcilOP}) não confere com a data registrada no FORM (${dataConcilFORM}).`, 'Verificar qual data está correta e ajustar o documento divergente.', '');
+            ressForm.push(`data conciliação divergente: OP=${formatarDataBR(dataConcilOP)}, FORM=${formatarDataBR(dataConcilFORM)}`);
+            apontar('ressalva', 1, 'OP × FORM-GQ-0047', `Data da conciliação na OP (${formatarDataBR(dataConcilOP)}) não confere com a data registrada no FORM (${formatarDataBR(dataConcilFORM)}).`, 'Verificar qual data está correta e ajustar o documento divergente.', '');
           }
         } else if (dataConcilOP) {
-          okForm.push(`data conciliação ${dataConcilOP} (extraída da OP)`);
+          okForm.push(`data conciliação ${formatarDataBR(dataConcilOP)} (extraída da OP)`);
         }
         // Cópia controlada
         if (fm.copia === 'controlada') {
@@ -5685,12 +5692,12 @@
           if (et.dataFabricacao === op.dataEmissao) {
             okCampos.push('data de fabricação');
           } else {
-            ncCampos.push(`data fab. "${et.dataFabricacao}" ≠ Emissão OP "${op.dataEmissao}"`);
+            ncCampos.push(`data fab. "${formatarDataBR(et.dataFabricacao)}" ≠ Emissão OP "${formatarDataBR(op.dataEmissao)}"`);
             apontar('nao_conforme', 1, 'Etiqueta Externa',
-              `Data de fabricação na etiqueta (${et.dataFabricacao}) diverge da data de emissão da OP (${op.dataEmissao}).`,
+              `Data de fabricação na etiqueta (${formatarDataBR(et.dataFabricacao)}) diverge da data de emissão da OP (${formatarDataBR(op.dataEmissao)}).`,
               'Corrigir a data de fabricação na etiqueta para coincidir com a data de emissão da OP.',
               'RDC 751/2022',
-              { sugestaoCorreto: op.dataEmissao });
+              { sugestaoCorreto: formatarDataBR(op.dataEmissao) });
           }
         }
         // 11. Validade INDETERMINADO (NC se outro valor — decisão 22/07/2026)

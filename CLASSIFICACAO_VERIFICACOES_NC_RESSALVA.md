@@ -20,7 +20,7 @@ Legenda:
 
 | Verificação | É NC quando… | É Ressalva quando… | Obs. |
 |---|---|---|---|
-| Nº de série — consistência e convenção | Série diverge entre OP / Etiqueta / FORM; ou série não extraída | Série não segue a convenção esperada | — |
+| Nº de série — consistência e convenção | Série diverge entre OP / Etiqueta / FORM; série não extraída; **ou série fora da convenção da Ficha Mestre** | Série extraída de um único documento (não dá para cruzar) | *(alterado 22/07: fora da convenção era Ressalva, virou NC)* |
 | OP — número, origem e tipo | OP não identificada/parseada | — | — |
 | Cronologia de estágios da OP | — | — | Só informativo (Conforme) |
 | Cronologia coerente entre inspeções e operações | Inspeção começa antes de concluir o estágio anterior (incoerência) | — | — |
