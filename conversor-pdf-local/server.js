@@ -219,23 +219,41 @@ app.post('/convidar-usuario', async (req, res) => {
 });
 
 // ---- Alerta no Slack (Incoming Webhook) -----------------------------------
-//   Body JSON: { texto }  → posta a mensagem no canal configurado.
-//   Defina SLACK_WEBHOOK_URL no .env (https://hooks.slack.com/services/...).
+//   Body JSON: { texto, canal? }  → posta a mensagem no canal escolhido.
+//   canal: 'pcp' (canal pcp_gq) | 'almoxarifado' (canal almoxarifado_gq).
+//   Cada canal tem seu proprio Incoming Webhook. Defina no .env do servico:
+//     SLACK_WEBHOOK_PCP=...            (canal pcp_gq)
+//     SLACK_WEBHOOK_ALMOXARIFADO=...   (canal almoxarifado_gq)
+//   SLACK_WEBHOOK_URL continua sendo o fallback geral (usado se o especifico
+//   nao estiver configurado, para nao quebrar durante a transicao).
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
+const SLACK_WEBHOOK_PCP = process.env.SLACK_WEBHOOK_PCP || '';
+const SLACK_WEBHOOK_ALMOXARIFADO = process.env.SLACK_WEBHOOK_ALMOXARIFADO || '';
+function webhookDoCanal(canal) {
+  const c = String(canal || '').toLowerCase();
+  if (c === 'pcp') return SLACK_WEBHOOK_PCP || SLACK_WEBHOOK_URL;
+  if (c === 'almoxarifado' || c === 'almox') return SLACK_WEBHOOK_ALMOXARIFADO || SLACK_WEBHOOK_URL;
+  return SLACK_WEBHOOK_URL; // sem canal informado → geral
+}
 app.post('/notificar-slack', async (req, res) => {
   let body;
   try { body = JSON.parse(Buffer.from(req.body).toString('utf8')); } catch (e) { return res.status(400).json({ error: 'JSON invalido.' }); }
   const texto = body && body.texto;
+  const canal = body && body.canal;
   if (!texto) return res.status(400).json({ error: 'texto ausente.' });
-  if (!SLACK_WEBHOOK_URL) return res.status(500).json({ error: 'SLACK_WEBHOOK_URL nao configurado no .env do servico.' });
+  const webhook = webhookDoCanal(canal);
+  if (!webhook) return res.status(500).json({ error: 'Webhook do Slack nao configurado no .env do servico (canal: ' + (canal || 'geral') + '). Defina SLACK_WEBHOOK_PCP / SLACK_WEBHOOK_ALMOXARIFADO ou SLACK_WEBHOOK_URL.' });
   try {
-    const r = await fetch(SLACK_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: texto }) });
+    const r = await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: texto }) });
     if (!r.ok) return res.status(502).json({ error: 'Slack respondeu ' + r.status + ': ' + (await r.text()) });
-    console.log('[SLACK] alerta enviado');
+    console.log('[SLACK] alerta enviado (canal: ' + (canal || 'geral') + ')');
     return res.json({ ok: true });
   } catch (err) {
-    console.error('[ERRO notificar-slack]', err.message);
-    return res.status(500).json({ error: err.message || String(err) });
+    // "fetch failed" esconde o motivo real — que fica em err.cause. Expõe a causa
+    // (ex.: ENOTFOUND/ETIMEDOUT/certificate) para facilitar o diagnóstico de rede.
+    const causa = err && err.cause ? (err.cause.code || err.cause.message || String(err.cause)) : '';
+    console.error('[ERRO notificar-slack]', err.message, causa ? '| causa: ' + causa : '');
+    return res.status(500).json({ error: (err.message || String(err)) + (causa ? ' (' + causa + ')' : '') });
   }
 });
 
