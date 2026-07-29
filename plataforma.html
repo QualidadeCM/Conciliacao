@@ -4819,24 +4819,33 @@
         const gruposNomes = Object.keys(gruposAlt);
         if (gruposNomes.length > 0) {
           const gruposOk = [];         // variante na RC, ou (pode sair NF) conferida por etiqueta
-          const gruposFalta = [];      // nenhuma variante na RC e NÃO pode sair na NF → NC
-          const gruposNFsemEtq = [];   // pode sair na NF, mas nenhuma etiqueta anexada → NC (etiqueta ausente)
+          const gruposFalta = [];      // grupo OBRIGATÓRIO, nenhuma variante na RC e NÃO pode sair na NF → NC
+          const gruposNFsemEtq = [];   // grupo OBRIGATÓRIO, pode sair na NF, mas nenhuma etiqueta anexada → NC
+          const gruposOpcAusente = []; // grupo OPCIONAL sem nenhuma variante presente → sem NC (informativo)
+          const gruposMultiplos = [];  // mais de uma variante do grupo presente → ressalva p/ conferência
           for (const nome of gruposNomes) {
             const membros = gruposAlt[nome];
+            // Obrigatoriedade é do GRUPO (todas as variantes carregam a mesma flag).
+            const grupoObrig = membros.some((a) => a.obrigatorio === 'Obr.');
             const podeNFgrupo = membros.some((a) => a.podeSairApenasNaNf);
             const escolhidosRC = membros.filter((a) => textoBusca.includes(a.codigoSapiens));
             const comEtqNF = membros.filter((a) => !textoBusca.includes(a.codigoSapiens) && etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens));
+            const presentesGrupo = [...escolhidosRC, ...comEtqNF];
             if (escolhidosRC.length > 0) {
               gruposOk.push({ nome, escolhidos: escolhidosRC, via: 'RC' });
             } else if (podeNFgrupo && comEtqNF.length > 0) {
               gruposOk.push({ nome, escolhidos: comEtqNF, via: 'NF' });
+            } else if (!grupoObrig) {
+              gruposOpcAusente.push({ nome, membros });
             } else if (podeNFgrupo) {
               gruposNFsemEtq.push({ nome, membros });
             } else {
               gruposFalta.push({ nome, membros });
             }
+            // Mais de uma variante do grupo presente na mesma conciliação → ressalva.
+            if (presentesGrupo.length > 1) gruposMultiplos.push({ nome, presentes: presentesGrupo });
           }
-          // NC — grupo obrigatório na RC, nenhuma variante presente
+          // NC — grupo obrigatório, nenhuma variante presente na RC
           for (const g of gruposFalta) {
             add(C2, 'Grupo alternativo de acessórios ausente', 'nao_conforme',
               `Nenhuma variante do grupo "${g.nome}" foi identificada na RC — pelo menos uma é obrigatória. Opções cadastradas: ${g.membros.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}.`);
@@ -4845,7 +4854,7 @@
               'Confirmar na OP/RC qual variante foi utilizada neste lote e garantir que conste na RC com a etiqueta correspondente anexada.',
               'Ficha Mestre seção 3 (acessórios alternativos)');
           }
-          // NC — grupo que pode sair na NF, mas sem etiqueta anexada para conferir
+          // NC — grupo obrigatório que pode sair na NF, mas sem etiqueta anexada para conferir
           for (const g of gruposNFsemEtq) {
             add(C2, 'Etiqueta do grupo alternativo ausente', 'nao_conforme',
               `Grupo "${g.nome}" pode sair na NF de venda (não consta na RC), mas nenhuma etiqueta de suas variantes foi anexada para conferência. Opções: ${g.membros.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}.`);
@@ -4854,9 +4863,22 @@
               'Anexar a etiqueta da variante utilizada neste lote e refazer a análise.',
               'ISO 13485 §7.5.9');
           }
+          // RESSALVA — mais de uma variante do mesmo grupo apareceu (confirmar se era esperado)
+          for (const g of gruposMultiplos) {
+            add(C2, 'Grupo alternativo — múltiplas variantes', 'ressalva',
+              `Mais de uma variante do grupo "${g.nome}" foi identificada nesta conciliação: ${g.presentes.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}. Normalmente o lote usa apenas uma.`);
+            apontar('ressalva', 2, 'RC × Ficha Mestre',
+              `Grupo alternativo "${g.nome}": ${g.presentes.length} variantes presentes (${g.presentes.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}). Confirmar se o lote realmente usa mais de uma variante do grupo.`,
+              'Confirmar com a produção/PCP se o lote usa mais de uma variante; se foi engano, corrigir a RC/etiquetas.',
+              'Ficha Mestre seção 3 (acessórios alternativos)');
+          }
           if (gruposOk.length > 0) {
             add(C2, 'Grupos alternativos de acessórios', 'conforme',
               gruposOk.map((g) => `"${g.nome}": ${g.escolhidos.map((a) => `${a.descricao} (${a.codigoSapiens})`).join(', ')}${g.via === 'NF' ? ' (sai na NF — etiqueta conferida contra a Ficha)' : ''}`).join(' · ') + '.');
+          }
+          if (gruposOpcAusente.length > 0) {
+            add(C2, 'Grupos alternativos opcionais', 'conforme',
+              `Grupo(s) opcional(is) sem variante neste lote (sem pendência): ${gruposOpcAusente.map((g) => `"${g.nome}"`).join(', ')}.`);
           }
         }
 
@@ -12479,13 +12501,14 @@ ${parecer.parecer_tecnico ? `
           const g = (a.grupo_alternativo || '').trim();
           if (!g) continue;
           if (!m[g]) m[g] = {
-            descricao: a.descricao || g,
+            nome: g,                                   // nome/identificador do grupo
+            obrigatorio: a.obrigatorio !== false,      // obrigatoriedade É DO GRUPO
             is_fabricante_confiance: !!a.is_fabricante_confiance,
             esteril: !!a.esteril,
             pode_sair_apenas_na_nf: !!a.pode_sair_apenas_na_nf,
-            codigos: [],
+            variantes: [],                             // [{ nome (na etiqueta), codigo }]
           };
-          if (a.codigo_sapiens) m[g].codigos.push(a.codigo_sapiens);
+          if (a.codigo_sapiens || a.descricao) m[g].variantes.push({ nome: a.descricao || '', codigo: a.codigo_sapiens || '' });
         }
         return Object.values(m);
       };
@@ -12658,13 +12681,13 @@ ${parecer.parecer_tecnico ? `
       const removeAcessorio = (i) => setAcessorios((p) => p.filter((_, idx) => idx !== i));
       const updateAcessorio = (i, k, v) => setAcessorios((p) => p.map((a, idx) => idx === i ? { ...a, [k]: v } : a));
 
-      // Helpers para blocos alternativos (descrição única + vários códigos Sapiens possíveis)
-      const addBlocoAlt = () => setAcessoriosAlt((p) => [...p, { descricao: '', codigos: ['', ''], is_fabricante_confiance: false, esteril: false, pode_sair_apenas_na_nf: false }]);
+      // Helpers para blocos alternativos: nome do grupo + obrigatoriedade + N variantes {nome, codigo}
+      const addBlocoAlt = () => setAcessoriosAlt((p) => [...p, { nome: '', obrigatorio: true, variantes: [{ nome: '', codigo: '' }, { nome: '', codigo: '' }], is_fabricante_confiance: false, esteril: false, pode_sair_apenas_na_nf: false }]);
       const removeBlocoAlt = (i) => setAcessoriosAlt((p) => p.filter((_, idx) => idx !== i));
       const updateBlocoAlt = (i, k, v) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, [k]: v } : b));
-      const addCodigoAlt = (i) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, codigos: [...(b.codigos || []), ''] } : b));
-      const removeCodigoAlt = (i, j) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, codigos: (b.codigos || []).filter((_, k) => k !== j) } : b));
-      const updateCodigoAlt = (i, j, v) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, codigos: (b.codigos || []).map((c, k) => k === j ? v : c) } : b));
+      const addVarianteAlt = (i) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, variantes: [...(b.variantes || []), { nome: '', codigo: '' }] } : b));
+      const removeVarianteAlt = (i, j) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, variantes: (b.variantes || []).filter((_, k) => k !== j) } : b));
+      const updateVarianteAlt = (i, j, campo, v) => setAcessoriosAlt((p) => p.map((b, idx) => idx === i ? { ...b, variantes: (b.variantes || []).map((vr, k) => k === j ? { ...vr, [campo]: v } : vr) } : b));
 
       // (Helpers de roteiro/inspecoes/bom removidos — Seções 4/5/6 não usam mais arrays editáveis.
       //  Estágios variáveis agora são checkboxes via setEstagiosAplicaveis / toggleEstagio.)
@@ -12761,22 +12784,25 @@ ${parecer.parecer_tecnico ? `
                 grupo_alternativo: null,
               }));
 
-            // Blocos alternativos: expandem em N linhas (uma por código), todas
-            // compartilhando grupo_alternativo = descrição do bloco. obrigatorio=false
-            // individualmente (a regra "pelo menos um" é do grupo).
+            // Blocos alternativos: expandem em N linhas (uma por variante). Cada linha
+            // guarda o NOME da variante (na etiqueta) em `descricao` e o código em
+            // `codigo_sapiens`; todas compartilham grupo_alternativo = nome do grupo e
+            // a mesma flag `obrigatorio` (a obrigatoriedade é DO GRUPO — regra
+            // "pelo menos uma variante").
             const linhasAlt = [];
             for (const b of acessoriosAlt) {
-              const desc = (b.descricao || '').trim();
-              const cods = (b.codigos || []).map((c) => (c || '').trim()).filter(Boolean);
-              if (!desc || cods.length === 0) continue;
-              for (const c of cods) {
+              const nomeGrupo = (b.nome || '').trim();
+              const vars = (b.variantes || []).filter((v) => (v.codigo || '').trim() || (v.nome || '').trim());
+              if (!nomeGrupo || vars.length === 0) continue;
+              for (const v of vars) {
                 linhasAlt.push({
-                  descricao: desc, codigo_sapiens: c,
-                  obrigatorio: false,
+                  descricao: (v.nome || '').trim() || nomeGrupo,
+                  codigo_sapiens: (v.codigo || '').trim() || null,
+                  obrigatorio: b.obrigatorio !== false,
                   is_fabricante_confiance: !!b.is_fabricante_confiance,
                   esteril: !!b.esteril,
                   pode_sair_apenas_na_nf: !!b.pode_sair_apenas_na_nf,
-                  grupo_alternativo: desc,
+                  grupo_alternativo: nomeGrupo,
                 });
               }
             }
@@ -12957,40 +12983,45 @@ ${parecer.parecer_tecnico ? `
               ))}
               <Button variant="outline" size="sm" onClick={addAcessorio}><Icon name="plus" />Adicionar acessório</Button>
 
-              {/* Acessórios alternativos: um bloco = uma descrição + vários códigos Sapiens possíveis.
-                  O cliente escolhe uma variante; o agente exige pelo menos uma presente na RC. */}
+              {/* Acessórios alternativos: um grupo = várias variantes {nome na etiqueta, código Sapiens}.
+                  O cliente escolhe uma variante. Se o grupo é obrigatório, pelo menos uma deve
+                  constar (com etiqueta). O casamento é sempre por código Sapiens. */}
               <div className="pt-4 mt-2 border-t">
                 <div className="mb-2">
-                  <h4 className="text-sm font-semibold">Acessórios alternativos</h4>
-                  <p className="text-xs text-muted-foreground">Para itens que variam conforme o cliente (ex.: Cabeça de Câmera). Informe a descrição uma vez e liste os códigos Sapiens possíveis. O agente exige que <strong>pelo menos um</strong> conste na RC, com a etiqueta conferida.</p>
+                  <h4 className="text-sm font-semibold">Acessórios alternativos (grupos)</h4>
+                  <p className="text-xs text-muted-foreground">Para itens que variam (ex.: pode ser INO0006 <em>ou</em> EDR0007). Dê um nome ao grupo, marque se é obrigatório e liste as variantes com o <strong>nome que sai na etiqueta</strong> e o <strong>código Sapiens</strong>. Se obrigatório, o agente exige que <strong>pelo menos uma</strong> variante conste (com etiqueta conferida); se mais de uma aparecer, gera ressalva.</p>
                 </div>
                 <div className="space-y-3">
                   {acessoriosAlt.map((b, i) => (
                     <div key={i} className="rounded-lg border border-dashed p-3 bg-accent/5">
                       <div className="grid grid-cols-1 gap-3">
-                        <div><Label>Descrição *</Label><Input value={b.descricao} onChange={(e) => updateBlocoAlt(i, 'descricao', e.target.value)} placeholder="Cabeça de Câmera CM-STATION" /></div>
+                        <div className="flex flex-wrap items-end gap-3">
+                          <div className="flex-1 min-w-[220px]"><Label>Nome do grupo *</Label><Input value={b.nome} onChange={(e) => updateBlocoAlt(i, 'nome', e.target.value)} placeholder="Ex.: Fonte de luz (alternativa)" /></div>
+                          <label className="flex items-center gap-2 text-sm h-10" title="Obrigatório = pelo menos uma variante deve constar. Opcional = se nenhuma aparecer, não gera NC."><input type="checkbox" checked={b.obrigatorio !== false} onChange={(e) => updateBlocoAlt(i, 'obrigatorio', e.target.checked)} className="h-4 w-4" />Grupo obrigatório</label>
+                        </div>
                         <div>
-                          <Label>Códigos Sapiens possíveis *</Label>
+                          <Label>Variantes (nome na etiqueta + código Sapiens) *</Label>
                           <div className="space-y-2">
-                            {(b.codigos || []).map((c, j) => (
+                            {(b.variantes || []).map((v, j) => (
                               <div key={j} className="flex items-center gap-2">
-                                <Input value={c} onChange={(e) => updateCodigoAlt(i, j, e.target.value)} placeholder="IPM0009" className="flex-1" />
-                                <Button variant="ghost" size="sm" onClick={() => removeCodigoAlt(i, j)} disabled={(b.codigos || []).length <= 1} title="Remover código"><Icon name="trash" className="h-3.5 w-3.5" /></Button>
+                                <Input value={v.nome} onChange={(e) => updateVarianteAlt(i, j, 'nome', e.target.value)} placeholder="Nome na etiqueta (ex.: Fonte INOVA)" className="flex-1" />
+                                <Input value={v.codigo} onChange={(e) => updateVarianteAlt(i, j, 'codigo', e.target.value)} placeholder="INO0006" className="w-40" />
+                                <Button variant="ghost" size="sm" onClick={() => removeVarianteAlt(i, j)} disabled={(b.variantes || []).length <= 1} title="Remover variante"><Icon name="trash" className="h-3.5 w-3.5" /></Button>
                               </div>
                             ))}
-                            <Button variant="ghost" size="sm" onClick={() => addCodigoAlt(i)}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar código</Button>
+                            <Button variant="ghost" size="sm" onClick={() => addVarianteAlt(i)}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar variante</Button>
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-4">
                           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!b.is_fabricante_confiance} onChange={(e) => updateBlocoAlt(i, 'is_fabricante_confiance', e.target.checked)} className="h-4 w-4" />Confiance é Fabricante</label>
                           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!b.esteril} onChange={(e) => updateBlocoAlt(i, 'esteril', e.target.checked)} className="h-4 w-4" />Estéril</label>
                           <label className="flex items-center gap-2 text-sm" title="A variante sai na NF de venda (não consta na RC). O agente não exige presença na RC, mas ainda pede a etiqueta da variante utilizada para conferência."><input type="checkbox" checked={!!b.pode_sair_apenas_na_nf} onChange={(e) => updateBlocoAlt(i, 'pode_sair_apenas_na_nf', e.target.checked)} className="h-4 w-4" />Pode sair na NF de venda</label>
-                          <Button variant="ghost" size="sm" onClick={() => removeBlocoAlt(i)} className="ml-auto"><Icon name="trash" className="h-3.5 w-3.5" />Remover bloco</Button>
+                          <Button variant="ghost" size="sm" onClick={() => removeBlocoAlt(i)} className="ml-auto"><Icon name="trash" className="h-3.5 w-3.5" />Remover grupo</Button>
                         </div>
                       </div>
                     </div>
                   ))}
-                  <Button variant="outline" size="sm" onClick={addBlocoAlt}><Icon name="plus" />Adicionar bloco alternativo</Button>
+                  <Button variant="outline" size="sm" onClick={addBlocoAlt}><Icon name="plus" />Adicionar grupo alternativo</Button>
                 </div>
               </div>
             </div>
