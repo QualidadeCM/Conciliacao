@@ -57,9 +57,11 @@ Legenda:
 | Marcações N/A do FORM × Ficha Mestre | Validação bloqueada (derivação sem ficha) | — | Conforme se bate |
 | Etiqueta do acessório ausente na análise | Falta a etiqueta de um acessório que exigia etiqueta | — | — |
 | Acessórios opcionais não identificados | — | — | Informativo (Conforme) |
-| Grupo alternativo de acessórios ausente | Nenhum item do grupo alternativo presente | — | — |
-| Etiqueta do grupo alternativo ausente | Falta etiqueta do item do grupo alternativo | — | — |
-| Grupos alternativos de acessórios | — | — | Informativo (Conforme) |
+| Grupo alternativo de acessórios ausente | Grupo **obrigatório** e nenhuma variante presente na RC | — | Grupo opcional sem variante = sem NC *(22/07)* |
+| Etiqueta do grupo alternativo ausente | Grupo **obrigatório** que sai na NF, mas sem etiqueta anexada | — | — |
+| Grupo alternativo — múltiplas variantes | — | Mais de uma variante do mesmo grupo presente na conciliação | Confirmar se o lote usa mais de uma *(novo 22/07)* |
+| Grupos alternativos de acessórios | — | — | Informativo (Conforme) — variante(s) presente(s) e conferida(s) |
+| Grupos alternativos opcionais | — | — | Informativo (Conforme) — grupo opcional sem variante no lote |
 
 ### Etiqueta Externa × Ficha Mestre (verificação consolidada, campo a campo)
 
