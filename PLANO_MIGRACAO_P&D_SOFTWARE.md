@@ -1,342 +1,216 @@
-# Plano de Migração — Plataforma de Conciliação da Produção
+# Plataforma de Conciliação da Produção — Guia de Funcionalidades e Adequação
 
 **Para:** P&D Software — Confiance Medical
 **Solicitante:** Maria Luiza Zaccur (Garantia da Qualidade)
-**Data:** 01/07/2026
-**Objetivo:** Migrar a plataforma atual (arquivo HTML monolítico + Supabase) para o padrão oficial de desenvolvimento da Confiance (React 18 + TypeScript + Vite + shadcn/ui + MySQL local + integração SCM).
+**Data:** 29/07/2026 (atualiza a versão de 01/07/2026)
+**Objetivo:** Apresentar o sistema, como ele funciona hoje, e o que falta para adequá-lo ao **Padrão de Desenvolvimento de Sistemas da Confiance Medical** (React 18 + TypeScript + Vite + shadcn/ui + MySQL local + integração SCM).
 
 ---
 
-## 1. Contexto e visão geral
+## 1. Visão geral
 
-A plataforma de Conciliação da Produção é usada pela Garantia da Qualidade (QG) para validar automaticamente os documentos de fechamento de OPs (Ordem de Produção, RC, Etiquetas, FORM-GQ-0047) e emitir parecer técnico de liberação. O sistema já está em uso operacional e resolve o problema de negócio, mas foi desenvolvido fora do padrão oficial e agora precisa ser adequado.
+A plataforma de Conciliação da Produção é usada pela Garantia da Qualidade (QG) para validar automaticamente os documentos de fechamento de Ordens de Produção (OP, RC, Etiquetas, FORM-GQ-0047) e emitir um **parecer técnico de liberação** do lote. O sistema está em uso operacional e resolve o problema de negócio; foi desenvolvido fora do padrão oficial e está sendo submetido ao P&D para adequação.
 
-**Escopo funcional (a preservar 100%):**
-- Análise automática de OPs baseada em regras determinísticas (3 camadas — Camada 1 = validação técnica; Camada 2 = cruzamento de documentos; Camada 3 = anexos condicionais)
-- Cadastro de Fichas Mestres com derivações, acessórios aplicáveis, roteiros de produção
-- Cadastro do catálogo de 89 produtos
-- Geração automática de FORM-GQ-0047 pré-preenchido
-- Empacotamento em ZIP com OP + FORM + Parecer + Documentos originais convertidos em PDF
-- Histórico completo com filtros, ordenação, re-análise com documentos corrigidos, justificativas de ressalvas
-- Dashboard com métricas mensais/anuais e gráficos de conformidade
-- Importação em massa de análises manuais (retroativas)
-- Exportação consolidada para auditoria
+A análise é **determinística** (regras + parsers, sem IA no motor de decisão) e organizada em três camadas:
+
+- **Camada 1 — Consistência interna entre documentos** (série igual entre OP/Etiqueta/FORM, cronologia de estágios/inspeções, RC × etiqueta de acessório, medições dentro da faixa, aptidão do inspetor, FORM-GQ-0047).
+- **Camada 2 — Conformidade contra a Ficha Mestre** (identificação do produto, derivação, registro ANVISA, acessórios obrigatórios, grupos alternativos, inspeções previstas, Etiqueta Externa × Ficha).
+- **Camada 3 — Conformidade regulatória** (rastreabilidade, rotulagem, checklist de liberação, BPF, OP de reprocesso, RNC).
+
+Cada verificação é exibida em três colunas — **O que foi verificado / Valores lidos / Status** — e classificada como Conforme, Ressalva, Não Conformidade (NC) ou N/A.
 
 ---
 
-## 2. Estado atual (o que existe)
+## 2. Como funciona hoje (inventário de funcionalidades)
 
-### 2.1 Arquivos entregues no backup
+### 2.1 Análise e parecer
 
-Todos estão em `Backup_v1_2026-07-01/`:
+- Upload de documentos por "slots": OP, RC, Etiqueta do produto, N × Etiqueta de acessório, FORM-GQ-0047 (opcional), OP de Reprocesso e RNC (condicionais). Todos aceitam **arrastar ou selecionar** (inclusive pasta).
+- Parsers heurísticos: `parseOP`, `parseRC`, `parseEtiqueta`, `parseEtiquetaAcessorio` (validados com dezenas de OPs de referência).
+- Motor `analisarConciliacao` (Camadas 1/2/3) → parecer com apontamentos, resultado geral e checklist por camada.
+- **Detecção automática** da data de conciliação e da **OP a que a RC se refere** (cruzamento RC × OP).
+- Justificativa de ressalva pelo RT → reclassifica como conforme (não conta como correção).
+- Correção de documento NC → re-análise reusando os slots não corrigidos e os arquivos originais armazenados.
+- Geração automática do **FORM-GQ-0047** pré-preenchido (XLSX com formatação preservada).
+- **Parecer técnico em PDF** e **empacotamento em ZIP** (OP + FORM + Parecer + documentos originais convertidos em PDF).
+- Bloqueios: download com bloqueador/ressalva sem justificativa; análise duplicada (OP+Série); importação de produto sem Ficha Mestre.
 
-| Arquivo | Descrição | Uso na migração |
-|---|---|---|
-| `plataforma.html` (615 KB, ~10.700 linhas) | Aplicação completa React 18 inline + Babel-standalone no browser | Fonte única de verdade da lógica de negócio — todos os regexes, parsers e regras estão aqui |
-| `PROTOCOLO_AGENTE_CONCILIACAO.md` | Documento com todas as regras de negócio consolidadas | Referência canônica das regras a preservar |
-| `AUDITORIA_PADRAO_CONFIANCE.md` | Comparativo item a item entre estado atual e padrão | Referência do gap |
-| `dump_dados_supabase.sql` | Script para extrair dados atuais do Supabase | Migração de dados |
-| `edge-function/` | Código da Edge Function `converter-para-pdf` (CloudConvert) | Referência para substituição |
-| `migration_estagios_com_inspecao.sql` | Última migration aplicada | Contexto do schema atual |
-| `Template_Fichas_Mestres.xlsx` | Template Excel para cadastro em massa | Preservar essa funcionalidade |
-| `FORM-GQ-0047-8_CheckList_Conciliacao_Fonte_de_Luz_Led.pdf` | Template original do FORM | Recurso do gerador de FORM |
-| `Ficha_Mestre_CM-LED.pdf` | Exemplo de ficha preenchida | Referência de dados |
+### 2.2 Cadastros
 
-### 2.2 Stack atual (o que NÃO é aderente)
+- **Catálogo de produtos** (~89 produtos).
+- **Fichas Mestres**: derivações, acessórios aplicáveis, estágios variáveis aplicáveis, estágios com inspeção, convenção do nº de série, dados regulatórios.
+- **Acessórios alternativos (grupos)**: cada grupo tem nome, flag **obrigatório/opcional** e variantes com **nome na etiqueta + código Sapiens**; casamento sempre por código Sapiens.
+- **Inspetores por estágio** (o "Ni"): lista global de quem está autorizado a inspecionar cada estágio (admissão = adicionar, demissão = inativar preservando histórico). *(A conferência de operador foi descontinuada — só inspetor.)*
 
-**Frontend:**
-- React 18 + JSX inline (SEM TypeScript)
-- Babel-standalone compilando JSX em runtime no browser (warning: passou de 500KB, deoptimizando)
-- Tailwind via CDN (sem build local)
-- Componentes shadcn-like escritos manualmente (Card, Button, Input, Textarea, ToastProvider)
-- Ícones inline em SVG (função `Icon` com dicionário)
-- Roteamento: state manual + `window.location.hash`
-- Estado: `useState` + chamadas diretas ao Supabase JS SDK
-- Formulários: JSX controlado + validação ad-hoc
-- Gráficos: Chart.js via CDN
-- PDF/Excel: pdf.js, pdf-lib, ExcelJS, JSZip via CDN
-- Executado com `file://` (duplo clique no arquivo abre no navegador)
+### 2.3 Histórico, dashboard e análises
 
-**Backend:**
-- Supabase (PostgreSQL nuvem + Storage + Auth + Edge Functions)
-- Tabelas: `produtos`, `fichas_mestres`, `acessorios_aplicaveis`, `analises`, `analises_apontamentos`
-- Buckets: `pacotes-analise`, `form-templates`
-- Edge Function: `converter-para-pdf` chamando CloudConvert
-- Auth próprio via Supabase Auth (tela de login própria)
+- **Histórico** com filtros (data, mês/ano, equipamento, modelo encadeado, origem agente/manual, correções, busca textual), ordenação clicável e cabeçalho fixo.
+- **Download em lote** dos pacotes de OPs conformes pendentes para a pasta de rede, com indicador de progresso; subpasta do mês pela **data da análise**.
+- **Importação em massa** de análises manuais retroativas (XLSX).
+- **Dashboard em abas**:
+  - **Gráficos** — KPIs, donut de conformidade, erros por tipo de documento, erros por equipamento (ressalvas ficam fora das contagens dos gráficos).
+  - **Histórico de correções**.
+  - **Tendência e reincidência** — reincidência por chave (categoria + equipamento + alvo), níveis Pontual / Possível reincidente / Reincidente / Em alta (só na janela de até 30 dias; períodos maiores = consulta). **Tela apenas de consulta.**
+  - **Melhorias regulatórias** — oportunidades de melhoria (M-01, M-02…) capturadas nas análises, com deduplicação por código; a Qualidade marca **Acatar / Não acatar** (decisão encerra o item).
 
-### 2.3 Regras de negócio implementadas (não pode regredir)
+### 2.4 Governança e integrações
 
-**Parsers (heurísticos, com muitas OPs de referência já validadas):**
-- `parseOP` — extrai da OP: número, série, produto, modelo, derivação, estágios, operações (com estagio_numero, inicio, fim, tempo, operador), inspeções detalhadas (numero, plano, inspetor, data, hora, status, estagio), medições críticas, componentes conferidos, aprovações. Formato do texto extraído pelo pdf.js UMD é MULTI-LINHA — regex atual capta `Estágio: NN Nome\nInspeção: NNNNNN N PLANO Status: XXX Usuário Inspeção: NOME\nData / Hora Exec. Plano: DD/MM/AAAA HH:MM`
-- `parseRC` — extrai da Requisição de Componentes: número, código, descrição, quantidade, lote, aceita PDF/XLSX/CSV
-- `parseEtiqueta` — extrai da etiqueta do produto: família, fabricante, CNPJ, endereço, telefone, RT, CREA, responsável legal, validade
-- `parseEtiquetaAcessorio` — extrai de etiqueta de acessório: código, descrição, lote, validade, fabricante/fornecedor
-
-**Cruzamentos (analisarConciliacao — Camadas 1/2/3):**
-- Nº série: consistência entre OP, FORM, Etiqueta + convenção da Ficha
-- Cronologia: estágios em ordem + inspeção do estágio N não pode ser posterior ao início de operações do estágio M>N
-- Duplicatas: mesma inspeção 2× com inspetores diferentes → 2ª deve ser posterior
-- Ficha × OP: estágios declarados com inspeção presentes + estágios fixos universais 50 (Embalagem) e 60 (Conciliação) + detecta faltas (NC) e extras (ressalva)
-- Medições: aprovadas dentro do range Vlr_Min/Vlr_Max
-- RC × Etiqueta acessório × Ficha: lógica de 4 categorias (obrigatório, opcional, fabricante Confiance, estéril, pode_sair_apenas_na_nf)
-- Datas: fabricação Confiance vs data do lote; validade estéril; validade indeterminada
-- OP de Reprocesso/RNC: guiado por anexo, não por tipo da OP
-
-**Fluxos:**
-- Upload de slots (OP + RC + Etiqueta produto + N × Etiqueta acessório + opcionalmente FORM já preenchido + OP Reprocesso + RNC)
-- Análise → parecer com 3 camadas + apontamentos + resultado geral (conforme/ressalva/nao_conforme)
-- Justificativa de ressalva pelo RT → re-classifica como conforme + recalcula resultado geral
-- Correção de documento NC → re-análise reusando slots não corrigidos + arquivos do Storage
-- Empacotamento em ZIP: OP+FORM(XLSX+PDF)+Parecer(PDF)+demais docs convertidos para PDF via CloudConvert
-- Bloqueio de download quando há bloqueador/ressalva sem justificativa
-- Bloqueio de análise duplicada (OP+Série já analisada)
-- Bloqueio de importação de produto sem Ficha Mestre
-
-**Filtros/relatórios:**
-- Histórico: filtros por data, mês/ano, equipamento, modelo (encadeado), origem (agente/manual), correções, busca textual
-- Ordenação clicável nas colunas
-- Cabeçalho sticky no scroll
-- Dashboard: cards agregados, gráfico donut de conformidade, gráfico de erros por tipo de equipamento, últimas análises, breakdown de correções, exportação em PDF por gráfico
-- Exportação consolidada para auditoria (múltiplas análises → ZIP unificado)
-- Importação em massa de análises manuais retroativas (XLSX)
-
-**Estágios do processo produtivo:**
-- **Variáveis** (a ficha declara aplicáveis): 5 Separação, 7 Preparação Componentes, 10 Montagem, 15 Fechamento Tela, 20 Prep. Gabinete, 25 Fech.+Acab. Gabinete Plástico, 30 Montagem Eletrônica, 35 Programação, 39 Gravação, 40 Finalização
-- **Fixos** (todo produto): CQ produto acabado, Embalagem, Conciliação, Verificação da rotulagem
-- **Condicionais** (só se anexado): OP de Reprocesso, RNCs
-- **Com inspeção obrigatória universal**: 50, 60 (regra global 01/07/2026)
+- **Permissões em 3 níveis** (1 Usuário, 2 Administrador, 3 Gestor) com perfis, convites e **log de atividades**.
+- **Solicitações/aprovações**: ações sensíveis (excluir/refazer) podem exigir aprovação.
+- **Alerta de NC no Slack** com card editável, roteado **por canal do setor responsável**: correção do PCP → canal `pcp_gq`; correção do Almoxarifado → canal `almoxarifado_gq` (uma mensagem por canal). Aviso de reincidência opcional junto da NC (checkbox, ligado por padrão).
 
 ---
 
-## 3. Padrão alvo (o que deve virar)
+## 3. Arquitetura atual
 
-Conforme "PADRÃO DE DESENVOLVIMENTO DE SISTEMAS — CONFIANCE MEDICAL":
+### 3.1 Frontend
 
-**Frontend:**
-- React 18 + TypeScript (TSX)
-- Vite + `@vitejs/plugin-react-swc`
-- Tailwind CSS (build local)
-- shadcn/ui (Radix UI)
-- lucide-react
-- React Router DOM v6
-- TanStack React Query v5
-- React Hook Form + Zod
-- Recharts
-- Sonner + shadcn Toaster
-- Aliases: `@/` → `src/`
+- **Arquivo único** `plataforma.html` (~14.400 linhas): React 18 + JSX inline **sem TypeScript**, compilado por **Babel-standalone no browser** (em runtime).
+- Tailwind via CDN; componentes shadcn-like escritos à mão (Card, Button, Input, Modal, Toaster…); ícones SVG inline.
+- Roteamento por estado + `window.location.hash`. Estado com `useState` + chamadas diretas ao **Supabase JS SDK**.
+- Gráficos custom (SVG) e Chart.js via CDN; PDF/Excel/ZIP via pdf.js, pdf-lib, ExcelJS, JSZip (CDN).
 
-**Backend:**
-- MySQL local no servidor da empresa
-- API REST com prefixo `/CONC/api/v1/` (sugerido)
-- URL base em `src/config/api.ts`
-- Autenticação delegada ao SCM (ler `auth_token` do localStorage + `authFetch` + redirect ao SCM em 401)
-- Storage de arquivos em servidor local (endpoint próprio de upload/download)
+### 3.2 Backend / persistência
 
-**Estrutura de pastas:**
-```
-src/
-├── components/           # UI reutilizável (Card, Button, etc. via shadcn)
-├── config/
-│   └── api.ts            # URLs e endpoints
-├── contexts/             # Contextos sem AuthContext próprio
-├── hooks/                # Custom hooks (ex.: useAnalises, useProdutos)
-├── lib/                  # Utils (formatDate, parseNumeroSerie, etc.)
-├── pages/
-│   ├── dashboard/
-│   ├── analise/
-│   ├── historico/
-│   └── cadastro/
-└── services/
-    └── api/
-        ├── analises.ts
-        ├── produtos.ts
-        ├── fichas.ts
-        └── uploads.ts
-```
+- **Supabase** (PostgreSQL na nuvem + Storage + Auth + Realtime). Tabelas principais: `produtos`, `fichas_mestres`, `acessorios_aplicaveis`, `analises`, `apontamentos`, `config_app`, `perfis`, `logs_atividade`, `solicitacoes`, `operadores`, `melhorias_regulatorias` (e `operacoes_livres`, dormente). Buckets: `pacotes-analise`, `form-templates`.
+- **Autenticação própria** via Supabase Auth (tela de login própria).
+
+### 3.3 Serviço local `conversor-pdf-local` (Node/Express + PM2)
+
+Já roda **on-premise** no servidor da empresa e **substituiu o CloudConvert** por conversão local:
+
+- `POST /converter-pdf` — conversão de documentos para PDF via **LibreOffice/Ghostscript/Chromium** (sem serviço de nuvem).
+- `POST /salvar-pacote` — grava o ZIP do pacote na pasta de rede.
+- `POST /convidar-usuario` — provisiona usuário (Supabase Admin).
+- `POST /notificar-slack` — envia alerta ao Slack, **roteando por canal** (`SLACK_WEBHOOK_PCP` / `SLACK_WEBHOOK_ALMOXARIFADO`).
+- `POST /pcp-status` — integração com planilha do PCP (dormente).
+- `GET /health`.
+
+Segredos (service_role, webhooks do Slack) ficam **apenas** no `.env` do serviço, fora do Git e do navegador.
 
 ---
 
-## 4. Fases sugeridas
+## 4. Adequação às regras da empresa — status atual
 
-### Fase 0 — Preparação (2 dias)
-- Provisionar servidor MySQL local
-- Provisionar servidor de aplicação (Node/nginx) para servir o build Vite
-- Confirmar URL e credenciais do SCM (login, logout, endpoint que valida token)
-- Verificar disponibilidade de alternativa on-premise ao CloudConvert (LibreOffice headless recomendado)
-- Definir prefixo da API (`/CONC/api/v1/` sugerido)
-- Criar repositório Git do novo projeto
+Comparação com o **Padrão de Desenvolvimento de Sistemas — Confiance Medical**.
 
-### Fase 1 — Fundação do frontend (3-4 dias)
-- `npm create vite@latest plataforma-conciliacao -- --template react-ts`
-- Configurar Tailwind, path aliases `@/`, ESLint, Prettier
-- Instalar shadcn/ui, lucide-react, TanStack Query, React Hook Form, Zod, Recharts, Sonner
-- Configurar `src/config/api.ts`
-- Configurar rotas base com React Router DOM v6
-- Criar layout base (Sidebar + main) usando componentes shadcn
-- Definir contratos TypeScript das entidades: `Analise`, `Produto`, `FichaMestre`, `Acessorio`, `Apontamento`, `SlotUpload`, `Parecer`, `Camada`, `Cronologia`
+| # | Regra da empresa | Status | O que falta |
+|---|---|---|---|
+| Stack front | React 18 + **TypeScript + Vite + shadcn/ui + React Router + React Query + RHF+Zod + Recharts** | ❌ Não atende | Hoje é HTML único com Babel no browser, sem TS/Vite/build. Reescrever no stack oficial. |
+| Estilo | Tailwind (build local) | 🟡 Parcial | Usa Tailwind, mas via CDN (sem build). |
+| Banco | **MySQL local** no servidor | ❌ Não atende | Hoje PostgreSQL na nuvem (Supabase). Modelar e migrar para MySQL local. |
+| Proibição de nuvem | Nenhum dado persistente fora do servidor | ❌ Não atende | Dados e arquivos ainda no Supabase (Postgres + Storage). Mover tudo para servidor local. |
+| Conversão de documentos | On-premise | ✅ **Já adequado** | Serviço local com LibreOffice/Ghostscript já substituiu o CloudConvert. |
+| Armazenamento de arquivos | Servidor local | 🟡 Parcial | O ZIP do pacote já é salvo na rede via `/salvar-pacote`; os **originais** ainda sobem para o Storage do Supabase. Migrar para filesystem local. |
+| API | REST por prefixo `/SIGLA/api/v1/` | ❌ Não atende | Não há API REST própria; o front fala direto com o Supabase. Criar backend REST (`/CONC/api/v1/`). |
+| Autenticação | **Delegada ao SCM** (JWT, sem auth próprio) | ❌ Não atende | Hoje login próprio (Supabase Auth). Trocar por leitura de `auth_token`/`auth_permissoes` do SCM + `authFetch` + redirect em 401. Remover auth próprio. |
+| Estrutura de pastas | `src/components|config|contexts|hooks|lib|pages|services/api` | ❌ Não atende | Arquivo único. Reorganizar na estrutura padrão. |
+| Aliases `@/` → `src/` | — | ❌ Não atende | Introduzir no Vite. |
+| Tratamento de erros (401→SCM, 403/404/500) | — | ❌ Não atende | Implementar no cliente HTTP. |
+| TypeScript sem `any`; nomes em português | — | ❌ Não atende | Tipar entidades (`Analise`, `Produto`, `FichaMestre`, `Apontamento`, `Parecer`…). |
+| Documentação ao finalizar | — | 🟡 Parcial | Já existem vários `.md`; consolidar README + guia de manutenção no fim. |
 
-### Fase 2 — Autenticação SCM (2 dias)
-- Substituir tela de login própria por leitura do `auth_token` do localStorage
-- Implementar `authFetch(url, options)` que injeta Bearer token
-- Criar hook `useAuth()` que lê `auth_user` e `auth_permissoes`
-- Criar `<Protected level={n}>` que checa nível (1 usuário / 2 admin / 3 gestor)
-- Interceptor 401 → redirect para SCM
-- Remover código Supabase Auth por completo
-
-### Fase 3 — Backend REST + MySQL (2-3 semanas)
-- Modelar schema MySQL equivalente ao Supabase atual:
-  - `produtos` (id, equipamento, modelo, codigo_referencia, codigo_sapiens, registro_anvisa, ativo, created_at)
-  - `fichas_mestres` (todos os campos atuais + `estagios_aplicaveis` como TEXT/JSON, `estagios_com_inspecao` como JSON)
-  - `acessorios_aplicaveis`
-  - `analises` (com `parecer_completo` como JSON/LONGTEXT)
-  - `analises_apontamentos`
-  - `pacotes_analise` (metadata dos ZIPs)
-  - `arquivos_analise` (referência aos arquivos no filesystem)
-- Endpoints REST (ver seção 5)
-- Salvar arquivos no filesystem local em `/var/conciliacao/uploads/` com paths versionados por data
-- Substituir Edge Function CloudConvert por LibreOffice headless (ex.: `libreoffice --headless --convert-to pdf`)
-- Log de auditoria: tabela `audit_log` com quem alterou o quê (compliance ISO 13485)
-
-### Fase 4 — Migração de dados (2 dias)
-- Rodar `dump_dados_supabase.sql` no Supabase Studio para gerar inserts
-- Adaptar sintaxe PostgreSQL → MySQL onde necessário (jsonb → JSON, quote functions)
-- Baixar manualmente todos os arquivos dos buckets `pacotes-analise` e `form-templates`
-- Copiar para o servidor local
-- Rodar imports no MySQL local
-- Validar contagens (esperado: ~89 produtos, ~40+ fichas parciais, dezenas de análises)
-- Testar re-análise e download de pacotes com dados migrados
-
-### Fase 5 — Reescrita da UI (2-3 semanas)
-Migrar cada módulo para `.tsx` com React Query + shadcn/ui:
-- `pages/dashboard/` — DashboardPage, com Recharts substituindo Chart.js
-- `pages/analise/` — AnalisePage (upload de slots), ParecerView
-- `pages/historico/` — HistoricoPage com filtros, ordenação, sticky header, import/export
-- `pages/cadastro/` — CatalogoTab, FichasTab, ProdutoSelectorModal, FichaMestreEditor
-- Componentes compartilhados em `components/`: DocumentoSlot, ApontamentoCard, ResumoStat, EmptyState, etc.
-- Migrar toda a lógica de negócio (parseOP, parseRC, parseEtiqueta, parseEtiquetaAcessorio, analisarConciliacao, fillFormXlsxTemplate, gerarParecerPDF) preservando os algoritmos exatos
-- Substituir ToastProvider próprio por Sonner
-- Substituir ícones inline por lucide-react
-- Migrar geração de ZIP mantendo JSZip
-- Formulários com React Hook Form + Zod (schemas por entidade)
-
-### Fase 6 — Backup automatizado (2 dias)
-- Endpoint `POST /CONC/api/v1/backup/executar` gera XLSX consolidado
-- Cron mensal (dia 1) no servidor chama o endpoint + envia por e-mail via SMTP interno para `qualidade@confiancemedical.com.br`
-- Anexo XLSX + resumo textual (total de análises, período coberto, hash SHA-256 do arquivo)
-- Log da execução do cron em `audit_log`
-
-### Fase 7 — Corte, validação e desligamento (1 semana)
-- Deploy em ambiente de homologação
-- Validação com Maria Luiza (QG) usando OPs de referência: 6673, 7318, 7430, 7436, 7499, 6819
-- Rodar dual-write por 3-5 dias (novas análises entram nas duas versões) para comparar resultados
-- Após validação: cortar tráfego para a nova versão
-- Desligar projeto Supabase
-- Atualizar documentação (README, guia de operação, guia de manutenção)
+Resumo: a **lógica de negócio e a conversão local já estão prontas e comprovadas**; o gap é de **plataforma** (TS/Vite/shadcn), **persistência** (MySQL local no lugar do Supabase), **API REST própria** e **autenticação via SCM**.
 
 ---
 
-## 5. Endpoints REST sugeridos
+## 5. Regras de negócio que NÃO podem regredir
+
+Referência canônica: `PROTOCOLO_AGENTE_CONCILIACAO.md` e `CLASSIFICACAO_VERIFICACOES_NC_RESSALVA.md`.
+
+- **Parsers** (formato do texto do pdf.js UMD é **multi-linha** — preservar os regexes exatamente).
+- **Camada 1**: série consistente entre OP/Etiqueta/FORM **e dentro da convenção da Ficha** (fora da convenção = NC); cronologia coerente; inspeções duplicadas ordenadas; medições dentro da faixa; aptidão do inspetor (ressalva); FORM-GQ-0047.
+- **Camada 2**: identificação do produto; derivação; registro ANVISA; acessórios obrigatórios; **grupos alternativos** (obrigatório/opcional, variante por nome+código, ≥1 obrigatória, >1 presente = ressalva); inspeções previstas pela Ficha; Etiqueta Externa × Ficha (família, modelo, série, fabricante, CNPJ, endereço, telefone, RT, CREA, resp. legal, data de fabricação, validade).
+- **Camada 3**: rastreabilidade, rotulagem, checklist de liberação, BPF, OP de reprocesso/RNC guiados por anexo.
+- **Classificação NC × Ressalva** documentada e revisada (ver `CLASSIFICACAO_VERIFICACOES_NC_RESSALVA.md`) — inclui as decisões de 22/07 (endereço, telefone, CREA, validade e data de fabricação divergentes = NC; série fora da convenção = NC).
+- **Datas exibidas em DD/MM/AAAA**; internamente ISO para comparação.
+- **Estágios**: variáveis declarados pela ficha; fixos universais (CQ, Embalagem 50, Conciliação 60, Verificação da rotulagem); inspeção obrigatória universal nos 50 e 60; estágios 5 e 7 sem inspeção.
+- Reincidência por chave (categoria+equipamento+alvo), níveis e janelas conforme `COMO_FUNCIONA_TENDENCIA_E_REINCIDENCIA.md`.
+- Roteamento de Slack por setor responsável (PCP × Almoxarifado).
+
+---
+
+## 6. Padrão alvo (destino)
+
+**Frontend:** React 18 + TypeScript (TSX) · Vite (`@vitejs/plugin-react-swc`) · Tailwind (build local) · shadcn/ui (Radix) · lucide-react · React Router DOM v6 · TanStack React Query v5 · React Hook Form + Zod · Recharts · Sonner + shadcn Toaster · alias `@/` → `src/`.
+
+**Backend:** MySQL local · API REST `/CONC/api/v1/` · URL base em `src/config/api.ts` · **autenticação delegada ao SCM** (Bearer token do localStorage, `authFetch`, redirect em 401) · arquivos no filesystem local.
+
+**Estrutura:** `src/{components,config,contexts,hooks,lib,pages,services/api}` (páginas por módulo: dashboard, analise, historico, cadastro, tendencia, melhorias).
+
+---
+
+## 7. Fases sugeridas
+
+- **Fase 0 — Preparação (2 dias):** servidor MySQL local; servidor de aplicação (Node/nginx); confirmar URL/credenciais do SCM; definir prefixo `/CONC/api/v1/`; repositório Git. *(Conversão local já resolvida pelo serviço atual — reaproveitar.)*
+- **Fase 1 — Fundação do frontend (3–4 dias):** Vite react-ts, Tailwind, aliases, ESLint/Prettier, shadcn/ui, libs; rotas base; layout (sidebar + main); contratos TypeScript das entidades; Vitest.
+- **Fase 2 — Autenticação SCM (2 dias):** remover login próprio; `authFetch` com Bearer; `useAuth()` lendo `auth_user`/`auth_permissoes`; `<Protected level={n}>`; interceptor 401 → SCM; remover Supabase Auth.
+- **Fase 3 — Backend REST + MySQL (2–3 semanas):** schema MySQL equivalente (incluindo `perfis`, `logs_atividade`, `solicitacoes`, `operadores`, `melhorias_regulatorias`, `config_app`); endpoints REST (seção 8); arquivos no filesystem local; **integrar o serviço de conversão/Slack já existente** atrás da API; `audit_log`.
+- **Fase 4 — Migração de dados (2 dias):** dump do Supabase → adaptar Postgres→MySQL (jsonb→JSON); baixar arquivos dos buckets; importar; validar contagens; testar re-análise e download.
+- **Fase 5 — Reescrita da UI (2–3 semanas):** migrar cada módulo para `.tsx` com React Query + shadcn/Recharts, **preservando os algoritmos exatos** (parseOP/RC/Etiqueta/Acessorio, analisarConciliacao, fillFormXlsxTemplate, gerarParecerPDF); Sonner; lucide-react; JSZip; RHF+Zod.
+- **Fase 6 — Backup automatizado (2 dias):** endpoint de backup XLSX consolidado + cron mensal por SMTP interno para `qualidade@confiancemedical.com.br`.
+- **Fase 7 — Corte e validação (1 semana):** homologação; validar com OPs de referência (6673, 7318, 7430, 7436, 7499, 6819); dual-write 3–5 dias; corte; desligar Supabase; atualizar documentação.
+
+**Total estimado: ~6–8 semanas.**
+
+---
+
+## 8. Endpoints REST sugeridos
 
 | Método | Endpoint | Descrição |
 |---|---|---|
-| GET | `/CONC/api/v1/produtos` | Lista produtos ativos |
-| POST | `/CONC/api/v1/produtos` | Cria produto |
-| PUT | `/CONC/api/v1/produtos/:id` | Atualiza produto |
-| DELETE | `/CONC/api/v1/produtos/:id` | Soft delete |
-| GET | `/CONC/api/v1/fichas-mestres` | Lista fichas ativas com JOIN produto |
-| GET | `/CONC/api/v1/fichas-mestres/:id` | Detalhes de uma ficha (com acessórios) |
-| POST | `/CONC/api/v1/fichas-mestres` | Cria ficha |
-| PUT | `/CONC/api/v1/fichas-mestres/:id` | Atualiza ficha (substitui acessórios) |
-| DELETE | `/CONC/api/v1/fichas-mestres/:id` | Exclui ficha |
-| GET | `/CONC/api/v1/analises` | Lista análises (com filtros por query params) |
-| GET | `/CONC/api/v1/analises/:id` | Detalhes de análise |
-| POST | `/CONC/api/v1/analises` | Salva nova análise |
-| PATCH | `/CONC/api/v1/analises/:id/justificar` | Registra justificativa em apontamento |
-| POST | `/CONC/api/v1/analises/importar` | Importa em massa (XLSX de análises manuais) |
-| POST | `/CONC/api/v1/uploads` | Upload de arquivo → retorna path armazenado |
-| GET | `/CONC/api/v1/uploads/:path` | Download de arquivo |
-| POST | `/CONC/api/v1/converter/pdf` | Converte DOCX/XLSX para PDF (LibreOffice headless) |
-| POST | `/CONC/api/v1/backup/executar` | Gera XLSX de backup e envia por e-mail |
-| GET | `/CONC/api/v1/dashboard/metricas` | Métricas agregadas para o Dashboard |
+| GET/POST/PUT/DELETE | `/CONC/api/v1/produtos[/:id]` | Catálogo de produtos |
+| GET/POST/PUT/DELETE | `/CONC/api/v1/fichas-mestres[/:id]` | Fichas mestres (com acessórios e grupos alternativos) |
+| GET/POST | `/CONC/api/v1/analises[/:id]` | Análises (lista com filtros, detalhe, criação) |
+| PATCH | `/CONC/api/v1/analises/:id/justificar` | Justificativa de ressalva |
+| POST | `/CONC/api/v1/analises/importar` | Importação em massa (XLSX) |
+| GET/POST/PUT | `/CONC/api/v1/operadores` | Inspetores por estágio |
+| GET/PATCH | `/CONC/api/v1/melhorias` | Melhorias regulatórias (listar / acatar-não acatar) |
+| GET/POST/PATCH | `/CONC/api/v1/solicitacoes` | Solicitações/aprovações |
+| GET | `/CONC/api/v1/logs` | Log de atividades |
+| POST/GET | `/CONC/api/v1/uploads[/:path]` | Upload/download de arquivos (filesystem local) |
+| POST | `/CONC/api/v1/converter/pdf` | Conversão para PDF (serviço local existente) |
+| POST | `/CONC/api/v1/notificar-slack` | Alerta ao Slack por canal (PCP/Almoxarifado) |
+| POST | `/CONC/api/v1/backup/executar` | Backup XLSX + e-mail |
+| GET | `/CONC/api/v1/dashboard/metricas` | Métricas do dashboard |
 
-Todas as rotas exigem Bearer token JWT do SCM. 401 → redirect SCM.
+Todas exigem Bearer token JWT do SCM; 401 → redirect SCM.
 
 ---
 
-## 6. Estimativas
+## 9. Riscos e mitigações
 
-| Fase | Duração | Dependências |
-|---|---|---|
-| 0 — Preparação | 2 dias | Infra + P&D |
-| 1 — Fundação frontend | 3-4 dias | P&D |
-| 2 — Auth SCM | 2 dias | SCM em produção |
-| 3 — Backend REST + MySQL | 2-3 semanas | P&D + Infra |
-| 4 — Migração dados | 2 dias | Fase 3 concluída |
-| 5 — Reescrita UI | 2-3 semanas | Fase 1 e 3 concluídas |
-| 6 — Backup automatizado | 2 dias | Fase 3 concluída + SMTP interno |
-| 7 — Corte e validação | 1 semana | Todas anteriores + validação QG |
-| **Total** | **~6-8 semanas** | |
+1. **Regressão nas regras de negócio** → suíte de testes (Vitest) com as OPs de referência **antes** de migrar, validando os apontamentos esperados.
+2. **Migração de dados** → dual-write 3–5 dias + hash de comparação; nenhuma análise pode ser perdida (rastreabilidade ISO 13485).
+3. **Storage de arquivos** → baixar tudo do Supabase com verificação de integridade antes de subir ao filesystem local.
+4. **Formato multi-linha do texto do pdf.js** → preservar os regexes exatamente (documentado no código).
+5. **Janela de indisponibilidade no corte** → avisar QG com antecedência; corte fora do horário comercial + plano de rollback.
 
 ---
 
-## 7. Riscos e mitigações
+## 10. Perguntas abertas para o P&D
 
-1. **Regressão nas regras de negócio.**
-   - **Mitigação:** criar suíte de testes automatizados com as OPs de referência (6673, 7318, 7430, 7436, 7499, 6819) ANTES de migrar. Cada teste roda `analisarConciliacao` e valida os apontamentos esperados. Sem essa suíte, migrar cegamente é alto risco.
-
-2. **CloudConvert como dependência externa.**
-   - **Mitigação:** validar LibreOffice headless com as OPs reais antes do corte (Fase 3). Se não gerar PDFs equivalentes, procurar alternativa (aspose, gotenberg, etc.).
-
-3. **Migração de dados corrompida.**
-   - **Mitigação:** dual-write por 3-5 dias após corte + hash de comparação. Regulatório exige rastreabilidade — nenhuma análise pode ser perdida.
-
-4. **Storage: milhares de PDFs anexados às análises.**
-   - **Mitigação:** script paralelo que baixa tudo do Supabase antes do corte + verifica integridade por hash antes de subir no filesystem local.
-
-5. **Falta de testes automatizados hoje.**
-   - **Mitigação:** aproveitar a Fase 1 pra criar Vitest + testes das funções de parse + integração. Sem isso a Fase 5 vira aventura.
-
-6. **Formato do texto extraído pelo pdf.js UMD (browser) é diferente do pdf.js legacy (Node).**
-   - **Mitigação:** documentado no `plataforma.html` que o formato real do PDF vem multi-linha (`Estágio: NN\nInspeção: NNN N PLANO Status: XXX Usuário Inspeção: NOME\nData / Hora...`). Preservar exatamente esse regex ao reescrever.
-
-7. **Janela de indisponibilidade no corte final.**
-   - **Mitigação:** avisar QG com 1 semana de antecedência. Corte fora do horário comercial + rollback plan documentado.
+1. URL do SCM em produção e documentação da integração (login/logout/validação de token)?
+2. Existe outro sistema satélite já no padrão para copiar a estrutura?
+3. Onde hospedar front (build Vite) e back (API REST)?
+4. SMTP interno para o backup mensal (servidor/porta/credencial)?
+5. Restrição de licenciamento para LibreOffice server-side?
+6. CI/CD e padrões de log/monitoramento a integrar?
+7. Padrão de versionamento para o release?
 
 ---
 
-## 8. Checklist de aceite (final da migração)
+## 11. Documentos de apoio (nesta pasta)
 
-- [ ] Todas as 6 OPs de referência passam nos testes automatizados com resultado idêntico à versão v1
-- [ ] Todos os 89 produtos do catálogo estão no MySQL local
-- [ ] Todas as fichas mestres pré-cadastradas estão preservadas
-- [ ] Histórico completo migrado (mesmo total de linhas + parecer_completo idêntico)
-- [ ] Arquivos anexados (ZIPs de pacote, documentos originais) todos baixáveis
-- [ ] Autenticação 100% via SCM (nenhum código de login próprio)
-- [ ] LibreOffice headless gera PDFs equivalentes aos do CloudConvert
-- [ ] Backup mensal automatizado enviado para `qualidade@confiancemedical.com.br` no dia 1
-- [ ] Dashboard mostra mesmos números (sanity check)
-- [ ] QG (Maria Luiza) valida com 3-5 OPs reais em produção
-- [ ] Documentação (README + guia de manutenção) atualizada
-- [ ] Projeto Supabase pode ser desligado
+- `PROTOCOLO_AGENTE_CONCILIACAO.md` — regras de negócio consolidadas.
+- `CLASSIFICACAO_VERIFICACOES_NC_RESSALVA.md` — o que é NC × Ressalva por verificação.
+- `COMO_FUNCIONA_TENDENCIA_E_REINCIDENCIA.md` — reincidência (chave, níveis, janelas).
+- `COMO_CONFIGURAR_ALERTA_SLACK.md` — webhooks por canal.
+- `ESPEC_PD_PACOTE_SERVIDOR_E_PDF_LOCAL.md` — serviço de conversão/pacote local.
+- `AUDITORIA_PADRAO_CONFIANCE.md` — comparativo item a item com o padrão.
 
 ---
 
-## 9. Perguntas abertas para o P&D
+## 12. Contato
 
-1. Qual é a URL do SCM em produção? Existe documentação da integração?
-2. Existe algum outro sistema satélite Confiance funcionando com o padrão? (Se sim, quero copiar a estrutura.)
-3. Onde ficarão hospedados: front (build Vite estático) e back (API REST)?
-4. Confiance tem SMTP interno para envio do backup? Qual servidor/porta/credencial?
-5. Existe restrição de licenciamento para LibreOffice server-side?
-6. Confiance tem CI/CD estabelecido? Vou usar o mesmo pipeline?
-7. Existe padrão de logs e monitoramento (Grafana? ELK?) que eu preciso integrar?
-8. Existe padrão de versionamento (SemVer? CalVer?) para o release do sistema?
-
----
-
-## 10. Contato
-
-**Maria Luiza Zaccur** — Garantia da Qualidade
-📧 mzaccur@confiancemedical.com.br
-
-Backup completo do sistema atual disponível em `Backup_v1_2026-07-01/`.
+**Maria Luiza Zaccur** — Garantia da Qualidade · mzaccur@confiancemedical.com.br
