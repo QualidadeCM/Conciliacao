@@ -3015,7 +3015,7 @@
             id, derivacao, derivacao_descricao,
             nome_comercial, convencao_nro_serie, exemplo_nro_serie,
             razao_social, cnpj, endereco_fabrica, telefone, responsavel_tecnico, crea_rt, responsavel_legal,
-            ativa, apta_analise, estagios_aplicaveis, estagios_com_inspecao,
+            ativa, apta_analise, estagios_aplicaveis, estagios_com_inspecao, produtos_associados,
             produto:produtos!fichas_mestres_produto_id_fkey(id, equipamento, modelo, codigo_referencia, registro_anvisa, codigo_sapiens, ativo),
             acessorios:acessorios_aplicaveis(ordem, descricao, codigo_sapiens, obrigatorio, is_fabricante_confiance, esteril, pode_sair_apenas_na_nf, grupo_alternativo)
           `)
@@ -3057,6 +3057,9 @@
           estagiosComInspecao: Array.isArray(f.estagios_com_inspecao)
             ? f.estagios_com_inspecao.map(Number).filter((n) => !isNaN(n))
             : [],
+          // Modelos de produtos associados cujas etiquetas viajam na mesma pasta e
+          // devem ser ignoradas na análise deste produto (ver migration-produtos-associados).
+          produtosAssociados: Array.isArray(f.produtos_associados) ? f.produtos_associados : [],
           acessorios: (f.acessorios || []).sort((a, b) => a.ordem - b.ordem).map((a) => ({
             descricao: a.descricao,
             codigoSapiens: a.codigo_sapiens,
@@ -6080,6 +6083,25 @@
         throw err;
       }
 
+      // PRODUTOS ASSOCIADOS: ignora as etiquetas de ACESSÓRIO que pertencem a produtos
+      // associados (viajam na mesma pasta, mas são conferidas quando aquele produto é
+      // analisado). Ex.: CM-STATION27 traz o acessório IPM0009 do CM-STATION.
+      // (A etiqueta EXTERNA do associado já é descartada na importação, pelo modelo da OP.)
+      const modelosAssociados = produto.produtosAssociados || [];
+      if (modelosAssociados.length > 0 && (docs.etAcessorios || []).length > 0) {
+        const _norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const assocSet = new Set(modelosAssociados.map(_norm));
+        const codigosIgnorar = new Set();
+        for (const p of produtos) {
+          if (assocSet.has(_norm(p.modelo))) {
+            for (const ac of (p.acessorios || [])) if (ac.codigoSapiens) codigosIgnorar.add(String(ac.codigoSapiens).trim());
+          }
+        }
+        if (codigosIgnorar.size > 0) {
+          docs.etAcessorios = (docs.etAcessorios || []).filter((e) => !codigosIgnorar.has(String(e?.codigoSapiens || '').trim()));
+        }
+      }
+
       // BLOQUEIO de duplicidade: análise não prossegue se já existe análise
       // com a mesma (numero_op, numero_serie). Decisão de 29/06/2026.
       // Re-análises (com analise_origem_id) NÃO passam por este caminho —
@@ -6757,22 +6779,45 @@
         setClassificandoPasta(true);
         try {
           const acessorios = [];
+          const externas = [];     // candidatas a Etiqueta Externa (pode vir mais de uma)
           const reconhecidos = [];
           const ignorados = [];
+          let opText = '';
           const rotulo = { op: 'OP', rc: 'RC', etiqueta_externa: 'Etiqueta Externa', op_reprocesso: 'OP de Reprocesso', rnc: 'RNC', form_gq_0047: 'FORM-GQ-0047 manual' };
+          const _normModelo = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
           for (const f of files) {
             const c = await classificarArquivo(f);
             if (!c.slot) { ignorados.push(f.name); continue; }
             if (c.slot === 'etiqueta_acessorio') { acessorios.push(f); reconhecidos.push(`${f.name} → Etiqueta de Acessório`); continue; }
+            if (c.slot === 'etiqueta_externa') { externas.push(f); continue; } // decidido depois (pelo modelo da OP)
+            if (c.slot === 'op') { try { opText = await extractTextFromFile(f); } catch (e) {} }
             await processSingle(c.slot, f);
             reconhecidos.push(`${f.name} → ${rotulo[c.slot] || c.slot}`);
+          }
+          // Etiqueta externa: se vier mais de uma (ex.: a do produto associado junto),
+          // mantém a que bate com o MODELO da OP; as demais são ignoradas.
+          if (externas.length === 1) {
+            await processSingle('etiqueta_externa', externas[0]);
+            reconhecidos.push(`${externas[0].name} → Etiqueta Externa`);
+          } else if (externas.length > 1) {
+            const opModelo = _normModelo(parseOP(opText || '')?.modelo);
+            const parsed = [];
+            for (const f of externas) {
+              let txt = ''; try { txt = await extractTextFromFile(f); } catch (e) {}
+              parsed.push({ f, modelo: _normModelo(parseEtiqueta(txt || '')?.modelo) });
+            }
+            let escolhida = opModelo ? parsed.find((x) => x.modelo && (x.modelo === opModelo || x.modelo.includes(opModelo) || opModelo.includes(x.modelo))) : null;
+            if (!escolhida) escolhida = parsed[0];
+            await processSingle('etiqueta_externa', escolhida.f);
+            reconhecidos.push(`${escolhida.f.name} → Etiqueta Externa`);
+            for (const x of parsed) if (x.f !== escolhida.f) ignorados.push(`${x.f.name} (etiqueta externa de outro produto — ignorada)`);
           }
           if (acessorios.length > 0) await processMulti('etiqueta_acessorio', acessorios);
           if (reconhecidos.length > 0) {
             toast.success(`${reconhecidos.length} arquivo(s) classificado(s) automaticamente${acessorios.length ? ` (incluindo ${acessorios.length} etiqueta(s) de acessório)` : ''}.`, { duration: 8000 });
           }
           if (ignorados.length > 0) {
-            toast.error(`Não reconhecido(s) (verifique manualmente): ${ignorados.join(', ')}.`, { duration: 12000 });
+            toast.error(`Ignorado(s)/não reconhecido(s) (verifique manualmente): ${ignorados.join(', ')}.`, { duration: 12000 });
           }
         } finally {
           setClassificandoPasta(false);
@@ -12521,6 +12566,26 @@ ${parecer.parecer_tecnico ? `
       const [acessoriosAlt, setAcessoriosAlt] = useState(
         montarBlocosAlt(_acsOrdenados)
       );
+      // Produtos associados: modelos de outros produtos cujas etiquetas viajam na
+      // mesma pasta e devem ser ignoradas na análise deste. Ex.: CM-STATION no CM-STATION27.
+      const [produtosAssociados, setProdutosAssociados] = useState(
+        Array.isArray(ficha?.produtos_associados) ? ficha.produtos_associados : []
+      );
+      const [assocInput, setAssocInput] = useState('');
+      const [modelosCatalogo, setModelosCatalogo] = useState([]);
+      useEffect(() => {
+        (async () => {
+          const { data } = await supabase.from('produtos').select('modelo').eq('ativo', true).order('modelo');
+          setModelosCatalogo((data || []).map((p) => p.modelo).filter(Boolean));
+        })();
+      }, []);
+      const addAssociado = () => {
+        const m = (assocInput || '').trim();
+        if (!m) return;
+        setProdutosAssociados((p) => p.includes(m) ? p : [...p, m]);
+        setAssocInput('');
+      };
+      const removeAssociado = (m) => setProdutosAssociados((p) => p.filter((x) => x !== m));
       // estagios_aplicaveis: array com os nomes dos estágios variáveis aplicáveis ao produto.
       // Subset dos 10 nomes em ESTAGIOS_VARIAVEIS. Os 4 fixos e 2 condicionais NÃO ficam aqui.
       const [estagiosAplicaveis, setEstagiosAplicaveis] = useState(
@@ -12743,6 +12808,7 @@ ${parecer.parecer_tecnico ? `
             // estagios_com_inspecao: jsonb array com números dos estágios que têm inspeção
             estagios_com_inspecao: Array.from(estagiosComInspecao).sort((a, b) => a - b),
             regras_negocio: regras.filter((r) => r.trim()).map((r) => ({ regra: r })),
+            produtos_associados: produtosAssociados,
           };
           console.log('isNew:', isNew, '| ficha?.id:', ficha?.id, '| produto.id:', produto?.id);
           console.log('fichaData payload:', fichaData);
@@ -13022,6 +13088,31 @@ ${parecer.parecer_tecnico ? `
                     </div>
                   ))}
                   <Button variant="outline" size="sm" onClick={addBlocoAlt}><Icon name="plus" />Adicionar grupo alternativo</Button>
+                </div>
+              </div>
+
+              {/* Produtos associados: etiquetas que vêm na pasta mas são de OUTRO produto
+                  (conferidas quando aquele produto for analisado) — devem ser ignoradas aqui. */}
+              <div className="pt-4 mt-2 border-t">
+                <div className="mb-2">
+                  <h4 className="text-sm font-semibold">Produtos associados (etiquetas a ignorar)</h4>
+                  <p className="text-xs text-muted-foreground">Se a pasta da OP deste produto trouxer etiquetas de <strong>outro produto</strong> (ex.: o CM-STATION27 vem com a etiqueta externa e o acessório do CM-STATION), informe o modelo desse outro produto. Na análise, a <strong>etiqueta externa</strong> dele é descartada (fica a que bate com a OP) e as <strong>etiquetas de acessório</strong> dele são desconsideradas — serão conferidas quando aquele produto for analisado.</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  {produtosAssociados.length === 0 && <span className="text-xs text-muted-foreground">Nenhum produto associado.</span>}
+                  {produtosAssociados.map((m) => (
+                    <span key={m} className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.12)', color: 'hsl(var(--accent))' }}>
+                      {m}
+                      <button type="button" onClick={() => removeAssociado(m)} title="Remover" className="ml-0.5"><Icon name="x" className="h-3 w-3" /></button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input list="modelos-catalogo-assoc" value={assocInput} onChange={(e) => setAssocInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAssociado(); } }} placeholder="Modelo do produto associado (ex.: CM-STATION)" className="flex-1" />
+                  <datalist id="modelos-catalogo-assoc">
+                    {modelosCatalogo.filter((m) => m !== produto?.modelo).map((m) => (<option key={m} value={m} />))}
+                  </datalist>
+                  <Button variant="outline" size="sm" onClick={addAssociado}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar</Button>
                 </div>
               </div>
             </div>
