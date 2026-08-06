@@ -7638,6 +7638,26 @@
     }
     // Canal (chave do webhook no serviço) a partir do setor.
     const canalDoSetor = (setor) => (setor === 'Almoxarifado' ? 'almoxarifado' : 'pcp');
+    // Perguntas sugeridas para o card de DÚVIDA (verificar se a NC é ficha desatualizada),
+    // por categoria de erro. Editáveis no modal antes de enviar. Fecha com a nota de impacto.
+    function perguntasDuvidaPadrao(cat) {
+      const fechamento = 'Caso a alteração seja aplicável, verificar o impacto nas instruções técnicas de embalagem e de qualidade.';
+      const base = ({
+        'Acessório': ['Este acessório precisa ser incluído na Ficha Mestre do produto?', 'Ele substitui algum acessório da lista atual? Qual?', 'É obrigatório ou opcional? Pode sair apenas na NF?'],
+        'Registro ANVISA': ['O registro ANVISA foi renovado/alterado?', 'Qual é o registro vigente que deve constar na Ficha?'],
+        'Modelo': ['A descrição/modelo mudou? A Ficha deve ser atualizada com o valor da etiqueta?'],
+        'Nome do produto': ['O nome/família do produto mudou? Atualizar a Ficha?'],
+        'CNPJ': ['O CNPJ do fabricante mudou? Qual é o correto?'],
+        'Fabricante': ['Os dados do fabricante mudaram? Atualizar a Ficha com o valor da etiqueta?'],
+        'Endereço': ['O endereço do fabricante mudou? Atualizar a Ficha?'],
+        'Responsável Técnico': ['O Responsável Técnico/CREA mudou? Qual é o vigente?'],
+        'Nº de série': ['A convenção do número de série mudou? Qual é a atual?'],
+        'Inspeção/Medição': ['Este estágio passou a ter (ou deixou de ter) inspeção? A Ficha deve refletir isso?'],
+        'Componente/RC': ['A estrutura/componentes do produto mudou? Atualizar a Ficha?'],
+        'Data/Validade': ['A regra de data/validade mudou para este produto?'],
+      })[cat] || ['Este apontamento decorre de a Ficha Mestre estar desatualizada?', 'O que precisa ser atualizado na Ficha?'];
+      return base.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\n' + fechamento;
+    }
     // Alvo específico do erro (acessório/campo) extraído da descrição — para a chave
     // de reincidência ficar no nível acionável (ex.: "Cabeça de Câmera CM-SCAM (IPM0023)").
     function extrairAlvoErro(desc, documento) {
@@ -8889,6 +8909,8 @@ ${parecer.parecer_tecnico ? `
               ocorr30d: info.ocorr30d || 0,
               cat,
               setor,           // PCP | Almoxarifado → define o canal
+              tipo: 'correcao',                     // 'correcao' | 'duvida' (verificar ficha)
+              perguntas: perguntasDuvidaPadrao(cat), // sugeridas p/ o card de dúvida (editáveis)
               // Por padrão, casos PONTUAIS já vêm desmarcados (normalmente não precisam ir ao Slack).
               enviar: info.nivel !== 'pontual',
             };
@@ -8911,6 +8933,7 @@ ${parecer.parecer_tecnico ? `
         setEnviandoSlack(true);
         try {
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          // Bloco de SOLICITAÇÃO DE CORREÇÃO (o que existe hoje).
           const montarBloco = (it) => {
             const linhas = [
               `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*`,
@@ -8925,23 +8948,50 @@ ${parecer.parecer_tecnico ? `
             }
             return linhas.join('\n');
           };
-          // Item 3: agrupa por setor → uma mensagem por canal (pcp_gq / almoxarifado_gq).
+          // Bloco de DÚVIDA (verificar se é Ficha Mestre desatualizada).
+          const montarBlocoDuvida = (it) => {
+            const linhas = [
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*`,
+              `   *O que foi verificado:* ${it.erro}`,
+              `   *Perguntas:*`,
+            ];
+            for (const q of String(it.perguntas || '').split('\n')) linhas.push(q.trim() ? `   ${q}` : '');
+            return linhas.join('\n');
+          };
+          // Agrupa por setor → uma mensagem por canal; dentro de cada canal, separa
+          // Solicitação de correção × Dúvida (verificar ficha).
           const porSetor = {};
           for (const it of itens) { (porSetor[it.setor] = porSetor[it.setor] || []).push(it); }
           const enviados = [];
+          const enviarTexto = async (texto, canal, rotulo) => {
+            const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto, canal }) });
+            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(`(${rotulo}) ` + (err.error || `HTTP ${resp.status}`)); }
+            enviados.push(rotulo);
+          };
           for (const [setor, lista] of Object.entries(porSetor)) {
             const canal = canalDoSetor(setor);
-            const texto = [
-              `:rotating_light: *NÃO CONFORMIDADE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
-              `Conferência da Qualidade identificou ${lista.length} não conformidade(s) sob responsabilidade do *${setor}*:`,
-              '',
-              ...lista.map(montarBloco),
-            ].join('\n\n');
-            const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto, canal }) });
-            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(`(${setor}) ` + (err.error || `HTTP ${resp.status}`)); }
-            enviados.push(`${setor} (${lista.length})`);
+            const corr = lista.filter((it) => it.tipo !== 'duvida');
+            const duv = lista.filter((it) => it.tipo === 'duvida');
+            if (corr.length > 0) {
+              const texto = [
+                `:rotating_light: *NÃO CONFORMIDADE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
+                `Conferência da Qualidade identificou ${corr.length} não conformidade(s) sob responsabilidade do *${setor}*:`,
+                '',
+                ...corr.map(montarBloco),
+              ].join('\n\n');
+              await enviarTexto(texto, canal, `${setor} correção (${corr.length})`);
+            }
+            if (duv.length > 0) {
+              const texto = [
+                `:question: *DÚVIDA — VERIFICAR FICHA MESTRE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
+                `A Qualidade tem ${duv.length} ponto(s) que podem indicar Ficha Mestre desatualizada, sob responsabilidade do *${setor}*. Por favor, respondam *nesta thread*:`,
+                '',
+                ...duv.map(montarBlocoDuvida),
+              ].join('\n\n');
+              await enviarTexto(texto, canal, `${setor} dúvida (${duv.length})`);
+            }
           }
-          const resumo = itens.map((it) => `${it.codigo} [${it.doc}] {${it.setor}}: ${it.erro}${it.correto ? ' | Correto: ' + it.correto : ''} | Correção: ${it.correcao}`).join(' || ');
+          const resumo = itens.map((it) => `${it.codigo} [${it.doc}] {${it.setor}} <${it.tipo === 'duvida' ? 'dúvida' : 'correção'}>: ${it.erro}`).join(' || ');
           await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} — canais: ${enviados.join(', ')}${incluirReinc ? ' (com aviso de reincidência)' : ''}. ${resumo}`);
           toast.success(`Alerta enviado ao Slack — ${enviados.join(', ')}.`);
           setSlackModal(null);
@@ -9495,7 +9545,7 @@ ${parecer.parecer_tecnico ? `
 
           {/* === Caixa editável do alerta de NC ao Slack === */}
           {slackModal && (
-            <Modal open onClose={() => !enviandoSlack && setSlackModal(null)} title="Enviar não conformidades ao Slack" description="Revise a correção imediata de cada NC antes de enviar ao canal. Causa raiz e ação corretiva ficam no relatório de reincidência (Dashboard)." size="xl">
+            <Modal open onClose={() => !enviandoSlack && setSlackModal(null)} title="Enviar ao Slack" description="Para cada item escolha o tipo: Solicitar correção (o que corrigir agora) ou Dúvida — verificar ficha (perguntar ao setor se a NC é Ficha desatualizada). Vai para o canal do setor responsável." size="xl">
               <div className="space-y-4 max-h-[62vh] overflow-y-auto">
                 {slackModal.itens.map((it, idx) => (
                   <div key={idx} className={cn('rounded-md border p-3 space-y-2 transition-opacity', !it.enviar && 'opacity-60')}>
@@ -9513,21 +9563,39 @@ ${parecer.parecer_tecnico ? `
                       {it.nivel === 'possivel' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.12)', color: 'hsl(var(--status-ressalva))' }}>POSSÍVEL REINCIDENTE</span>}
                       {it.nivel === 'pontual' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-conforme) / 0.15)', color: 'hsl(var(--status-conforme))' }}>PONTUAL</span>}
                     </div>
-                    <div className="text-xs"><span className="font-semibold text-muted-foreground">O que está errado:</span> {it.erro}</div>
-                    {it.nivel !== 'pontual' && (
-                      <div className="text-[11px]" style={{ color: 'hsl(var(--status-ressalva))' }}>
-                        <Icon name="repeat" className="h-3 w-3 inline mr-1" />Reincidência: <strong>{it.nivelLabel}</strong> — {it.ocorr30d}× nos últimos 30 dias ({it.incidPct}% dos lotes){slackModal.incluirReinc ? '' : ' · aviso desligado'}
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-muted-foreground">Tipo:</span>
+                      <button type="button" onClick={() => setItemSlack(idx, 'tipo', 'correcao')}
+                        className="px-2 py-0.5 rounded-full text-[11px] font-medium border"
+                        style={it.tipo !== 'duvida' ? { backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))', borderColor: 'transparent' } : { borderColor: 'hsl(var(--input))', color: 'hsl(var(--muted-foreground))' }}>Solicitar correção</button>
+                      <button type="button" onClick={() => setItemSlack(idx, 'tipo', 'duvida')}
+                        className="px-2 py-0.5 rounded-full text-[11px] font-medium border"
+                        style={it.tipo === 'duvida' ? { backgroundColor: 'hsl(215 75% 45% / 0.15)', color: 'hsl(215 75% 40%)', borderColor: 'transparent' } : { borderColor: 'hsl(var(--input))', color: 'hsl(var(--muted-foreground))' }}>Dúvida — verificar ficha</button>
+                    </div>
+                    <div className="text-xs"><span className="font-semibold text-muted-foreground">O que foi verificado:</span> {it.erro}</div>
+                    {it.tipo !== 'duvida' && (<>
+                      {it.nivel !== 'pontual' && (
+                        <div className="text-[11px]" style={{ color: 'hsl(var(--status-ressalva))' }}>
+                          <Icon name="repeat" className="h-3 w-3 inline mr-1" />Reincidência: <strong>{it.nivelLabel}</strong> — {it.ocorr30d}× nos últimos 30 dias ({it.incidPct}% dos lotes){slackModal.incluirReinc ? '' : ' · aviso desligado'}
+                        </div>
+                      )}
+                      <div>
+                        <Label className="text-xs">Registro correto (o que deveria ser)</Label>
+                        <textarea value={it.correto} onChange={(e) => setItemSlack(idx, 'correto', e.target.value)} rows={1} placeholder="Ex.: o valor/registro correto conforme a ficha/RC" className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                      </div>
+                      {it.norma && <div className="text-xs"><span className="font-semibold text-muted-foreground">Norma/legislação:</span> {it.norma}</div>}
+                      <div>
+                        <Label className="text-xs">Ação de correção imediata</Label>
+                        <textarea value={it.correcao} onChange={(e) => setItemSlack(idx, 'correcao', e.target.value)} rows={2} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                      </div>
+                    </>)}
+                    {it.tipo === 'duvida' && (
+                      <div>
+                        <Label className="text-xs">Perguntas ao setor (editável)</Label>
+                        <textarea value={it.perguntas} onChange={(e) => setItemSlack(idx, 'perguntas', e.target.value)} rows={5} placeholder="Perguntas para confirmar se a Ficha Mestre precisa ser atualizada" className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+                        <div className="text-[11px] text-muted-foreground mt-1">O setor responde nesta thread no Slack — as respostas ficam na conversa da mensagem.</div>
                       </div>
                     )}
-                    <div>
-                      <Label className="text-xs">Registro correto (o que deveria ser)</Label>
-                      <textarea value={it.correto} onChange={(e) => setItemSlack(idx, 'correto', e.target.value)} rows={1} placeholder="Ex.: o valor/registro correto conforme a ficha/RC" className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
-                    </div>
-                    {it.norma && <div className="text-xs"><span className="font-semibold text-muted-foreground">Norma/legislação:</span> {it.norma}</div>}
-                    <div>
-                      <Label className="text-xs">Ação de correção imediata</Label>
-                      <textarea value={it.correcao} onChange={(e) => setItemSlack(idx, 'correcao', e.target.value)} rows={2} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
-                    </div>
                   </div>
                 ))}
               </div>
