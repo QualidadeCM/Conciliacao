@@ -799,6 +799,7 @@
        ==================================================================== */
     function Sidebar({ currentPage, onNavigate, theme, onToggleTheme, userEmail, onLogout, can }) {
       const permitido = can || (() => true);
+      const [logoErro, setLogoErro] = useState(false); // fallback do logotipo se a imagem não carregar
       const navItems = [
         { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'dashboard_ver' },
         { id: 'analise', label: 'Análise', icon: 'search', perm: 'analise_executar' },
@@ -811,18 +812,26 @@
       return (
         <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border no-print"
           style={theme === 'dark' ? undefined : { background: 'linear-gradient(165deg, hsl(199 45% 34%) 0%, hsl(210 44% 26%) 45%, hsl(223 43% 20%) 100%)' }}>
-          <div className="flex items-center gap-3 px-6 py-6 border-b border-sidebar-border">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent">
-              <span className="font-montserrat font-bold text-accent-foreground text-lg">C</span>
-            </div>
-            <div className="flex flex-col">
-              <span className="font-montserrat font-bold text-base leading-tight">Confiance</span>
-              <span className="text-xs text-sidebar-foreground/70 leading-tight">Medical</span>
-            </div>
+          <div className="flex flex-col gap-2.5 px-5 py-5 border-b border-sidebar-border">
+            {!logoErro ? (
+              // Logotipo oficial (colorido sobre fundo claro, conforme o Manual da Marca).
+              <div className="self-start rounded-lg bg-white px-3 py-2">
+                <img src="https://confiancemedical.com.br/wp-content/uploads/2024/07/logo-confiance.png"
+                  alt="Confiance Medical" className="h-7 w-auto block" onError={() => setLogoErro(true)} />
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent">
+                  <span className="font-montserrat font-bold text-accent-foreground text-lg">C</span>
+                </div>
+                <span className="font-montserrat font-bold text-base leading-tight">Confiance Medical</span>
+              </div>
+            )}
+            <span className="font-montserrat font-semibold text-sm leading-snug">Sistema de Análise da Conciliação da Produção</span>
           </div>
           <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
             <div className="px-3 pb-2 text-xs uppercase tracking-wider text-sidebar-foreground/50 font-semibold">
-              Conciliação da Produção
+              Menu
             </div>
             {navItems.map((item) => (
               <button
@@ -1726,8 +1735,8 @@
                   </div>
                   <div className="flex items-center gap-1">
                     <Button variant="ghost" size="sm" className="no-print h-7 px-2" onClick={() => exportarDonutPNG('Conciliações realizadas', [
-                      { label: 'Conformes', value: categoriasLote.conformes, hex: '#16a34a' },
-                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, hex: '#38bdf8' },
+                      { label: 'Conformes', value: categoriasLote.conformes, hex: '#1E9DBA' },
+                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, hex: '#FFA300' },
                     ])} title="Exportar este gráfico em PNG">
                       <Icon name="download" className="h-3.5 w-3.5" />PNG
                     </Button>
@@ -1743,8 +1752,8 @@
                 ) : (
                   <DonutChart
                     segments={[
-                      { label: 'Conformes', value: categoriasLote.conformes, color: 'hsl(var(--status-conforme))' },
-                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, color: 'hsl(var(--accent))' },
+                      { label: 'Conformes', value: categoriasLote.conformes, color: 'hsl(var(--secondary))' },
+                      { label: 'Precisaram de correção', value: categoriasLote.corrigidas, color: 'hsl(var(--status-ressalva))' },
                     ]}
                     total={categoriasLote.conformes + categoriasLote.corrigidas}
                   />
