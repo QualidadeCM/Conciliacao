@@ -8978,6 +8978,33 @@ ${parecer.parecer_tecnico ? `
             for (const q of String(it.perguntas || '').split('\n')) linhas.push(q.trim() ? `   ${q}` : '');
             return linhas.join('\n');
           };
+          // #1 — Quadro atual da ficha (acessórios) anexado às DÚVIDAS de acessório,
+          // para o setor comparar o que está cadastrado com o que veio na etiqueta.
+          let quadroFichaAcs = '';
+          const temDuvidaAcessorio = itens.some((it) => it.tipo === 'duvida' && (it.cat === 'Acessório' || /acess[óo]rio/i.test(it.doc || '')));
+          if (temDuvidaAcessorio) {
+            try {
+              let fichaId = null;
+              if (analiseId) { const { data: a } = await supabase.from('analises').select('ficha_id').eq('id', analiseId).single(); fichaId = a?.ficha_id; }
+              if (fichaId) {
+                const { data: acs } = await supabase.from('acessorios_aplicaveis').select('descricao, codigo_sapiens, obrigatorio, is_fabricante_confiance, esteril, pode_sair_apenas_na_nf, grupo_alternativo').eq('ficha_id', fichaId).order('ordem');
+                const comuns = (acs || []).filter((a) => !(a.grupo_alternativo || '').trim());
+                const grupos = {};
+                for (const a of (acs || [])) { const g = (a.grupo_alternativo || '').trim(); if (g) (grupos[g] = grupos[g] || []).push(a); }
+                const linhasQ = [];
+                for (const a of comuns) {
+                  const flags = [a.obrigatorio ? 'obrigatório' : 'opcional', a.is_fabricante_confiance ? 'fabricante Confiance' : 'fornecedor']
+                    .concat(a.esteril ? ['estéril'] : [], a.pode_sair_apenas_na_nf ? ['pode sair na NF'] : []);
+                  linhasQ.push(`   • ${a.descricao || '—'} (${a.codigo_sapiens || '—'}) — ${flags.join(', ')}`);
+                }
+                for (const [g, vs] of Object.entries(grupos)) {
+                  const obrig = vs.some((v) => v.obrigatorio) ? 'obrigatório' : 'opcional';
+                  linhasQ.push(`   • Grupo alternativo "${g}" (${obrig}): ${vs.map((v) => `${v.descricao || '—'} (${v.codigo_sapiens || '—'})`).join(' ou ')}`);
+                }
+                if (linhasQ.length) quadroFichaAcs = '*Quadro atual de acessórios na Ficha (para conferência):*\n' + linhasQ.join('\n');
+              }
+            } catch (e) { /* best-effort */ }
+          }
           // Agrupa por setor → uma mensagem por canal; dentro de cada canal, separa
           // Solicitação de correção × Dúvida (verificar ficha).
           const porSetor = {};
@@ -9007,6 +9034,7 @@ ${parecer.parecer_tecnico ? `
                 `A Qualidade tem ${duv.length} ponto(s) que podem indicar Ficha Mestre desatualizada, sob responsabilidade do *${setor}*. Por favor, respondam *nesta thread*:`,
                 '',
                 ...duv.map(montarBlocoDuvida),
+                ...(quadroFichaAcs ? [quadroFichaAcs] : []),
               ].join('\n\n');
               await enviarTexto(texto, canal, `${setor} dúvida (${duv.length})`);
             }
@@ -12583,12 +12611,20 @@ ${parecer.parecer_tecnico ? `
       const [revisoesOpen, setRevisoesOpen] = useState(false);
       const [revisoes, setRevisoes] = useState([]);
       const [revLoading, setRevLoading] = useState(false);
+      // Revisão anterior (para gerar o changelog automático da nova revisão — #3).
+      const [prevSnap, setPrevSnap] = useState(null);
+      const [motivoRevisao, setMotivoRevisao] = useState('');
       useEffect(() => {
         if (!revisoesOpen || !ficha?.id) return;
         setRevLoading(true);
         supabase.from('fichas_mestres_versoes').select('*').eq('ficha_id', ficha.id).order('versao', { ascending: false })
           .then(({ data }) => { setRevisoes(data || []); setRevLoading(false); });
       }, [revisoesOpen, ficha?.id]);
+      useEffect(() => {
+        if (!ficha?.id) return;
+        supabase.from('fichas_mestres_versoes').select('snapshot, versao').eq('ficha_id', ficha.id).order('versao', { ascending: false }).limit(1)
+          .then(({ data }) => setPrevSnap(data && data[0] ? data[0].snapshot : null));
+      }, [ficha?.id]);
       // Reverter a ficha para uma revisão anterior (permitido a todos — é reversível).
       const reverterRevisao = async (v) => {
         if (!confirm(`Reverter a ficha para a revisão ${v.versao} (${v.created_at ? new Date(v.created_at).toLocaleString('pt-BR') : ''})? Uma nova revisão será criada com esse conteúdo.`)) return;
@@ -12855,6 +12891,38 @@ ${parecer.parecer_tecnico ? `
       const removeRegra = (i) => setRegras((p) => p.filter((_, idx) => idx !== i));
       const updateRegra = (i, v) => setRegras((p) => p.map((r, idx) => idx === i ? v : r));
 
+      // #3 — Changelog automático da revisão: compara o estado atual com o snapshot
+      // da revisão anterior e descreve o que mudou (acessórios incluídos/removidos,
+      // obrigatoriedade, campos cadastrais). Editável antes de salvar.
+      const gerarResumoAlteracoes = () => {
+        if (isNew) return 'Criação da ficha.';
+        if (!prevSnap) return '';
+        const prevAcs = prevSnap.acessorios || [];
+        const prevF = prevSnap.ficha || {};
+        const atuaisComuns = acessorios.map((a) => ({ cod: String(a.codigo_sapiens || '').trim(), desc: a.descricao || '', obrig: a.obrigatorio !== false }));
+        const atuaisAlt = [];
+        for (const b of acessoriosAlt) for (const v of (b.variantes || [])) if (String(v.codigo || '').trim()) atuaisAlt.push({ cod: String(v.codigo).trim(), desc: v.nome || b.nome || '' });
+        const atuais = [...atuaisComuns, ...atuaisAlt];
+        const atuaisSet = new Set(atuais.map((a) => a.cod).filter(Boolean));
+        const prevSet = new Set(prevAcs.map((a) => String(a.codigo_sapiens || '').trim()).filter(Boolean));
+        const prevByCod = new Map(prevAcs.map((a) => [String(a.codigo_sapiens || '').trim(), a]));
+        const mud = [];
+        for (const a of atuais) if (a.cod && !prevSet.has(a.cod)) mud.push(`Acessório ${a.desc || a.cod} (${a.cod}) incluído na ficha`);
+        for (const a of prevAcs) { const c = String(a.codigo_sapiens || '').trim(); if (c && !atuaisSet.has(c)) mud.push(`Acessório ${a.descricao || c} (${c}) obsoleto e removido da ficha`); }
+        for (const a of atuaisComuns) { const p = prevByCod.get(a.cod); if (p && !(p.grupo_alternativo || '').trim() && a.cod) { const pObrig = p.obrigatorio !== false; if (pObrig !== a.obrig) mud.push(`Obrigatoriedade de ${a.desc || a.cod} (${a.cod}) alterada para ${a.obrig ? 'obrigatório' : 'opcional'}`); } }
+        const cmp = (label, pv, cv) => { const p = String(pv || '').trim(), c = String(cv || '').trim(); if (p !== c) mud.push(`${label} alterado de "${p || '—'}" para "${c || '—'}"`); };
+        cmp('Responsável Técnico', prevF.responsavel_tecnico, form.responsavel_tecnico);
+        cmp('CREA da RT', prevF.crea_rt, form.crea_rt);
+        cmp('Responsável Legal', prevF.responsavel_legal, form.responsavel_legal);
+        cmp('Convenção do nº de série', prevF.convencao_nro_serie, form.convencao_nro_serie);
+        cmp('Descrição da derivação', prevF.derivacao_descricao, form.derivacao_descricao);
+        return mud.length ? mud.join('; ') + '.' : 'Sem alterações relevantes detectadas.';
+      };
+      // Pré-preenche a justificativa quando a revisão anterior carrega (editável).
+      useEffect(() => {
+        if (!isNew && prevSnap && !motivoRevisao.trim()) setMotivoRevisao(gerarResumoAlteracoes());
+      }, [prevSnap]);
+
       const handleSave = async () => {
         console.group('[Ficha Mestre · Save]');
         if (!form.nome_comercial.trim()) {
@@ -13000,7 +13068,7 @@ ${parecer.parecer_tecnico ? `
               const { error: revErr } = await supabase.from('fichas_mestres_versoes').insert({
                 ficha_id: fichaId, versao: proxVersao,
                 snapshot: { ficha: fichaData, acessorios: rows.map(({ ficha_id, ...r }) => r) },
-                motivo: isNew ? 'Criação' : 'Salvamento',
+                motivo: isNew ? 'Criação da ficha.' : ((motivoRevisao.trim() || gerarResumoAlteracoes()) || 'Salvamento'),
                 criado_por_id: usuarioAtual?.id || null,
                 criado_por_nome: usuarioAtual?.nome_completo || usuarioAtual?.email || null,
               });
@@ -13292,6 +13360,21 @@ ${parecer.parecer_tecnico ? `
           </CollapsibleSection>
 
           {/* Seções 5 (Inspeções) e 8 (Observações) removidas do modelo em 04/06/2026. */}
+
+          {!isNew && (
+            <div className="mt-2 rounded-lg border p-3 bg-muted/20">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <Label className="text-sm font-semibold">Justificativa desta revisão</Label>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setMotivoRevisao(gerarResumoAlteracoes())} title="Gerar automaticamente a partir das alterações">
+                  <Icon name="refresh" className="h-3.5 w-3.5" />Gerar automaticamente
+                </Button>
+              </div>
+              <textarea value={motivoRevisao} onChange={(e) => setMotivoRevisao(e.target.value)} rows={3}
+                placeholder="O que mudou nesta revisão (gerado automaticamente, editável)."
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm" />
+              <div className="text-[11px] text-muted-foreground mt-1">Registrada como o motivo da nova revisão no histórico da ficha. Preenchida automaticamente com as alterações detectadas — edite se quiser.</div>
+            </div>
+          )}
 
           <div className="sticky bottom-0 -mx-8 px-8 py-4 bg-background border-t flex justify-end gap-2">
             <Button variant="outline" onClick={() => setImportOpen(true)}>
