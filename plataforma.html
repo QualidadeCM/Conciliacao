@@ -7744,6 +7744,9 @@
       const [etiquetasRemovidas, setEtiquetasRemovidas] = useState(new Set()); // códigos de etiquetas de acessório anexadas por engano — excluídas na re-análise e do pacote
       const [reanalisando, setReanalisando] = useState(false);
       const [saving, setSaving] = useState(false);
+      // #2 — Reprocessar em lote as outras análises pendentes da mesma derivação
+      // depois de atualizar a ficha. { candidatos:[], ativo, idx, feitos, falhas }
+      const [reprocModal, setReprocModal] = useState(null);
 
       // === Mapeamento documento_afetado → slot + identificador específico ===
       // Para acessórios (que podem ter MÚLTIPLOS arquivos), também extrai o
@@ -8040,6 +8043,14 @@
             setDocsCorrigidos({});
             setEtiquetasRemovidas(new Set());
             window.scrollTo({ top: 0, behavior: 'smooth' });
+            // #2 — após ATUALIZAR A FICHA, oferece reprocessar as outras análises
+            // pendentes da mesma derivação (que provavelmente têm a mesma NC).
+            if (modoFicha) {
+              try {
+                const irmas = await detectarIrmasPendentes();
+                if (irmas.length > 0) setReprocModal({ candidatos: irmas, ativo: false, idx: 0, feitos: 0, falhas: [] });
+              } catch (e) { /* best-effort */ }
+            }
             return;
           }
           if (novoParecer._analiseId && analiseId) {
@@ -8080,6 +8091,82 @@
         } finally {
           setReanalisando(false);
         }
+      };
+
+      // === #2 — Reprocessar outras análises pendentes da MESMA derivação (ficha) ===
+      // Reconstrói os slots a partir dos textos/arquivos guardados numa análise salva.
+      const reconstruirSlotsDeStorage = async (p) => {
+        const baseTexts = p?.slots_text || {};
+        const arqOrig = p?.arquivos_originais || {};
+        const dl = async (ref) => {
+          if (!ref?.path) return null;
+          try { const { data } = await supabase.storage.from('pacotes-analise').download(ref.path); return data ? new File([data], ref.filename || 'arquivo', { type: data.type }) : null; }
+          catch (e) { return null; }
+        };
+        const [opF, rcF, formF, etF, repF, rncF] = await Promise.all([
+          dl(arqOrig.op), dl(arqOrig.rc), dl(arqOrig.form_gq_0047), dl(arqOrig.etiqueta_externa), dl(arqOrig.op_reprocesso), dl(arqOrig.rnc),
+        ]);
+        const acsTextos = baseTexts.etiqueta_acessorio || [];
+        const acsArqs = arqOrig.etiqueta_acessorio || [];
+        const acs = [];
+        for (let i = 0; i < acsTextos.length; i++) { if (!acsTextos[i]) continue; const f = await dl(acsArqs[i]); acs.push({ text: acsTextos[i], file: f, status: 'done' }); }
+        const mk = (t, f) => t ? { text: t, file: f, status: 'done' } : null;
+        return {
+          op: mk(baseTexts.op, opF), rc: mk(baseTexts.rc, rcF), form_gq_0047: mk(baseTexts.form_gq_0047, formF),
+          etiqueta_externa: mk(baseTexts.etiqueta_externa, etF), etiqueta_acessorio: acs,
+          op_reprocesso: mk(baseTexts.op_reprocesso, repF), rnc: mk(baseTexts.rnc, rncF),
+        };
+      };
+      // Reprocessa UMA análise irmã com a ficha ATUAL (executarAnaliseLocal já carrega
+      // a ficha mais recente). Vincula à origem, marca como atualizacao_ficha.
+      const reprocessarIrma = async (row) => {
+        const slots = await reconstruirSlotsDeStorage(row.parecer_completo || {});
+        const novo = await executarAnaliseLocal(slots, { permitirRefazer: true });
+        if (novo?._analiseId) {
+          await supabase.from('analises').update({
+            analise_origem_id: row.id,
+            tipo_reanalise: 'atualizacao_ficha',
+            doc_substituido: null,
+            motivo_reanalise: 'Ficha mestre atualizada (revisão aplicada em lote) — documentação do lote estava conforme.',
+          }).eq('id', novo._analiseId);
+        }
+        return novo;
+      };
+      // Busca as análises pendentes (NC/ressalva) da mesma ficha/derivação, exceto o
+      // lote atual, deduplicando pela mais recente de cada OP/série.
+      const detectarIrmasPendentes = async () => {
+        if (!analiseId) return [];
+        const { data: cur } = await supabase.from('analises').select('ficha_id, numero_op, numero_serie').eq('id', analiseId).single();
+        if (!cur?.ficha_id) return [];
+        const { data: rows } = await supabase.from('analises')
+          .select('id, numero_op, numero_serie, status, created_at, analise_origem_id, parecer_completo')
+          .eq('ficha_id', cur.ficha_id).order('created_at', { ascending: false });
+        const vistos = new Set([`${cur.numero_op}|${cur.numero_serie}`]);
+        const out = [];
+        for (const r of (rows || [])) {
+          if (r.id === analiseId) continue;
+          const chave = `${r.numero_op}|${r.numero_serie}`;
+          if (vistos.has(chave)) continue;       // só a mais recente por lote
+          vistos.add(chave);
+          if (r.status === 'nao_conforme' || r.status === 'ressalva') out.push(r);
+        }
+        return out;
+      };
+      // Executa o reprocessamento em lote das irmãs selecionadas (com progresso).
+      const executarReprocLote = async () => {
+        if (!reprocModal || !reprocModal.candidatos?.length) return;
+        setReprocModal((m) => ({ ...m, ativo: true, idx: 0, feitos: 0, falhas: [] }));
+        const lista = reprocModal.candidatos;
+        let feitos = 0; const falhas = [];
+        for (let i = 0; i < lista.length; i++) {
+          setReprocModal((m) => ({ ...m, idx: i + 1 }));
+          try { await reprocessarIrma(lista[i]); feitos++; }
+          catch (e) { falhas.push(`OP ${lista[i].numero_op}/${lista[i].numero_serie}: ${e?.message || e}`); }
+          setReprocModal((m) => ({ ...m, feitos, falhas }));
+        }
+        registrarLog(usuarioAtual, 'reprocessar_lote_ficha', 'analise', `Ficha da OP ${opNum}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} reprocessou ${feitos} análise(s) da mesma derivação após atualizar a ficha${falhas.length ? ` (${falhas.length} falha(s))` : ''}`);
+        toast.success(`${feitos} análise(s) reprocessada(s) com a ficha atualizada${falhas.length ? ` · ${falhas.length} falha(s)` : ''}.`);
+        setReprocModal(null);
       };
 
       // === Lista unificada de críticas (apontamentos + recomendações) ===
@@ -9660,6 +9747,35 @@ ${parecer.parecer_tecnico ? `
                 </Button>
               </div>
               ); })()}
+            </Modal>
+          )}
+
+          {/* === #2 — Modal: reprocessar outras análises da mesma derivação === */}
+          {reprocModal && (
+            <Modal open onClose={() => !reprocModal.ativo && setReprocModal(null)}
+              title="Aplicar a revisão às outras análises pendentes"
+              description="A ficha foi atualizada. Há outras análises da MESMA derivação com pendências (NC/ressalva). Reprocessá-las com a ficha nova pode resolvê-las sem editar a ficha de novo.">
+              <div className="space-y-3">
+                <div className="text-sm text-muted-foreground">{reprocModal.candidatos.length} análise(s) pendente(s) da mesma derivação:</div>
+                <div className="rounded-md border divide-y max-h-[40vh] overflow-y-auto">
+                  {reprocModal.candidatos.map((r) => (
+                    <div key={r.id} className="flex items-center justify-between gap-3 p-2.5 text-sm">
+                      <span className="font-medium">OP {r.numero_op || '—'} / {r.numero_serie || '—'}</span>
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={r.status === 'nao_conforme' ? { backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' } : { backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>{r.status === 'nao_conforme' ? 'NC' : 'Ressalva'}</span>
+                    </div>
+                  ))}
+                </div>
+                {reprocModal.ativo && (
+                  <div className="text-sm text-muted-foreground">Reprocessando {reprocModal.idx}/{reprocModal.candidatos.length}…</div>
+                )}
+                <div className="text-[11px] text-muted-foreground">Cada uma é refeita com a ficha atual e marcada como atualização de ficha (não conta como correção). Reversível pelo histórico.</div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" onClick={() => setReprocModal(null)} disabled={reprocModal.ativo}>Agora não</Button>
+                  <Button onClick={executarReprocLote} disabled={reprocModal.ativo}>
+                    {reprocModal.ativo ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Reprocessando…</>) : (<><Icon name="refresh" className="h-4 w-4" />Reprocessar {reprocModal.candidatos.length}</>)}
+                  </Button>
+                </div>
+              </div>
             </Modal>
           )}
 
