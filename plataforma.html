@@ -6086,30 +6086,9 @@
         throw err;
       }
 
-      // PRODUTOS ASSOCIADOS: ignora as etiquetas de ACESSÓRIO que pertencem a produtos
-      // associados (viajam na mesma pasta, mas são conferidas quando aquele produto é
-      // analisado). Ex.: CM-STATION27 traz o acessório IPM0009 do CM-STATION.
-      // (A etiqueta EXTERNA do associado já é descartada na importação, pelo modelo da OP.)
-      const modelosAssociados = produto.produtosAssociados || [];
-      if (modelosAssociados.length > 0 && (docs.etAcessorios || []).length > 0) {
-        const _norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-        const assocSet = new Set(modelosAssociados.map(_norm));
-        // Códigos que ESTE produto também usa (ficha própria) — NUNCA ignorar, mesmo
-        // que também existam no produto associado (acessórios compartilhados).
-        const codigosProprios = new Set((produto.acessorios || []).map((ac) => String(ac.codigoSapiens || '').trim()).filter(Boolean));
-        const codigosIgnorar = new Set();
-        for (const p of produtos) {
-          if (assocSet.has(_norm(p.modelo))) {
-            for (const ac of (p.acessorios || [])) {
-              const cod = String(ac.codigoSapiens || '').trim();
-              if (cod && !codigosProprios.has(cod)) codigosIgnorar.add(cod); // só o que é EXCLUSIVO do associado
-            }
-          }
-        }
-        if (codigosIgnorar.size > 0) {
-          docs.etAcessorios = (docs.etAcessorios || []).filter((e) => !codigosIgnorar.has(String(e?.codigoSapiens || '').trim()));
-        }
-      }
+      // (Recurso de "produto associado" para ignorar acessórios foi removido em 06/08/2026.
+      //  Agora as etiquetas a ignorar são controladas por REGRAS DE EXCEÇÃO da ficha,
+      //  que mandam ignorar uma subpasta inteira na importação.)
 
       // BLOQUEIO de duplicidade: análise não prossegue se já existe análise
       // com a mesma (numero_op, numero_serie). Decisão de 29/06/2026.
@@ -6794,6 +6773,41 @@
           let opText = '';
           const rotulo = { op: 'OP', rc: 'RC', etiqueta_externa: 'Etiqueta Externa', op_reprocesso: 'OP de Reprocesso', rnc: 'RNC', form_gq_0047: 'FORM-GQ-0047 manual' };
           const _normModelo = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+          // #2b — REGRAS DE EXCEÇÃO: ignorar subpastas indicadas na ficha do produto.
+          // Ex.: regra "Ignorar pasta: Etiquetas CM-Station" → todos os arquivos dentro
+          // dessa subpasta são descartados na importação (não entram na análise).
+          try {
+            const opFile = files.find((f) => /(^|[_\-\s])op[_\-\s]/i.test(f.name) || /ordem.*produ/i.test(f.name));
+            let opTxtPre = '';
+            if (opFile) { try { opTxtPre = await extractTextFromFile(opFile); } catch (e) {} }
+            if (opTxtPre) {
+              const prods = await loadProdutosComFichas();
+              const ident = detectarProdutoNoTexto(opTxtPre, prods, parseOP(opTxtPre)?.derivacao);
+              const fid = ident?.produto?.ficha_id;
+              if (fid) {
+                const { data: frow } = await supabase.from('fichas_mestres').select('regras_negocio').eq('id', fid).single();
+                const regras = (frow?.regras_negocio || []).map((r) => typeof r === 'string' ? r : (r?.regra || ''));
+                const pastasIgnorar = [];
+                for (const r of regras) {
+                  const m = String(r).match(/ignorar\s+(?:a\s+|as\s+)?pasta[s]?\s*[:\-"']?\s*(.+)/i);
+                  if (m && m[1]) pastasIgnorar.push(_normModelo(m[1].replace(/["'.]+$/, '').trim()));
+                }
+                if (pastasIgnorar.length) {
+                  const mantidos = [];
+                  for (const f of files) {
+                    const rel = _normModelo(f.webkitRelativePath || f.name);
+                    const segs = rel.split('/').slice(0, -1); // segmentos de pasta (exclui o arquivo)
+                    const ignorar = pastasIgnorar.some((p) => p && segs.some((s) => s === p || s.includes(p)));
+                    if (ignorar) ignorados.push(`${f.name} (pasta ignorada por regra de exceção)`);
+                    else mantidos.push(f);
+                  }
+                  files.length = 0; for (const f of mantidos) files.push(f);
+                }
+              }
+            }
+          } catch (e) { /* best-effort: se algo falhar, importa tudo normalmente */ }
+
           for (const f of files) {
             const c = await classificarArquivo(f);
             if (!c.slot) { ignorados.push(f.name); continue; }
@@ -12812,26 +12826,8 @@ ${parecer.parecer_tecnico ? `
       const [acessoriosAlt, setAcessoriosAlt] = useState(
         montarBlocosAlt(_acsOrdenados)
       );
-      // Produtos associados: modelos de outros produtos cujas etiquetas viajam na
-      // mesma pasta e devem ser ignoradas na análise deste. Ex.: CM-STATION no CM-STATION27.
-      const [produtosAssociados, setProdutosAssociados] = useState(
-        Array.isArray(ficha?.produtos_associados) ? ficha.produtos_associados : []
-      );
-      const [assocInput, setAssocInput] = useState('');
-      const [modelosCatalogo, setModelosCatalogo] = useState([]);
-      useEffect(() => {
-        (async () => {
-          const { data } = await supabase.from('produtos').select('modelo').eq('ativo', true).order('modelo');
-          setModelosCatalogo((data || []).map((p) => p.modelo).filter(Boolean));
-        })();
-      }, []);
-      const addAssociado = () => {
-        const m = (assocInput || '').trim();
-        if (!m) return;
-        setProdutosAssociados((p) => p.includes(m) ? p : [...p, m]);
-        setAssocInput('');
-      };
-      const removeAssociado = (m) => setProdutosAssociados((p) => p.filter((x) => x !== m));
+      // (Recurso de "produtos associados" removido em 06/08/2026 — substituído por
+      //  Regras de Exceção que mandam ignorar subpastas na importação.)
       // estagios_aplicaveis: array com os nomes dos estágios variáveis aplicáveis ao produto.
       // Subset dos 10 nomes em ESTAGIOS_VARIAVEIS. Os 4 fixos e 2 condicionais NÃO ficam aqui.
       const [estagiosAplicaveis, setEstagiosAplicaveis] = useState(
@@ -13039,6 +13035,50 @@ ${parecer.parecer_tecnico ? `
         if (!isNew && prevSnap && !motivoRevisao.trim()) setMotivoRevisao(gerarResumoAlteracoes());
       }, [prevSnap]);
 
+      // Diferença entre dois snapshots (para descrever revisões, inclusive retroativas).
+      const diffSnapshots = (prev, cur) => {
+        if (!prev) return 'Criação da ficha.';
+        const pa = prev.acessorios || [], ca = cur.acessorios || [];
+        const pf = prev.ficha || {}, cf = cur.ficha || {};
+        const cod = (a) => String(a.codigo_sapiens || '').trim();
+        const pSet = new Set(pa.map(cod).filter(Boolean));
+        const cSet = new Set(ca.map(cod).filter(Boolean));
+        const pBy = new Map(pa.map((a) => [cod(a), a]));
+        const mud = [];
+        for (const a of ca) { const c = cod(a); if (c && !pSet.has(c)) mud.push(`Acessório ${a.descricao || c} (${c}) incluído na ficha`); }
+        for (const a of pa) { const c = cod(a); if (c && !cSet.has(c)) mud.push(`Acessório ${a.descricao || c} (${c}) obsoleto e removido da ficha`); }
+        for (const a of ca) { const c = cod(a); const p = pBy.get(c); if (p && c && !(p.grupo_alternativo || '').trim() && !(a.grupo_alternativo || '').trim()) { const po = p.obrigatorio !== false, ao = a.obrigatorio !== false; if (po !== ao) mud.push(`Obrigatoriedade de ${a.descricao || c} (${c}) alterada para ${ao ? 'obrigatório' : 'opcional'}`); } }
+        const cmp = (label, pv, cv) => { const p = String(pv || '').trim(), c = String(cv || '').trim(); if (p !== c) mud.push(`${label} alterado de "${p || '—'}" para "${c || '—'}"`); };
+        cmp('Responsável Técnico', pf.responsavel_tecnico, cf.responsavel_tecnico);
+        cmp('CREA da RT', pf.crea_rt, cf.crea_rt);
+        cmp('Responsável Legal', pf.responsavel_legal, cf.responsavel_legal);
+        cmp('Convenção do nº de série', pf.convencao_nro_serie, cf.convencao_nro_serie);
+        cmp('Descrição da derivação', pf.derivacao_descricao, cf.derivacao_descricao);
+        return mud.length ? mud.join('; ') + '.' : 'Sem alterações relevantes detectadas.';
+      };
+      // Backfill: descreve retroativamente as revisões cujo motivo é genérico
+      // ("Salvamento"/"Criação"), comparando cada snapshot com o anterior.
+      const [gerandoRetro, setGerandoRetro] = useState(false);
+      const gerarDescricoesRetroativas = async () => {
+        if (!ficha?.id) return;
+        setGerandoRetro(true);
+        try {
+          const asc = [...revisoes].sort((a, b) => (a.versao || 0) - (b.versao || 0));
+          let n = 0;
+          for (let i = 0; i < asc.length; i++) {
+            const cur = asc[i], prev = i > 0 ? asc[i - 1] : null;
+            const generico = !cur.motivo || /^(salvamento|cria[çc][ãa]o( da ficha\.?)?)$/i.test(String(cur.motivo).trim());
+            if (!generico) continue;
+            const novo = prev ? diffSnapshots(prev.snapshot, cur.snapshot) : 'Criação da ficha.';
+            if (novo && novo !== cur.motivo) { await supabase.from('fichas_mestres_versoes').update({ motivo: novo }).eq('id', cur.id); n++; }
+          }
+          const { data } = await supabase.from('fichas_mestres_versoes').select('*').eq('ficha_id', ficha.id).order('versao', { ascending: false });
+          setRevisoes(data || []);
+          toast.success(`${n} revisão(ões) descrita(s) retroativamente.`);
+        } catch (e) { toast.error('Erro ao gerar descrições: ' + (e?.message || e)); }
+        finally { setGerandoRetro(false); }
+      };
+
       const handleSave = async () => {
         console.group('[Ficha Mestre · Save]');
         if (!form.nome_comercial.trim()) {
@@ -13086,7 +13126,6 @@ ${parecer.parecer_tecnico ? `
             // estagios_com_inspecao: jsonb array com números dos estágios que têm inspeção
             estagios_com_inspecao: Array.from(estagiosComInspecao).sort((a, b) => a - b),
             regras_negocio: regras.filter((r) => r.trim()).map((r) => ({ regra: r })),
-            produtos_associados: produtosAssociados,
           };
           console.log('isNew:', isNew, '| ficha?.id:', ficha?.id, '| produto.id:', produto?.id);
           console.log('fichaData payload:', fichaData);
@@ -13369,30 +13408,6 @@ ${parecer.parecer_tecnico ? `
                 </div>
               </div>
 
-              {/* Produtos associados: etiquetas que vêm na pasta mas são de OUTRO produto
-                  (conferidas quando aquele produto for analisado) — devem ser ignoradas aqui. */}
-              <div className="pt-4 mt-2 border-t">
-                <div className="mb-2">
-                  <h4 className="text-sm font-semibold">Produtos associados (etiquetas a ignorar)</h4>
-                  <p className="text-xs text-muted-foreground">Se a pasta da OP deste produto trouxer etiquetas de <strong>outro produto</strong> (ex.: o CM-STATION27 vem com a etiqueta externa e o acessório do CM-STATION), informe o modelo desse outro produto. Na análise, a <strong>etiqueta externa</strong> dele é descartada (fica a que bate com a OP) e as <strong>etiquetas de acessório</strong> dele são desconsideradas — serão conferidas quando aquele produto for analisado.</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 mb-2">
-                  {produtosAssociados.length === 0 && <span className="text-xs text-muted-foreground">Nenhum produto associado.</span>}
-                  {produtosAssociados.map((m) => (
-                    <span key={m} className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.12)', color: 'hsl(var(--accent))' }}>
-                      {m}
-                      <button type="button" onClick={() => removeAssociado(m)} title="Remover" className="ml-0.5"><Icon name="x" className="h-3 w-3" /></button>
-                    </span>
-                  ))}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Input list="modelos-catalogo-assoc" value={assocInput} onChange={(e) => setAssocInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAssociado(); } }} placeholder="Modelo do produto associado (ex.: CM-STATION)" className="flex-1" />
-                  <datalist id="modelos-catalogo-assoc">
-                    {modelosCatalogo.filter((m) => m !== produto?.modelo).map((m) => (<option key={m} value={m} />))}
-                  </datalist>
-                  <Button variant="outline" size="sm" onClick={addAssociado}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar</Button>
-                </div>
-              </div>
             </div>
           </CollapsibleSection>
 
@@ -13456,10 +13471,10 @@ ${parecer.parecer_tecnico ? `
             </div>
           </CollapsibleSection>
 
-          {/* 7. Regras de Negócio */}
+          {/* 7. Regras de Exceção */}
           <CollapsibleSection
-            title="7. Regras de Negócio Específicas"
-            description="Particularidades do produto que o agente deve considerar"
+            title="7. Regras de Exceção"
+            description="Particularidades e exceções que o agente deve considerar. Para ignorar uma subpasta na importação, escreva: Ignorar pasta: NOME DA PASTA (ex.: Ignorar pasta: Etiquetas CM-Station)."
             open={open.regras}
             onToggle={() => toggle('regras')}
             badge={regras.length > 0 ? `${regras.length} regra(s)` : null}
@@ -13467,7 +13482,7 @@ ${parecer.parecer_tecnico ? `
             <div className="space-y-2">
               {regras.map((r, i) => (
                 <div key={i} className="flex items-start gap-2">
-                  <Textarea rows={2} value={r} onChange={(e) => updateRegra(i, e.target.value)} placeholder="Ex.: Embalagem contém apenas 2 acessórios obrigatórios" className="flex-1" />
+                  <Textarea rows={2} value={r} onChange={(e) => updateRegra(i, e.target.value)} placeholder="Ex.: Ignorar pasta: Etiquetas CM-Station" className="flex-1" />
                   <Button variant="ghost" size="icon" onClick={() => removeRegra(i)}><Icon name="trash" className="h-3.5 w-3.5" /></Button>
                 </div>
               ))}
@@ -13520,18 +13535,26 @@ ${parecer.parecer_tecnico ? `
               ) : revisoes.length === 0 ? (
                 <div className="text-sm text-muted-foreground p-2">Nenhuma revisão registrada ainda. A primeira será criada no próximo salvamento.</div>
               ) : (
-                <div className="rounded-md border divide-y max-h-[60vh] overflow-y-auto">
-                  {revisoes.map((v, idx) => (
-                    <div key={v.id} className="flex items-center justify-between gap-3 p-3 text-sm">
-                      <div className="min-w-0">
-                        <div className="font-medium">Revisão {v.versao}{idx === 0 ? ' (atual)' : ''} <span className="text-muted-foreground">· {v.motivo || 'Salvamento'}</span></div>
-                        <div className="text-xs text-muted-foreground">{v.criado_por_nome || '—'} · {v.created_at ? new Date(v.created_at).toLocaleString('pt-BR') : ''} · {(v.snapshot?.acessorios || []).length} acessório(s)</div>
+                <div className="space-y-2">
+                  <div className="flex justify-end">
+                    <Button size="sm" variant="outline" onClick={gerarDescricoesRetroativas} disabled={gerandoRetro} title="Descreve o que mudou nas revisões antigas comparando os snapshots salvos">
+                      {gerandoRetro ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Gerando…</>) : (<><Icon name="refresh" className="h-3.5 w-3.5" />Descrever revisões antigas</>)}
+                    </Button>
+                  </div>
+                  <div className="rounded-md border divide-y max-h-[60vh] overflow-y-auto">
+                    {revisoes.map((v, idx) => (
+                      <div key={v.id} className="flex items-start justify-between gap-3 p-3 text-sm">
+                        <div className="min-w-0">
+                          <div className="font-medium">Revisão {v.versao}{idx === 0 ? ' (atual)' : ''}</div>
+                          <div className="text-sm mt-0.5">{v.motivo || 'Salvamento'}</div>
+                          <div className="text-xs text-muted-foreground mt-0.5">{v.criado_por_nome || '—'} · {v.created_at ? new Date(v.created_at).toLocaleString('pt-BR') : ''} · {(v.snapshot?.acessorios || []).length} acessório(s)</div>
+                        </div>
+                        {idx !== 0 && (
+                          <Button size="sm" variant="outline" className="shrink-0" onClick={() => reverterRevisao(v)}><Icon name="history" className="h-3.5 w-3.5" />Reverter</Button>
+                        )}
                       </div>
-                      {idx !== 0 && (
-                        <Button size="sm" variant="outline" onClick={() => reverterRevisao(v)}><Icon name="history" className="h-3.5 w-3.5" />Reverter</Button>
-                      )}
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               )}
             </Modal>
