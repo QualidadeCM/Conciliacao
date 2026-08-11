@@ -235,6 +235,11 @@ function webhookDoCanal(canal) {
   if (c === 'almoxarifado' || c === 'almox') return SLACK_WEBHOOK_ALMOXARIFADO || SLACK_WEBHOOK_URL;
   return SLACK_WEBHOOK_URL; // sem canal informado → geral
 }
+// Observação: a menção de pessoas (quando a Qualidade escolhe quem marcar em
+// cada envio) é montada na PLATAFORMA, dentro do próprio texto (formato Slack
+// `<@ID-DO-MEMBRO>`), a partir do cadastro de Contatos do Slack em
+// Configurações. Este endpoint só repassa `texto` como veio — nenhuma lógica
+// de menção fica fixa aqui no servidor.
 app.post('/notificar-slack', async (req, res) => {
   let body;
   try { body = JSON.parse(Buffer.from(req.body).toString('utf8')); } catch (e) { return res.status(400).json({ error: 'JSON invalido.' }); }

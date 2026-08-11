@@ -5855,11 +5855,14 @@
         const insps = inspsPorEstagio.get(o.estagio_numero) || [];
         return {
           estagio: `${o.estagio_numero} — ${o.estagio_nome}`,
+          estagio_numero: o.estagio_numero,
           operacao: `Op ${o.operacao_numero} ${o.operacao_desc}`,
           inicio: o.inicio,
           fim: o.fim,
           tempo_min: o.tempo_min,
           operador: `${o.operador_id} ${o.operador_nome}`,
+          operador_id: o.operador_id,
+          operador_nome: o.operador_nome,
           inspecao: insps.length > 0 ? insps.map(fmtInsp).join(' | ') : '—',
         };
       });
@@ -9036,8 +9039,30 @@ ${parecer.parecer_tecnico ? `
               enviar: info.nivel !== 'pontual',
             };
           });
+          // === Menção por estágio: quem EXECUTOU o Estágio 50 (Embalagem) é o
+          // responsável de Almoxarifado (problema de etiqueta); quem executou o
+          // Estágio 60 (Conciliação da Produção) é o responsável de PCP (problema
+          // na OP) — nesta OP específica, não uma lista fixa de pessoas. ===
+          const acharMencao = (estagioNum, setorLabel) => {
+            const crono = (parecer.cronologia || []).find((c) => c.estagio_numero === estagioNum);
+            if (!crono || !crono.operador_nome) return { nome: '', operadorId: '', slackId: '', incluir: false, encontrado: false, setorLabel };
+            const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+            const cod = String(crono.operador_id || '').trim();
+            let match = null;
+            if (cod) match = operadoresRef.find((o) => String(o.codigo || '').trim() === cod);
+            if (!match) match = operadoresRef.find((o) => norm(o.nome) === norm(crono.operador_nome));
+            const slackId = match?.slack_user_id || '';
+            return { nome: crono.operador_nome, operadorId: cod, slackId, incluir: !!slackId, encontrado: true, setorLabel };
+          };
+          let operadoresRef = [];
+          try {
+            const { data } = await supabase.from('operadores').select('nome, codigo, slack_user_id');
+            operadoresRef = data || [];
+          } catch (e) { /* best-effort */ }
+          const mencaoEtiqueta = acharMencao(50, 'Almoxarifado');
+          const mencaoOP = acharMencao(60, 'PCP');
           // incluirReinc: aviso de reincidência junto da NC (ligado por padrão; quem envia pode desmarcar).
-          setSlackModal({ itens, incluirReinc: true });
+          setSlackModal({ itens, incluirReinc: true, mencaoEtiqueta, mencaoOP });
         } catch (e) { toast.error('Erro ao preparar o alerta: ' + (e?.message || e)); }
         finally { setEnviandoSlack(false); }
       };
@@ -9116,12 +9141,20 @@ ${parecer.parecer_tecnico ? `
             if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(`(${rotulo}) ` + (err.error || `HTTP ${resp.status}`)); }
             enviados.push(rotulo);
           };
+          // Menção de quem executou o estágio responsável nesta OP (Estágio 50 →
+          // Almoxarifado; Estágio 60 → PCP), quando marcado no modal e com Slack ID.
+          const mencaoDoSetor = (setor) => {
+            const m = setor === 'Almoxarifado' ? slackModal.mencaoEtiqueta : setor === 'PCP' ? slackModal.mencaoOP : null;
+            return (m && m.incluir && m.slackId) ? `<@${m.slackId}>` : '';
+          };
           for (const [setor, lista] of Object.entries(porSetor)) {
             const canal = canalDoSetor(setor);
+            const mencao = mencaoDoSetor(setor);
             const corr = lista.filter((it) => it.tipo !== 'duvida');
             const duv = lista.filter((it) => it.tipo === 'duvida');
             if (corr.length > 0) {
               const texto = [
+                ...(mencao ? [mencao] : []),
                 `:rotating_light: *NÃO CONFORMIDADE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
                 `Conferência da Qualidade identificou ${corr.length} não conformidade(s) sob responsabilidade do *${setor}*:`,
                 '',
@@ -9131,6 +9164,7 @@ ${parecer.parecer_tecnico ? `
             }
             if (duv.length > 0) {
               const texto = [
+                ...(mencao ? [mencao] : []),
                 `:question: *DÚVIDA — VERIFICAR FICHA MESTRE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
                 `A Qualidade tem ${duv.length} ponto(s) que podem indicar Ficha Mestre desatualizada, sob responsabilidade do *${setor}*. Por favor, respondam *nesta thread*:`,
                 '',
@@ -9752,6 +9786,31 @@ ${parecer.parecer_tecnico ? `
                 <input type="checkbox" checked={!!slackModal.incluirReinc} onChange={(e) => setSlackModal((m) => ({ ...m, incluirReinc: e.target.checked }))} className="h-4 w-4 mt-0.5" />
                 <span>Incluir <strong>aviso de reincidência</strong> nas NCs (níveis possível reincidente / reincidente / em alta) — mostra quantas vezes o problema ocorreu na janela e sugere averiguação.</span>
               </label>
+
+              {/* Menção de quem EXECUTOU o estágio responsável nesta OP (não é lista fixa —
+                  é resolvido por OP: Estágio 50/Embalagem para etiqueta, Estágio 60/Conciliação
+                  para OP). Só mostra quando a mensagem daquele setor vai ser enviada. */}
+              {['mencaoEtiqueta', 'mencaoOP'].map((chave) => {
+                const m = slackModal[chave];
+                if (!m) return null;
+                const temItemDoSetor = slackModal.itens.some((it) => it.setor === m.setorLabel);
+                if (!temItemDoSetor) return null;
+                const rotuloEstagio = chave === 'mencaoEtiqueta' ? 'Estágio 50 — Embalagem' : 'Estágio 60 — Conciliação da Produção';
+                return (
+                  <div key={chave} className="mt-2 p-2.5 rounded-md border bg-muted/30 text-sm">
+                    {!m.encontrado ? (
+                      <span className="text-xs text-muted-foreground">Não foi possível identificar quem executou o {rotuloEstagio} nesta OP — mensagem de {m.setorLabel} vai sem menção.</span>
+                    ) : !m.slackId ? (
+                      <span className="text-xs text-muted-foreground">Quem executou o {rotuloEstagio} nesta OP foi <strong>{m.nome}</strong>, mas ele(a) ainda não tem Slack ID cadastrado (Configurações → Operadores → Todos os colaboradores). Mensagem de {m.setorLabel} vai sem menção.</span>
+                    ) : (
+                      <label className="flex items-start gap-2 cursor-pointer select-none">
+                        <input type="checkbox" checked={!!m.incluir} onChange={(e) => setSlackModal((prev) => ({ ...prev, [chave]: { ...prev[chave], incluir: e.target.checked } }))} className="h-4 w-4 mt-0.5" />
+                        <span>Marcar <strong>{m.nome}</strong> na mensagem de {m.setorLabel} — executou o {rotuloEstagio} nesta OP.</span>
+                      </label>
+                    )}
+                  </div>
+                );
+              })}
               {(() => { const sel = slackModal.itens.filter((it) => it.enviar).length; return (
               <div className="flex items-center justify-end gap-2 mt-4">
                 <span className="text-xs text-muted-foreground mr-auto">{sel} de {slackModal.itens.length} NC(s) marcada(s) para envio</span>
@@ -14324,6 +14383,12 @@ ${parecer.parecer_tecnico ? `
       const [editId, setEditId] = useState(null);
       const [editApelidos, setEditApelidos] = useState('');
       const [editCodigo, setEditCodigo] = useState('');
+      const [editSlackId, setEditSlackId] = useState('');
+      // Cadastro rápido de colaborador (sem precisar vincular a um estágio) —
+      // usado, por ex., para registrar o Slack ID de quem embala (Estágio 50) ou
+      // concilia (Estágio 60), mesmo que não seja inspetor.
+      const [novoColab, setNovoColab] = useState({ nome: '', codigo: '', slack_user_id: '' });
+      const [salvandoColab, setSalvandoColab] = useState(false);
 
       useRealtime('operadores', () => setReload((r) => r + 1));
       useEffect(() => {
@@ -14466,11 +14531,33 @@ ${parecer.parecer_tecnico ? `
 
       const abrirEdicao = (op) => {
         if (editId === op.id) { setEditId(null); return; }
-        setEditId(op.id); setEditApelidos((op.apelidos || []).join(', ')); setEditCodigo(op.codigo || '');
+        setEditId(op.id); setEditApelidos((op.apelidos || []).join(', ')); setEditCodigo(op.codigo || ''); setEditSlackId(op.slack_user_id || '');
       };
       const salvarEdicao = async (op) => {
-        await alterar(op, { apelidos: parseApelidos(editApelidos), codigo: (editCodigo || '').trim() || null }, `${autor()} editou dados de ${op.nome}`);
+        await alterar(op, { apelidos: parseApelidos(editApelidos), codigo: (editCodigo || '').trim() || null, slack_user_id: (editSlackId || '').trim() || null }, `${autor()} editou dados de ${op.nome}`);
         setEditId(null); toast.success(`${op.nome} atualizado.`);
+      };
+
+      // Cadastra um colaborador direto na lista geral, sem vincular a estágio —
+      // útil para registrar só o Slack ID de quem embala/concilia.
+      const adicionarColaborador = async () => {
+        const nm = (novoColab.nome || '').trim();
+        if (!nm) { toast.error('Informe o nome do colaborador.'); return; }
+        const existente = acharExistente({ codigo: novoColab.codigo, nome: nm });
+        if (existente) { toast.error('Já existe um colaborador com esse nome/código — edite-o na lista abaixo.'); return; }
+        setSalvandoColab(true);
+        try {
+          const { error } = await supabase.from('operadores').insert({
+            nome: nm, codigo: (novoColab.codigo || '').trim() || null,
+            slack_user_id: (novoColab.slack_user_id || '').trim() || null,
+            apelidos: [], estagios: [], estagios_inspecao: [], ativo: true, updated_by: autor(),
+          });
+          if (error) throw error;
+          await registrarLog(perfil, 'cadastrar_operador', 'operador', nm, `${autor()} cadastrou o colaborador ${nm}`);
+          toast.success(`${nm} cadastrado.`);
+          setNovoColab({ nome: '', codigo: '', slack_user_id: '' });
+          setReload((r) => r + 1);
+        } catch (e) { toast.error('Erro: ' + (e?.message || e)); } finally { setSalvandoColab(false); }
       };
 
       const gerenciaveis = lista.filter((op) => mostrarInativos || op.ativo);
@@ -14508,10 +14595,22 @@ ${parecer.parecer_tecnico ? `
               onToggle={() => setGerirAberto((v) => !v)}
             >
               <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">Cadastre aqui o <strong>Slack ID</strong> de quem embala (Estágio 50) e de quem concilia a produção (Estágio 60) — ao enviar uma NC ao Slack, a plataforma sugere marcar automaticamente quem executou esse estágio naquela OP específica.</p>
                 <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
                   <input type="checkbox" checked={mostrarInativos} onChange={(ev) => setMostrarInativos(ev.target.checked)} className="h-3.5 w-3.5" />
                   Mostrar inativos
                 </label>
+                {podeEditar && (
+                  <div className="rounded-md border border-dashed p-3 space-y-2">
+                    <div className="text-xs font-semibold text-muted-foreground">Adicionar colaborador</div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                      <Input value={novoColab.nome} onChange={(e) => setNovoColab((p) => ({ ...p, nome: e.target.value }))} placeholder="Nome *" />
+                      <Input value={novoColab.codigo} onChange={(e) => setNovoColab((p) => ({ ...p, codigo: e.target.value }))} placeholder="Código / matrícula" />
+                      <Input value={novoColab.slack_user_id} onChange={(e) => setNovoColab((p) => ({ ...p, slack_user_id: e.target.value }))} placeholder="Slack ID (ex.: U0123456789)" />
+                    </div>
+                    <Button size="sm" onClick={adicionarColaborador} disabled={salvandoColab}><Icon name="plus" className="h-3.5 w-3.5" />Adicionar</Button>
+                  </div>
+                )}
                 <div className="rounded-md border divide-y">
                   {gerenciaveis.length === 0 && <div className="p-3 text-sm text-muted-foreground text-center">Nenhum colaborador cadastrado.</div>}
                   {gerenciaveis.map((op) => (
@@ -14521,6 +14620,7 @@ ${parecer.parecer_tecnico ? `
                           <div className="text-sm font-semibold flex items-center gap-2">
                             {op.nome}
                             {op.codigo && <span className="text-xs font-mono text-muted-foreground">#{op.codigo}</span>}
+                            {op.slack_user_id && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--secondary) / 0.15)', color: 'hsl(var(--secondary))' }} title={`Slack ID: ${op.slack_user_id}`}>Slack</span>}
                             {!op.ativo && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }}>inativo</span>}
                           </div>
                           <div className="flex flex-wrap gap-1 mt-1 items-center">
@@ -14540,9 +14640,10 @@ ${parecer.parecer_tecnico ? `
                         )}
                       </div>
                       {editId === op.id && podeEditar && (
-                        <div className="mt-2 pt-2 border-t grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
+                        <div className="mt-2 pt-2 border-t grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
                           <div><Label className="text-xs">Código / matrícula</Label><Input value={editCodigo} onChange={(ev) => setEditCodigo(ev.target.value)} placeholder="matrícula Sapiens" /></div>
                           <div><Label className="text-xs">Apelidos</Label><Input value={editApelidos} onChange={(ev) => setEditApelidos(ev.target.value)} placeholder="separe por vírgula" /></div>
+                          <div><Label className="text-xs">Slack ID</Label><Input value={editSlackId} onChange={(ev) => setEditSlackId(ev.target.value)} placeholder="ex.: U0123456789" /></div>
                           <div><Button size="sm" onClick={() => salvarEdicao(op)}><Icon name="check" className="h-3.5 w-3.5" />Salvar</Button></div>
                         </div>
                       )}

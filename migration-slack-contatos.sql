@@ -1,0 +1,15 @@
+-- ============================================================================
+-- SUPERSEDIDO — não rodar.
+-- Data: 11/08/2026
+--
+-- Esta migration criaria uma tabela solta "slack_contatos" (nome + ID + setor)
+-- para seleção manual de quem mencionar. Foi substituída, na mesma conversa,
+-- por um mecanismo mais preciso: em vez de uma lista solta por setor, a menção
+-- é resolvida automaticamente pelo colaborador que EXECUTOU o estágio
+-- relevante NAQUELA OP (Estágio 50 — Embalagem, para problema de etiqueta;
+-- Estágio 60 — Conciliação da Produção, para problema na OP), usando o
+-- cadastro de colaboradores já existente (tabela `operadores`).
+--
+-- Ver migration-operadores-slack-id.sql (adiciona a coluna slack_user_id na
+-- tabela `operadores`) — é essa a migration válida para esta funcionalidade.
+-- ============================================================================

@@ -85,6 +85,38 @@ por canal** com apenas as NCs daquele setor. O serviço escolhe o webhook pelo c
 > Garanta que `.env`, `.env.*` e afins estão no `.gitignore` (já estão no projeto),
 > para a URL nunca ir para o Git.
 
+## Passo 3.1 — Marcar quem executou o estágio responsável (opcional)
+
+A mensagem de cada NC pode marcar automaticamente **quem executou, naquela OP
+específica**, o estágio ligado ao problema — não é uma lista fixa de pessoas nem
+uma escolha solta: é resolvido a cada análise, a partir da própria OP.
+
+- Problema de **etiqueta** (Almoxarifado) → menciona quem executou o
+  **Estágio 50 — Embalagem** nessa OP.
+- Problema na **OP** (PCP) → menciona quem executou o
+  **Estágio 60 — Conciliação da Produção** nessa OP.
+
+Para isso funcionar, cadastre o Slack ID do colaborador uma vez:
+
+1. Pegue o **ID de membro** dele no Slack: clique no nome/foto da pessoa →
+   **⋯ (mais opções)** → **Copiar ID do membro**. Formato `U0123456789` — não é
+   o `@nomedeusuario`.
+2. Em Configurações → Operadores → "Todos os colaboradores", cadastre (ou edite)
+   o colaborador e preencha o campo **Slack ID**. Se ele ainda não estiver na
+   lista, use "Adicionar colaborador" (nome + código/matrícula + Slack ID).
+   O código/matrícula é o mesmo número que aparece na cronologia da OP — é por
+   ele que a plataforma casa "quem embalou/conciliou esta OP" com o cadastro.
+3. Na caixa "Enviar ao Slack", a plataforma já identifica automaticamente quem
+   executou o estágio naquela OP e mostra um checkbox "Marcar Fulano — executou
+   o Estágio 50/60 nesta OP", ligado por padrão quando há Slack ID cadastrado.
+   Desmarque se não quiser mencionar naquele envio.
+
+Se o colaborador daquela OP ainda não tiver Slack ID cadastrado, a mensagem sai
+normalmente, só sem a menção (com um aviso na caixa de envio).
+
+Nenhuma configuração de `.env` é necessária para isso — fica tudo no cadastro de
+Operadores da plataforma.
+
 ## Passo 4 — Reiniciar o serviço
 
 O serviço só lê o `.env` ao iniciar. No prompt do servidor:
@@ -135,6 +167,16 @@ Resposta esperada: `{"ok":true}` e a mensagem no canal.
   Crie um novo Incoming Webhook apontando para o canal desejado (Passo 2) e troque
   a URL no `.env`. Um webhook = um canal.
 
+- **A menção aparece como texto cru (`<@U0123456789>`) em vez de marcar a pessoa**
+  Confira se cadastrou o **ID do membro** (formato `U...`), não o `@nomedeusuario`
+  nem o nome de exibição — só o ID faz o Slack converter em menção real.
+
+- **A caixa de envio diz que não identificou quem executou o estágio**
+  A OP não trouxe uma linha de operação para o Estágio 50/60 com o formato
+  esperado, ou o colaborador daquela linha ainda não está cadastrado em
+  Operadores (por nome, já que sem código a plataforma casa por nome
+  normalizado). Cadastre-o ou confira o texto extraído da OP.
+
 ## Segurança e boas práticas
 
 - A Webhook URL é um **segredo**: só no `.env` do servidor, fora do Git e do
@@ -148,6 +190,14 @@ Resposta esperada: `{"ok":true}` e a mensagem no canal.
 ## Onde isso está no código
 
 - Serviço: `conversor-pdf-local/server.js` → endpoint `POST /notificar-slack`
-  (lê `SLACK_WEBHOOK_URL`, repassa `{ text }` ao Slack).
-- Plataforma: chamadas a `${base}/notificar-slack` com `{ texto }` — no envio de
-  NC e no botão "Alertar" da aba Tendência e reincidência.
+  (lê `SLACK_WEBHOOK_URL`/`SLACK_WEBHOOK_PCP`/`SLACK_WEBHOOK_ALMOXARIFADO` e
+  repassa `{ text }` ao Slack, sem lógica de menção — isso fica na plataforma).
+- Migration `migration-operadores-slack-id.sql`: coluna `slack_user_id` na
+  tabela `operadores`.
+- Plataforma: `parseOP` extrai quem executou cada operação/estágio da OP
+  (`operador_id`/`operador_nome`, expostos em `parecer.cronologia`); em
+  `abrirAlertaSlack`, resolve o executor do Estágio 50 e do Estágio 60 desta OP
+  e casa com o cadastro de Operadores (por código, com fallback por nome) para
+  achar o Slack ID; a caixa "Enviar ao Slack" mostra o checkbox de menção por
+  setor, e `confirmarEnvioSlack` monta `<@ID>` no início do texto daquele setor
+  antes de chamar `${base}/notificar-slack` com `{ texto, canal }`.
