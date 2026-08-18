@@ -9762,10 +9762,10 @@ ${parecer.parecer_tecnico ? `
                     key={i}
                     item={c}
                     onJustify={c.tipo === 'ALERTA' && c.apIdx != null && !c.justificativa ? () => pedirOuExecutar({ acao: 'justificar', entidade: 'analise', entidadeRef: `OP ${opNum}`, payload: {} }, () => setJustifyModal({ apIdx: c.apIdx, text: '' })) : null}
-                    onReanalisar={c.tipo === 'BLOQUEADOR' && c.apIdx != null ? () => pedirOuExecutar({ acao: 'refazer_analise', entidade: 'analise', entidadeRef: `OP ${opNum}`, payload: {} }, () => {
+                    onReanalisar={(c.tipo === 'BLOQUEADOR' || c.tipo === 'ALERTA') && c.apIdx != null && mapApontamento(parecer.apontamentos?.[c.apIdx]).slotKey ? () => pedirOuExecutar({ acao: 'refazer_analise', entidade: 'analise', entidadeRef: `OP ${opNum}`, payload: {} }, () => {
                       const info = mapApontamento(parecer.apontamentos?.[c.apIdx]);
                       if (!info.slotKey) {
-                        toast.error('Não foi possível identificar qual documento substituir para esta NC.');
+                        toast.error('Não foi possível identificar qual documento substituir para este apontamento.');
                         return;
                       }
                       const original = getOriginalFileName(info.slotKey, info.codigo);
@@ -9780,7 +9780,7 @@ ${parecer.parecer_tecnico ? `
                         file: null, text: '', motivo: '',
                       });
                     }) : null}
-                    jaCorrigido={c.tipo === 'BLOQUEADOR' && c.apIdx != null ? !!getCorrigido(mapApontamento(parecer.apontamentos?.[c.apIdx]).slotDisplayKey) : false}
+                    jaCorrigido={(c.tipo === 'BLOQUEADOR' || c.tipo === 'ALERTA') && c.apIdx != null ? !!getCorrigido(mapApontamento(parecer.apontamentos?.[c.apIdx]).slotDisplayKey) : false}
                     onRemoverEtiqueta={(() => {
                       if (c.tipo !== 'BLOQUEADOR' || c.apIdx == null) return null;
                       const info = mapApontamento(parecer.apontamentos?.[c.apIdx]);
@@ -10175,9 +10175,9 @@ ${parecer.parecer_tecnico ? `
                     {!fileNameToReplace && ' · (documento ausente na análise original)'}
                   </div>
                 </div>
-                {/* Resumo da NC apontada */}
+                {/* Resumo do apontamento */}
                 <div className="text-xs p-3 rounded-md bg-muted/40 border">
-                  <div className="font-semibold mb-1">NC apontada: {parecer.apontamentos?.[reanalisarModal.apIdx]?.documento_afetado || '—'}</div>
+                  <div className="font-semibold mb-1">Apontamento: {parecer.apontamentos?.[reanalisarModal.apIdx]?.documento_afetado || '—'}</div>
                   <div>{parecer.apontamentos?.[reanalisarModal.apIdx]?.descricao}</div>
                 </div>
                 <div>
@@ -11348,6 +11348,173 @@ ${parecer.parecer_tecnico ? `
       );
     }
 
+    /* ====================================================================
+       MODAL: Enviar apontamento em pacote ao Slack (mesmo problema, N OPs)
+       Agrupa os apontamentos recentes por "problema" (mesma descrição, variando
+       só o valor). Você escolhe o grupo, marca as OPs e envia UMA mensagem
+       genérica e compacta (uma linha por OP: OP · série · valor · operador),
+       marcando @ todos os operadores que precisam corrigir. Só notifica —
+       não altera apontamentos/status.
+       ==================================================================== */
+    function EnviarPacoteProblemaModal({ open, onClose, perfil }) {
+      const toast = useToast();
+      const [carregando, setCarregando] = useState(false);
+      const [dias, setDias] = useState(60);
+      const [grupos, setGrupos] = useState([]);
+      const [sel, setSel] = useState(null);
+      const [marcadas, setMarcadas] = useState(new Set());
+      const [enviando, setEnviando] = useState(false);
+      const [resultado, setResultado] = useState(null);
+
+      const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const extrairValor = (desc) => {
+        const m = String(desc || '').match(/(\d+(?:[.,]\d+)?)\s*(min|mA|LUX|Ohm|mm|un|V|A)\b/i);
+        if (m) return `${m[1]} ${m[2]}`;
+        const n = String(desc || '').match(/\b(\d{2,})\b/);
+        return n ? n[1] : '';
+      };
+      const templateProblema = (desc, doc) => (doc || '') + ' :: ' + String(desc || '').replace(/\d+([.,]\d+)?/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 160);
+      const setorDe = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+
+      const carregar = async () => {
+        setCarregando(true); setGrupos([]); setSel(null); setMarcadas(new Set()); setResultado(null);
+        try {
+          const desde = new Date(Date.now() - dias * 864e5).toISOString();
+          const { data } = await supabase.from('analises')
+            .select('numero_op, numero_serie, modelo, created_at, parecer_completo')
+            .gte('created_at', desde).order('created_at', { ascending: false });
+          const vistos = new Set(); const recentes = [];
+          for (const a of (data || [])) { const k = `${a.numero_op}|${a.numero_serie}`; if (vistos.has(k)) continue; vistos.add(k); recentes.push(a); }
+          const { data: ops } = await supabase.from('operadores').select('nome, codigo, slack_user_id');
+          const operadores = ops || [];
+          const acharSlack = (codigo, nome) => { let m = codigo ? operadores.find((o) => String(o.codigo || '').trim() === String(codigo).trim()) : null; if (!m && nome) m = operadores.find((o) => norm(o.nome) === norm(nome)); return m?.slack_user_id || ''; };
+          const gruposMap = new Map();
+          for (const a of recentes) {
+            const pc = a.parecer_completo || {};
+            const crono = pc.cronologia || [];
+            for (const ap of (pc.apontamentos || [])) {
+              let operador = '', operadorId = '', slackId = '';
+              if (ap.estagio_responsavel != null) {
+                const c = crono.find((x) => x.estagio_numero === ap.estagio_responsavel);
+                if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
+              }
+              const key = (ap.severidade || '') + '|' + templateProblema(ap.descricao, ap.documento_afetado);
+              if (!gruposMap.has(key)) gruposMap.set(key, { key, severidade: ap.severidade, setor: setorDe(ap), recomendacao: ap.recomendacao || '', labelBase: ap.descricao || '', itens: [] });
+              gruposMap.get(key).itens.push({ opNum: a.numero_op, serie: a.numero_serie, modelo: a.modelo, data: a.created_at, valor: extrairValor(ap.descricao), operador, operadorId, slackId });
+            }
+          }
+          const arr = [...gruposMap.values()].filter((g) => g.itens.length >= 2).sort((a, b) => b.itens.length - a.itens.length);
+          for (const g of arr) g.label = String(g.labelBase).replace(/\d+([.,]\d+)?/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 130);
+          setGrupos(arr);
+        } catch (e) { toast.error('Erro ao carregar: ' + (e?.message || e)); }
+        setCarregando(false);
+      };
+
+      useEffect(() => { if (open) carregar(); }, [open]);
+      useEffect(() => { if (sel) { const g = grupos.find((x) => x.key === sel); setMarcadas(new Set((g?.itens || []).map((it) => `${it.opNum}|${it.serie}`))); } }, [sel]);
+
+      const grupoSel = grupos.find((g) => g.key === sel) || null;
+      const toggleOp = (chave) => setMarcadas((m) => { const n = new Set(m); n.has(chave) ? n.delete(chave) : n.add(chave); return n; });
+
+      const enviar = async () => {
+        if (!grupoSel) return;
+        const itens = grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`));
+        if (itens.length === 0) { toast.error('Marque ao menos uma OP.'); return; }
+        setEnviando(true);
+        try {
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const canal = canalDoSetor(grupoSel.setor);
+          const mencaoIds = [...new Set(itens.map((it) => it.slackId).filter(Boolean))];
+          const mencao = mencaoIds.map((id) => `<@${id}>`).join(' ');
+          const linhas = itens.map((it) => `• OP ${it.opNum || '—'} · ${it.serie || '—'}${it.valor ? ` · *${it.valor}*` : ''}${it.operador ? ` · ${it.operador}` : ''}`);
+          const texto = [
+            ...(mencao ? [mencao] : []),
+            `:warning: *APONTAMENTO EM LOTE — ${itens.length} OP(s)* (responsável: *${grupoSel.setor}*)`,
+            grupoSel.label,
+            'As OPs abaixo apresentaram o mesmo apontamento (o valor varia por lote):',
+            linhas.join('\n'),
+            ...(grupoSel.recomendacao ? [`*Ação:* ${grupoSel.recomendacao}`] : []),
+          ].join('\n\n');
+          const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto, canal }) });
+          if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error((e.error || `HTTP ${resp.status}`)); }
+          await registrarLog(perfil, 'notificar_slack_pacote', 'analise', 'pacote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou apontamento em pacote ao Slack (${grupoSel.setor}) — ${itens.length} OP(s): ${grupoSel.label}`);
+          setResultado({ total: itens.length, setor: grupoSel.setor, mencoes: mencaoIds.length });
+          toast.success(`Pacote enviado ao canal do ${grupoSel.setor} — ${itens.length} OP(s).`);
+        } catch (e) { toast.error('Falha ao enviar: ' + (e?.message || e)); }
+        setEnviando(false);
+      };
+
+      if (!open) return null;
+      const selCount = grupoSel ? grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`)).length : 0;
+
+      return (
+        <Modal open={open} onClose={() => !enviando && onClose()} title="Enviar apontamento em pacote" description="Agrupa os apontamentos por problema. Escolha um grupo, marque as OPs e envie uma mensagem única e resumida ao setor — marcando os operadores que precisam corrigir." size="xl">
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm">
+              <Label className="text-xs">Período (dias)</Label>
+              <Input type="number" min="1" value={dias} onChange={(e) => setDias(parseInt(e.target.value, 10) || 60)} className="w-24 h-8" />
+              <Button variant="outline" size="sm" onClick={carregar} disabled={carregando}>{carregando ? <><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Carregando…</> : <><Icon name="refresh" className="h-3.5 w-3.5" />Atualizar</>}</Button>
+            </div>
+
+            {!carregando && grupos.length === 0 && <div className="text-sm text-muted-foreground">Nenhum problema com 2+ OPs no período. Aumente o período e atualize.</div>}
+
+            {grupos.length > 0 && (
+              <div>
+                <Label className="text-xs">Problema (agrupado)</Label>
+                <div className="max-h-40 overflow-auto border rounded-lg divide-y mt-1">
+                  {grupos.map((g) => (
+                    <button key={g.key} type="button" onClick={() => setSel(g.key)} className={cn('w-full text-left p-2 text-sm flex items-center gap-2', sel === g.key && 'bg-accent/10')}>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0" style={g.severidade === 'nao_conforme' ? { backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' } : { backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>{g.severidade === 'nao_conforme' ? 'NC' : 'Ressalva'}</span>
+                      <span className="min-w-0 flex-1 truncate">{g.label}</span>
+                      <span className="text-xs text-muted-foreground shrink-0">{g.itens.length} OP · {g.setor}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {grupoSel && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <Label className="text-xs">OPs afetadas ({selCount}/{grupoSel.itens.length} marcadas) — canal: {grupoSel.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</Label>
+                  <div className="flex gap-2 text-xs">
+                    <button className="underline" onClick={() => setMarcadas(new Set(grupoSel.itens.map((it) => `${it.opNum}|${it.serie}`)))}>marcar todas</button>
+                    <button className="underline" onClick={() => setMarcadas(new Set())}>limpar</button>
+                  </div>
+                </div>
+                <div className="max-h-56 overflow-auto border rounded-lg divide-y">
+                  {grupoSel.itens.map((it, i) => {
+                    const chave = `${it.opNum}|${it.serie}`;
+                    return (
+                      <label key={i} className="flex items-center gap-2 p-2 text-sm cursor-pointer">
+                        <input type="checkbox" checked={marcadas.has(chave)} onChange={() => toggleOp(chave)} className="h-4 w-4" />
+                        <span className="font-mono">{it.opNum || '—'}</span>
+                        <span className="text-muted-foreground">· {it.serie || '—'}</span>
+                        {it.valor && <span className="font-semibold" style={{ color: 'hsl(var(--status-ressalva))' }}>· {it.valor}</span>}
+                        <span className="ml-auto text-xs text-muted-foreground">{it.operador || 'operador ?'}{it.operador && !it.slackId ? ' (sem Slack)' : ''}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-1">
+                  Serão marcados no Slack: {[...new Set(grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`) && it.slackId).map((it) => it.operador))].join(', ') || 'nenhum operador com Slack cadastrado'}.
+                </div>
+              </div>
+            )}
+
+            {resultado && (
+              <div className="text-sm rounded-md border p-3 bg-muted/30">Pacote enviado ao canal do <strong>{resultado.setor}</strong> com {resultado.total} OP(s){resultado.mencoes ? `, marcando ${resultado.mencoes} operador(es)` : ''}.</div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <Button variant="outline" onClick={() => onClose()} disabled={enviando}>{resultado ? 'Fechar' : 'Cancelar'}</Button>
+              {!resultado && <Button onClick={enviar} disabled={enviando || !grupoSel || selCount === 0}>{enviando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Enviando…</> : <><Icon name="bell" className="h-4 w-4" />Enviar pacote ({selCount})</>}</Button>}
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
     function ImportarProdutosModal({ open, onClose, onImported }) {
       const toast = useToast();
       const [file, setFile] = useState(null);
@@ -12221,6 +12388,7 @@ ${parecer.parecer_tecnico ? `
       const [novaManualOpen, setNovaManualOpen] = useState(false);
       const [auditOpen, setAuditOpen] = useState(false);
       const [reanalisarOpOpen, setReanalisarOpOpen] = useState(false);
+      const [pacoteProblemaOpen, setPacoteProblemaOpen] = useState(false);
       const [editandoManual, setEditandoManual] = useState(null);
       const [corrigindo, setCorrigindo] = useState(null);
       // Filtros temporais (decisão 26/06/2026) — espelha o Dashboard
@@ -12664,6 +12832,10 @@ ${parecer.parecer_tecnico ? `
                   Reanalisar OP corrigida
                 </Button>
                 )}
+                <Button variant="outline" onClick={() => setPacoteProblemaOpen(true)} title="Enviar ao Slack, em uma mensagem só, todas as OPs com o mesmo problema (texto resumido)">
+                  <Icon name="bell" />
+                  Enviar problema em pacote
+                </Button>
                 <Button variant="outline" onClick={() => setAuditOpen(true)} title="Selecionar várias análises e gerar pacote consolidado para auditoria">
                   <Icon name="download" />
                   Exportar p/ auditoria
@@ -12694,6 +12866,11 @@ ${parecer.parecer_tecnico ? `
             onClose={() => setReanalisarOpOpen(false)}
             perfil={perfil}
             onDone={() => setReloadKey((k) => k + 1)}
+          />
+          <EnviarPacoteProblemaModal
+            open={pacoteProblemaOpen}
+            onClose={() => setPacoteProblemaOpen(false)}
+            perfil={perfil}
           />
           <NovaAnaliseManualModal
             open={novaManualOpen}
