@@ -317,6 +317,10 @@
        USUÁRIOS · CARGOS · PERMISSÕES (interino — migra para o SCM depois)
        ==================================================================== */
     const ADMIN_EMAIL = 'qualidade@confiancemedical.com.br';
+    // Gestor do Almoxarifado — marcado nas DÚVIDAS enviadas ao Slack (além de quem
+    // executou o Estágio 50), para ele ficar ciente. Slack ID vem do cadastro de
+    // colaboradores (Configurações → Operadores), casado por nome.
+    const GESTOR_ALMOXARIFADO_NOME = 'Bruno Mendes';
     const CARGOS = [
       { id: 'estagiario_gq',          label: 'Estagiário da Garantia da Qualidade' },
       { id: 'assistente_gq',          label: 'Assistente da Garantia da Qualidade' },
@@ -2596,9 +2600,24 @@
       let estagioCorrente = null;
       const estLineRe = /Est[áa]gio:\s*(\d+)\s+([A-Za-zÁÉÍÓÚÂÊÔÃÕÇçáéíóúâêôãõ][^\n]+?)(?:\s+Opera|$)/;
       const linhaOpRe = /^\s*(\d{1,3})\s+([A-ZÁ-Ÿa-zà-ÿ][\w\sÁ-Ÿà-ÿ\.,\-\/]+?)\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})\s+(\d+)\s+(\d+)\s+([A-ZÁ-Ÿ][A-ZÁ-Ÿa-zà-ÿ\s]+)$/;
+      // === Código de barras de apontamento manual ("Início/Fim" e "Pausa") ===
+      // Quando um estágio NÃO foi finalizado corretamente (dois operadores iniciaram
+      // o mesmo estágio, ou alguém abriu uma pausa e não a encerrou), o relatório do
+      // Sapiens imprime os códigos de barras de apontamento manual, com as LEGENDAS
+      // "Início/Fim" e "Pausa" ao lado da operação. A imagem do código não é
+      // extraída do PDF, mas as legendas ficam no texto — e em estágios finalizados
+      // normalmente elas NÃO aparecem. Detectamos a legenda e associamos ao estágio.
+      r.estagiosComBarcode = [];
       for (const linha of linhas) {
         const em2 = linha.match(estLineRe);
         if (em2) { estagioCorrente = { numero: parseInt(em2[1]), nome: em2[2].trim() }; continue; }
+        // Legenda do código de barras de apontamento manual (só "Início/Fim" —
+        // é a mais específica; "Pausa" sozinha poderia aparecer em texto livre).
+        if (estagioCorrente && /in[íi]cio\s*\/\s*fim/i.test(linha)) {
+          if (!r.estagiosComBarcode.find((e) => e.numero === estagioCorrente.numero)) {
+            r.estagiosComBarcode.push({ numero: estagioCorrente.numero, nome: estagioCorrente.nome });
+          }
+        }
         const om = linha.match(linhaOpRe);
         if (om && estagioCorrente) {
           r.operacoes.push({
@@ -4590,6 +4609,11 @@
         // Operações apontadas por aptidão + equipamento — para "marcar operação livre".
         if (extra && Array.isArray(extra.operacoesFlag) && extra.operacoesFlag.length) ap.operacoes_flag = extra.operacoesFlag;
         if (extra && extra.equipamento) ap.equipamento = String(extra.equipamento);
+        // Setor responsável e estágio-executor explícitos — usados no alerta do Slack
+        // para rotear ao canal certo e mencionar quem executou aquele estágio, mesmo
+        // quando o documento afetado é a OP (que por padrão iria ao PCP).
+        if (extra && extra.setorResponsavel) ap.setor_responsavel = String(extra.setorResponsavel);
+        if (extra && extra.estagioResponsavel != null) ap.estagio_responsavel = Number(extra.estagioResponsavel);
         apontamentos.push(ap);
       };
       // Rótulo amigável de um estágio a partir do número (usa a lista de estágios variáveis).
@@ -4772,26 +4796,33 @@
             'Ficha Mestre seção 4');
         }
 
-        // (1b) Está na RC mas sem etiqueta anexada — NC bloqueadora
+        // (1b) Está na RC mas sem etiqueta anexada — NC bloqueadora.
+        // Um apontamento POR ACESSÓRIO (não um só juntando vários) — assim cada um
+        // vira uma NC própria, com upload de etiqueta individual na correção.
         if (naRC_semEtq.length > 0) {
           const lista = naRC_semEtq.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ');
           add(C2, 'Etiqueta do acessório ausente na análise', 'nao_conforme',
             `Acessório(s) presente(s) na RC mas SEM etiqueta anexada para conferência: ${lista}.`);
-          apontar('nao_conforme', 2, 'Etiqueta Acessório × Análise',
-            `Etiqueta ausente para acessório(s) que consta(m) na RC: ${naRC_semEtq.map((a) => a.descricao).join(', ')}. Sem a etiqueta anexada, o agente não consegue confrontar dados de fabricante, CNPJ, validade e lote.`,
-            'Anexar a etiqueta correspondente de cada acessório presente na RC e refazer a análise.',
-            'ISO 13485 §7.5.9 (rastreabilidade)');
+          for (const a of naRC_semEtq) {
+            apontar('nao_conforme', 2, 'Etiqueta Acessório × Análise',
+              `Etiqueta ausente para o acessório ${a.descricao} (${a.codigoSapiens}), que consta na RC. Sem a etiqueta anexada, o agente não consegue confrontar dados de fabricante, CNPJ, validade e lote.`,
+              'Anexar a etiqueta deste acessório e refazer a análise.',
+              'ISO 13485 §7.5.9 (rastreabilidade)');
+          }
         }
 
-        // (2b) Obrigatório + pode sair NF, sem etiqueta — NC bloqueadora
+        // (2b) Obrigatório + pode sair NF, sem etiqueta — NC bloqueadora.
+        // Também um apontamento por acessório, pelo mesmo motivo.
         if (naNF_semEtq.length > 0) {
           const lista = naNF_semEtq.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ');
           add(C2, 'Etiqueta do acessório ausente na análise', 'nao_conforme',
             `Acessório(s) obrigatório(s) com "pode sair na NF" mas SEM etiqueta anexada: ${lista}. Como podem sair na NF de venda, não constam na RC — mas a etiqueta ainda precisa ser conferida.`);
-          apontar('nao_conforme', 2, 'Etiqueta Acessório × Análise',
-            `Etiqueta ausente para acessório(s) obrigatório(s) que sai(em) na NF: ${naNF_semEtq.map((a) => a.descricao).join(', ')}.`,
-            'Anexar a etiqueta correspondente para conferência contra a Ficha Mestre.',
-            'ISO 13485 §7.5.9');
+          for (const a of naNF_semEtq) {
+            apontar('nao_conforme', 2, 'Etiqueta Acessório × Análise',
+              `Etiqueta ausente para o acessório obrigatório ${a.descricao} (${a.codigoSapiens}), que sai na NF de venda.`,
+              'Anexar a etiqueta deste acessório para conferência contra a Ficha Mestre e refazer a análise.',
+              'ISO 13485 §7.5.9');
+          }
         }
 
         // (6) Etiqueta submetida cujo código NÃO consta na RC e não sai na NF — divergência
@@ -4893,6 +4924,7 @@
           if (naRC_comEtq.length > 0 && etAcs.length > 0) {
             const acessoriosParaLote = naRC_comEtq;
             const discrepancias = [];
+            const discrepanciasDet = []; // {descricao, codigoSapiens, loteRC, loteEtq} — 1 apontamento por acessório
             const conferidos = [];
             // Normaliza para comparação: maiúsculas, sem hífens/espaços/pontos.
             const norm = (s) => String(s || '').replace(/[\s\-.]/g, '').toUpperCase();
@@ -4952,6 +4984,7 @@
                 const etqEhAlfa = /[A-Z]/i.test(loteEtq);
                 const loteRC = candidatos.find((c) => (/[A-Z]/i.test(c)) === etqEhAlfa) || candidatos[0];
                 discrepancias.push(`${a.descricao} (${a.codigoSapiens}): RC="${loteRC}" × Etiqueta="${loteEtq}"`);
+                discrepanciasDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, loteRC, loteEtq });
               }
             }
             if (discrepancias.length === 0 && conferidos.length > 0) {
@@ -4961,10 +4994,14 @@
             } else if (discrepancias.length > 0) {
               add(C1, 'Verificada a consistência do lote/série dos acessórios entre RC e Etiqueta', 'nao_conforme',
                 discrepancias.join('; '));
-              apontar('nao_conforme', 1, 'RC × Etiqueta Acessório',
-                `Lote/série dos acessórios divergem entre RC e etiqueta: ${discrepancias.join('; ')}.`,
-                'Corrigir o documento com a informação incorreta. Possível troca acidental ou erro de impressão da etiqueta.',
-                'ISO 13485 §7.5.9');
+              // Um apontamento POR ACESSÓRIO (não um só juntando vários) — permite
+              // anexar a etiqueta corrigida de cada um individualmente.
+              for (const d of discrepanciasDet) {
+                apontar('nao_conforme', 1, 'RC × Etiqueta Acessório',
+                  `Lote/série do acessório ${d.descricao} (${d.codigoSapiens}) diverge entre RC e etiqueta: RC="${d.loteRC}" × Etiqueta="${d.loteEtq}".`,
+                  'Corrigir o documento com a informação incorreta. Possível troca acidental ou erro de impressão da etiqueta.',
+                  'ISO 13485 §7.5.9');
+              }
             }
 
             // === Classificação Fabricante/Fornecedor — Etiqueta × Ficha (decisão 17/06/2026) ===
@@ -4972,6 +5009,7 @@
             // "Fornecedor:" (= comprado de terceiros). Esse rótulo precisa bater com
             // o flag is_fabricante_confiance cadastrado na Ficha.
             const classifOk = [], classifNc = [];
+            const classifNcDet = []; // {descricao, codigoSapiens, etqLbl, fchLbl}
             for (const a of presentes) {
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
               if (!etq || !etq.tipoFabForn) continue; // sem info na etiqueta — passa
@@ -4983,6 +5021,7 @@
                 const etqLbl = etq.tipoFabForn === 'F' ? 'Fabricante' : 'Fornecedor';
                 const fchLbl = esperado === 'F' ? 'Fabricante' : 'Fornecedor';
                 classifNc.push(`${a.descricao} (${a.codigoSapiens}): etiqueta="${etqLbl}" × Ficha="${fchLbl}"`);
+                classifNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, etqLbl, fchLbl });
               }
             }
             if (classifNc.length === 0 && classifOk.length > 0) {
@@ -4991,10 +5030,13 @@
             } else if (classifNc.length > 0) {
               add(C1, 'Classificação Fabricante/Fornecedor dos acessórios', 'nao_conforme',
                 `Classificação divergente em ${classifNc.length} acessório(s): ${classifNc.join('; ')}.`);
-              apontar('nao_conforme', 1, 'Etiqueta Acessório × Ficha',
-                `Classificação Fabricante/Fornecedor divergente: ${classifNc.join('; ')}.`,
-                'Confirmar se a etiqueta foi impressa com o rótulo errado ou se a Ficha está incorreta.',
-                'RDC 665/2022');
+              // Um apontamento por acessório.
+              for (const d of classifNcDet) {
+                apontar('nao_conforme', 1, 'Etiqueta Acessório × Ficha',
+                  `Classificação Fabricante/Fornecedor do acessório ${d.descricao} (${d.codigoSapiens}) divergente: etiqueta="${d.etqLbl}" × Ficha="${d.fchLbl}".`,
+                  'Confirmar se a etiqueta foi impressa com o rótulo errado ou se a Ficha está incorreta.',
+                  'RDC 665/2022');
+              }
             }
 
             // === Validade dos acessórios estéreis — deve ser > Data da Conciliação ===
@@ -5004,22 +5046,26 @@
             const dataConcilCheck = op?.dataConciliacao;
             if (dataConcilCheck) {
               const estOk = [], estNc = [];
+              const estNcDet = []; // {descricao, codigoSapiens, motivo}
               for (const a of presentes) {
                 if (!a.esteril) continue; // só auditamos acessórios estéreis
                 const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
                 if (!etq) continue;
                 if (etq.validadeIndeterminada) {
                   estNc.push(`${a.descricao}: marcado estéril na Ficha mas etiqueta diz validade "${etq.validade}" (esperado uma data > conciliação)`);
+                  estNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, motivo: `etiqueta diz validade "${etq.validade}" (esperado uma data > conciliação)` });
                   continue;
                 }
                 if (!etq.validadeISO) {
                   estNc.push(`${a.descricao}: marcado estéril mas validade "${etq.validade || 'ausente'}" não é uma data válida (esperado data > conciliação)`);
+                  estNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, motivo: `validade "${etq.validade || 'ausente'}" não é uma data válida (esperado data > conciliação)` });
                   continue;
                 }
                 if (etq.validadeISO >= dataConcilCheck) {
                   estOk.push(`${a.descricao} (val. ${etq.validade})`);
                 } else {
                   estNc.push(`${a.descricao}: validade ${etq.validade} anterior à conciliação ${dataConcilCheck}`);
+                  estNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, motivo: `validade ${etq.validade} anterior à conciliação ${dataConcilCheck}` });
                 }
               }
               if (estOk.length + estNc.length > 0) {
@@ -5031,10 +5077,13 @@
                   if (estOk.length) partes.push(`${estOk.length} OK`);
                   partes.push(`${estNc.length} com problema: ${estNc.join('; ')}`);
                   add(C1, 'Validade dos acessórios estéreis', 'nao_conforme', partes.join('. ') + '.');
-                  apontar('nao_conforme', 1, 'Etiqueta Acessório × Conciliação',
-                    `Acessório(s) estéril(eis) sem validade adequada na etiqueta: ${estNc.join('; ')}.`,
-                    'Acessório estéril precisa ter uma data de validade real e posterior à data da conciliação. Trocar o acessório ou rever a marcação de "estéril" na Ficha.',
-                    'RDC 665/2022 e ISO 13485 §7.5.5');
+                  // Um apontamento por acessório (inclui o código Sapiens na descrição).
+                  for (const d of estNcDet) {
+                    apontar('nao_conforme', 1, 'Etiqueta Acessório × Conciliação',
+                      `Acessório estéril ${d.descricao} (${d.codigoSapiens}) sem validade adequada na etiqueta: ${d.motivo}.`,
+                      'Acessório estéril precisa ter uma data de validade real e posterior à data da conciliação. Trocar o acessório ou rever a marcação de "estéril" na Ficha.',
+                      'RDC 665/2022 e ISO 13485 §7.5.5');
+                  }
                 }
               }
             }
@@ -5050,13 +5099,16 @@
               .normalize('NFD').replace(/[̀-ͯ]/g, '')
               .split(/[^A-Z0-9]+/).filter((t) => t.length >= 3 && !stopwords.has(t.toLowerCase()));
             const descOk = [], descNc = [];
+            const descNcDet = []; // {codigoSapiens, msg} — 1 apontamento por etiqueta/código
             const acessoriosFicha = produto?.acessorios || [];
             for (const etq of etAcs) {
               if (!etq?.codigoSapiens) continue;
               const aFicha = acessoriosFicha.find((a) => a.codigoSapiens === etq.codigoSapiens);
               if (!aFicha) {
                 // Código da etiqueta não consta na Ficha para esse produto.
-                descNc.push(`etiqueta "${etq.descricao || '?'}" usa código ${etq.codigoSapiens} mas esse código não está cadastrado como acessório deste produto na Ficha`);
+                const msg = `etiqueta "${etq.descricao || '?'}" usa código ${etq.codigoSapiens} mas esse código não está cadastrado como acessório deste produto na Ficha`;
+                descNc.push(msg);
+                descNcDet.push({ codigoSapiens: etq.codigoSapiens, msg });
                 continue;
               }
               if (!etq.descricao) continue; // etiqueta sem descrição parseável — passa
@@ -5065,7 +5117,9 @@
               if (tEtq.length === 0) continue;
               const common = tEtq.filter((t) => tFicha.has(t)).length;
               if (common === 0) {
-                descNc.push(`código ${etq.codigoSapiens}: etiqueta diz "${etq.descricao}" mas a Ficha cadastra "${aFicha.descricao}" para esse código`);
+                const msg = `código ${etq.codigoSapiens}: etiqueta diz "${etq.descricao}" mas a Ficha cadastra "${aFicha.descricao}" para esse código`;
+                descNc.push(msg);
+                descNcDet.push({ codigoSapiens: etq.codigoSapiens, msg });
               } else {
                 descOk.push(`${etq.codigoSapiens} (${etq.descricao})`);
               }
@@ -5073,10 +5127,13 @@
             if (descNc.length > 0) {
               add(C1, 'Descrição do acessório × Código Sapiens', 'nao_conforme',
                 `${descNc.length} discrepância(s) entre código Sapiens e descrição da etiqueta: ${descNc.join('; ')}.`);
-              apontar('nao_conforme', 1, 'Etiqueta Acessório × Ficha',
-                `Discrepância entre código Sapiens e item cadastrado: ${descNc.join('; ')}.`,
-                'Verificar se o código foi impresso errado na etiqueta ou se o acessório correto não está cadastrado na Ficha.',
-                'ISO 13485 §7.5.9');
+              // Um apontamento por código/etiqueta.
+              for (const d of descNcDet) {
+                apontar('nao_conforme', 1, 'Etiqueta Acessório × Ficha',
+                  `Discrepância entre código Sapiens e item cadastrado: ${d.msg}.`,
+                  'Verificar se o código foi impresso errado na etiqueta ou se o acessório correto não está cadastrado na Ficha.',
+                  'ISO 13485 §7.5.9');
+              }
             } else if (descOk.length > 0) {
               add(C1, 'Descrição do acessório × Código Sapiens', 'conforme',
                 `${descOk.length} acessório(s) com descrição compatível com o código: ${descOk.join('; ')}.`);
@@ -5087,12 +5144,15 @@
             // ou seja, a.tipo === 'F'), a etiqueta DEVE ter data de fabricação preenchida.
             // "N/A" ou ausente é NC.
             const datFabOk = [], datFabNc = [];
+            const datFabNcDet = []; // {descricao, codigoSapiens, dataTxt}
             for (const a of presentes) {
               if (a.tipo !== 'F') continue; // só acessórios Confiance-fabricados
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
               if (!etq) continue;
               if (etq.dataFabNa || !etq.dataFabricacao || /^N\/?A$/i.test(etq.dataFabricacao)) {
-                datFabNc.push(`${a.descricao} (${a.codigoSapiens}): data "${etq.dataFabricacao ? formatarDataBR(etq.dataFabricacao) : 'ausente'}"`);
+                const dataTxt = etq.dataFabricacao ? formatarDataBR(etq.dataFabricacao) : 'ausente';
+                datFabNc.push(`${a.descricao} (${a.codigoSapiens}): data "${dataTxt}"`);
+                datFabNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, dataTxt });
               } else {
                 datFabOk.push(`${a.descricao}: ${formatarDataBR(etq.dataFabricacao)}`);
               }
@@ -5100,10 +5160,13 @@
             if (datFabNc.length > 0) {
               add(C1, 'Data de fabricação — acessórios Confiance', 'nao_conforme',
                 `${datFabNc.length} acessório(s) fabricado(s) pela Confiance sem data de fabricação na etiqueta: ${datFabNc.join('; ')}.`);
-              apontar('nao_conforme', 1, 'Etiqueta Acessório',
-                `Acessório(s) marcado(s) como fabricados pela Confiance na Ficha mas com data de fabricação ausente/N/A na etiqueta: ${datFabNc.join('; ')}.`,
-                'Adicionar a data de fabricação real na etiqueta antes da liberação. Itens próprios não podem ter data N/A.',
-                'RDC 665/2022');
+              // Um apontamento por acessório.
+              for (const d of datFabNcDet) {
+                apontar('nao_conforme', 1, 'Etiqueta Acessório',
+                  `Acessório ${d.descricao} (${d.codigoSapiens}), marcado como fabricado pela Confiance na Ficha, está com data de fabricação "${d.dataTxt}" na etiqueta.`,
+                  'Adicionar a data de fabricação real na etiqueta antes da liberação. Itens próprios não podem ter data N/A.',
+                  'RDC 665/2022');
+              }
             } else if (datFabOk.length > 0) {
               add(C1, 'Data de fabricação — acessórios Confiance', 'conforme',
                 `${datFabOk.length} acessório(s) Confiance-fabricado(s) com data de fabricação correta: ${datFabOk.join('; ')}.`);
@@ -5172,6 +5235,66 @@
       // Cronologia da OP
       if (op?.estagios?.length) {
         add(C1, 'Cronologia de estágios da OP', 'conforme', `Estágios na OP: [${op.estagios.map((e) => e.numero).join(' → ')}].`);
+      }
+
+      // === Finalização correta dos estágios (apontamento manual) ===
+      // Presença dos códigos de barras "Início/Fim"/"Pausa" em um estágio indica
+      // que ele NÃO foi finalizado corretamente: ou dois operadores iniciaram o
+      // mesmo estágio, ou uma pausa foi aberta e não encerrada. É NC e, em geral,
+      // exige uma dúvida ao PCP para entender a causa. Um apontamento por estágio.
+      if (op && Array.isArray(op.estagiosComBarcode) && op.estagiosComBarcode.length > 0) {
+        const lista = op.estagiosComBarcode.map((e) => `Estágio ${e.numero} (${e.nome})`).join('; ');
+        add(C1, 'Finalização correta dos estágios (apontamento manual)', 'nao_conforme',
+          `Código de barras de apontamento manual ("Início/Fim" e "Pausa") presente em: ${lista}. Indica estágio não finalizado corretamente.`);
+        for (const e of op.estagiosComBarcode) {
+          apontar('nao_conforme', 1, 'OP',
+            `O Estágio ${e.numero} (${e.nome}) apresenta os códigos de barras de apontamento manual "Início/Fim" e "Pausa", indicando que não foi finalizado corretamente — ou dois operadores diferentes iniciaram o mesmo estágio, ou uma pausa foi aberta e não encerrada.`,
+            'Verificar com o PCP o que ocasionou o apontamento manual e regularizar a finalização do estágio na OP antes da liberação do lote.',
+            'ISO 13485 §7.5.1 (controle da produção)');
+        }
+      } else if (op) {
+        add(C1, 'Finalização correta dos estágios (apontamento manual)', 'conforme',
+          'Nenhum estágio apresenta código de barras de apontamento manual ("Início/Fim"/"Pausa") — estágios finalizados normalmente.');
+      }
+
+      // === Tempo de execução dos Estágios 5 (Separação) e 50 (Embalagem) ===
+      // Média esperada por tipo de equipamento. Desvio > 50% (para mais ou para
+      // menos) gera RESSALVA — normalmente indica que o operador esqueceu de bater
+      // o fim do estágio (tempo inflado) ou apontou início/fim incorretamente.
+      // Vai para o Almoxarifado, mencionando quem executou aquele estágio na OP.
+      if (op) {
+        const _equipTxt = String(produto?.equipamento || produto?.familia || '')
+          .normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+        const isRigido = _equipTxt.includes('endosc') && _equipTxt.includes('rigid');
+        const MEDIA_ESTAGIO = { 5: isRigido ? 7 : 25, 50: isRigido ? 5 : 17 };
+        const NOME_ESTAGIO_TEMPO = { 5: 'Separação de Componentes', 50: 'Embalagem' };
+        const fmtNum = (x) => Number.isInteger(x) ? String(x) : x.toFixed(1);
+        const checarTempoEstagio = (n) => {
+          const opsEst = (op.operacoes || []).filter((o) => o.estagio_numero === n && o.tempo_min != null && !isNaN(o.tempo_min));
+          if (opsEst.length === 0) return; // estágio sem dado de tempo — não avalia
+          const total = opsEst.reduce((s, o) => s + o.tempo_min, 0);
+          const media = MEDIA_ESTAGIO[n];
+          const teto = media * 1.5, piso = media * 0.5;
+          const nomeE = NOME_ESTAGIO_TEMPO[n];
+          const faixaTxt = `faixa esperada ${fmtNum(piso)}–${fmtNum(teto)} min (média ${media} min para ${isRigido ? 'endoscópio rígido' : 'este equipamento'})`;
+          const oQue = `Tempo de execução do Estágio ${n} (${nomeE}) dentro do esperado`;
+          if (total > teto || total < piso) {
+            const dir = total > teto ? 'acima' : 'abaixo';
+            const causa = dir === 'acima'
+              ? 'Pode indicar que o operador esqueceu de bater o fim do estágio.'
+              : 'Pode indicar apontamento de início/fim incorreto (início batido tarde ou fim adiantado).';
+            add(C1, oQue, 'ressalva', `Tempo total ${total} min — ${dir} do esperado. ${faixaTxt}.`);
+            apontar('ressalva', 1, 'OP',
+              `O Estágio ${n} (${nomeE}) levou ${total} min, ${dir} do tempo esperado (${faixaTxt}). ${causa}`,
+              'Verificar o apontamento de início/fim do estágio na OP com o operador que o executou e regularizar antes da liberação.',
+              'ISO 13485 §7.5.1 (controle da produção)',
+              { estagios: [n], setorResponsavel: 'Almoxarifado', estagioResponsavel: n });
+          } else {
+            add(C1, oQue, 'conforme', `Tempo total ${total} min — dentro do esperado (${faixaTxt}).`);
+          }
+        };
+        checarTempoEstagio(5);
+        checarTempoEstagio(50);
       }
 
       // === Coerência cronológica: inspeção de estágio N não pode ser posterior
@@ -6331,6 +6454,77 @@
       }
 
       return parecer;
+    }
+
+    /* ====================================================================
+       REANÁLISE POR OP CORRIGIDA (individual e em massa)
+       Reconstrói os documentos guardados no Storage, troca a OP pela versão
+       corrigida, refaz a análise e — só quando o resultado muda — cria a nova
+       análise (marcada como reanalise_op_corrigida, não conta como correção),
+       herdando a pasta da rede/data original para substituir a pasta existente
+       no download. Se o resultado sair idêntico, desfaz a nova análise.
+       ==================================================================== */
+    async function reconstruirSlotsDeStorageGlobal(p) {
+      const baseTexts = p?.slots_text || {};
+      const arqOrig = p?.arquivos_originais || {};
+      const dl = async (ref) => {
+        if (!ref?.path) return null;
+        try { const { data } = await supabase.storage.from('pacotes-analise').download(ref.path); return data ? new File([data], ref.filename || 'arquivo', { type: data.type }) : null; }
+        catch (e) { return null; }
+      };
+      const [opF, rcF, formF, etF, repF, rncF] = await Promise.all([
+        dl(arqOrig.op), dl(arqOrig.rc), dl(arqOrig.form_gq_0047), dl(arqOrig.etiqueta_externa), dl(arqOrig.op_reprocesso), dl(arqOrig.rnc),
+      ]);
+      const acsTextos = baseTexts.etiqueta_acessorio || [];
+      const acsArqs = arqOrig.etiqueta_acessorio || [];
+      const acs = [];
+      for (let i = 0; i < acsTextos.length; i++) { if (!acsTextos[i]) continue; const f = await dl(acsArqs[i]); acs.push({ text: acsTextos[i], file: f, status: 'done' }); }
+      const mk = (t, f) => t ? { text: t, file: f, status: 'done' } : null;
+      return {
+        op: mk(baseTexts.op, opF), rc: mk(baseTexts.rc, rcF), form_gq_0047: mk(baseTexts.form_gq_0047, formF),
+        etiqueta_externa: mk(baseTexts.etiqueta_externa, etF), etiqueta_acessorio: acs,
+        op_reprocesso: mk(baseTexts.op_reprocesso, repF), rnc: mk(baseTexts.rnc, rncF),
+      };
+    }
+    // Assinatura de um parecer para comparar se a reanálise MUDOU o resultado:
+    // status + conjunto ordenado de (severidade|descrição) dos apontamentos.
+    function assinaturaParecer(pc) {
+      if (!pc) return '';
+      const st = pc.resultado_geral || pc.status || '';
+      const aps = (pc.apontamentos || []).map((a) => `${a.severidade}|${String(a.descricao || '').replace(/\s+/g, ' ').trim()}`).sort();
+      return st + '::' + aps.join('##');
+    }
+    // Refaz UMA análise trocando a OP pela corrigida. Retorna { mudou, novoId }.
+    async function reanalisarComOpCorrigida(row, opFile, opTextPre) {
+      const slots = await reconstruirSlotsDeStorageGlobal(row.parecer_completo || {});
+      const opText = opTextPre != null ? opTextPre : await extractTextFromFile(opFile);
+      slots.op = { text: opText, file: opFile, status: 'done' };
+      const novo = await executarAnaliseLocal(slots, { permitirRefazer: true });
+      // "Mudou" = o parecer mudou (novo apontamento/status) OU a própria OP mudou de
+      // conteúdo (correção num campo que o agente não checa ainda precisa ir ao pacote).
+      // Subir a OP idêntica com parecer idêntico → não mexe.
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const opMudou = norm(opText) !== norm(row.parecer_completo?.slots_text?.op || '');
+      const parecerMudou = assinaturaParecer(row.parecer_completo) !== assinaturaParecer(novo);
+      const mudou = opMudou || parecerMudou;
+      if (novo?._analiseId) {
+        if (mudou) {
+          await supabase.from('analises').update({
+            analise_origem_id: row.id,
+            tipo_reanalise: 'reanalise_op_corrigida',
+            doc_substituido: 'OP',
+            motivo_reanalise: 'OP corrigida e resubmetida — reanálise com o agente atual (erro não capturado anteriormente).',
+            // Herda a localização da análise original para o download substituir a MESMA pasta.
+            pasta_rede_path: row.pasta_rede_path || null,
+            data_ref_original: row.data_ref_original || row.created_at || null,
+          }).eq('id', novo._analiseId);
+        } else {
+          // Resultado idêntico → desfaz a nova análise (não vira pendente à toa).
+          try { await supabase.from('apontamentos').delete().eq('analise_id', novo._analiseId); } catch (e) {}
+          try { await supabase.from('analises').delete().eq('id', novo._analiseId); } catch (e) {}
+        }
+      }
+      return { mudou, novoId: novo?._analiseId || null };
     }
 
     /* ====================================================================
@@ -7657,6 +7851,7 @@
       { nome: 'Acessório', re: /acess[óo]rio/i },
       { nome: 'Componente/RC', re: /\brc\b|componente/i },
       { nome: 'Inspeção/Medição', re: /inspe[çc]|medi[çc]/i },
+      { nome: 'Finalização de estágio', re: /finaliza|in[íi]cio\/fim|pausa|apontamento manual|c[óo]digo de barras/i },
     ];
     function categorizarErroSlack(txt) {
       for (const c of CATEGORIAS_ERRO_SLACK) if (c.re.test(txt || '')) return c.nome;
@@ -7671,6 +7866,7 @@
         'CNPJ': 'Almoxarifado', 'Fabricante': 'Almoxarifado', 'Endereço': 'Almoxarifado',
         'Responsável Técnico': 'Almoxarifado', 'Acessório': 'Almoxarifado',
         'Nº de série': 'PCP', 'Data/Validade': 'PCP', 'Componente/RC': 'PCP', 'Inspeção/Medição': 'PCP',
+        'Finalização de estágio': 'PCP',
       })[cat] || 'PCP';
     }
     // Canal (chave do webhook no serviço) a partir do setor.
@@ -7692,6 +7888,7 @@
         'Inspeção/Medição': ['Este estágio passou a ter (ou deixou de ter) inspeção? A Ficha deve refletir isso?'],
         'Componente/RC': ['A estrutura/componentes do produto mudou? Atualizar a Ficha?'],
         'Data/Validade': ['A regra de data/validade mudou para este produto?'],
+        'Finalização de estágio': ['O que ocasionou o código de barras "Início/Fim"/"Pausa" neste estágio?', 'Dois operadores diferentes iniciaram o mesmo estágio, ou foi aberta uma pausa que não foi encerrada?', 'A finalização do estágio pode ser regularizada na OP antes da liberação do lote?'],
       })[cat] || ['Este apontamento decorre de a Ficha Mestre estar desatualizada?', 'O que precisa ser atualizado na Ficha?'];
       return base.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\n' + fechamento;
     }
@@ -8814,13 +9011,31 @@ ${parecer.parecer_tecnico ? `
             porMesCfg = map.pasta_por_mes === 'true';
           } catch (e) { /* segue sem config */ }
         }
-        // Opção: gravar dentro da subpasta do MÊS DA ANÁLISE (ex.: ...\Pendente de
-        // Assinatura\JULHO). Usa a data da análise do lote — não a data de hoje — para
-        // que, no download em lote, cada análise caia no mês correto. Fallback: mês atual.
-        if (destPathCfg && porMesCfg) {
+        // Reanálise por OP corrigida: se esta análise HERDOU a pasta da rede da
+        // original (pasta_rede_path), grava DENTRO DA MESMA pasta — sobrescreve os
+        // arquivos, substituindo a pasta existente. Também herda a data original
+        // para, na ausência do caminho, cair no mesmo mês.
+        let pastaRedeOverride = null;
+        let dataRefMes = dataAnalise;
+        try {
+          const aidRef = parecer?._analiseId || analiseId;
+          if (aidRef) {
+            const { data: arow } = await supabase.from('analises').select('pasta_rede_path, data_ref_original').eq('id', aidRef).single();
+            if (arow?.pasta_rede_path) pastaRedeOverride = arow.pasta_rede_path;
+            if (arow?.data_ref_original) dataRefMes = arow.data_ref_original;
+          }
+        } catch (e) { /* segue sem override */ }
+        if (pastaRedeOverride) {
+          // pasta_rede_path aponta para a pasta OP_xxxx; gravamos no PAI para a
+          // extração recriar OP_xxxx no mesmo lugar (sobrescrevendo).
+          destPathCfg = pastaRedeOverride.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]+$/, '');
+        } else if (destPathCfg && porMesCfg) {
+          // Opção: gravar dentro da subpasta do MÊS DA ANÁLISE (ex.: ...\Pendente de
+          // Assinatura\JULHO). Usa a data da análise (ou a data ORIGINAL, na reanálise)
+          // — não a data de hoje. Fallback: mês atual.
           const MESES = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
           const mesSubpasta = (() => {
-            const src = String(dataAnalise || '').trim();
+            const src = String(dataRefMes || '').trim();
             let m = src.match(/^(\d{4})-(\d{2})-(\d{2})/);       // ISO: YYYY-MM-DD (created_at)
             if (m) return parseInt(m[2], 10) - 1;
             m = src.match(/^(\d{2})\/(\d{2})\/(\d{4})/);         // BR: DD/MM/AAAA
@@ -8841,6 +9056,12 @@ ${parecer.parecer_tecnico ? `
             if (resp.ok) {
               const j = await resp.json().catch(() => ({}));
               salvouViaServico = true;
+              // Guarda o caminho EXATO da pasta na rede — permite substituir a MESMA
+              // pasta numa reanálise futura por OP corrigida.
+              if (j.caminho) {
+                const aidRede = parecer?._analiseId || analiseId;
+                if (aidRede) { try { await supabase.from('analises').update({ pasta_rede_path: j.caminho }).eq('id', aidRede); } catch (e) {} }
+              }
               toast.success(`Pacote salvo em: ${j.caminho || (destPathCfg + '\\' + fileName)}`, { duration: 8000 });
             } else {
               const j = await resp.json().catch(() => ({}));
@@ -8935,7 +9156,7 @@ ${parecer.parecer_tecnico ? `
       // Abre a caixa editável: monta, por NC, o erro, a norma, a correção imediata e a
       // ação corretiva sugerida (com detecção de reincidência entre análises).
       const abrirAlertaSlack = async () => {
-        if (!ncsAbertas.length) { toast.error('Não há não conformidades para enviar.'); return; }
+        if (!apontAbertos.length) { toast.error('Não há apontamentos para enviar.'); return; }
         setEnviandoSlack(true);
         try {
           // === Reincidência baseada no ERRO (categoria + equipamento + alvo) ===
@@ -8999,14 +9220,18 @@ ${parecer.parecer_tecnico ? `
             for (const re of pats) { const m = String(desc || '').match(re); if (m && m[1]) return m[1].trim(); }
             return '';
           };
-          const itens = ncsAbertas.map((ap) => {
+          // Inclui NCs e ressalvas. Ressalvas entram desmarcadas por padrão (não
+          // floodam), mas ficam disponíveis para envio ao operador quando fizer
+          // sentido (ex.: tempo do estágio fora da média).
+          const itens = apontAbertos.map((ap) => {
+            const ehRessalva = ap.severidade === 'ressalva';
             const { slotKey, nome } = mapApontamento(ap);
             const doc = (slotKey === 'etiqueta_acessorio' && nome) ? `Etiqueta de Acessório (${nome})` : (labelSlot[slotKey] || ap.documento_afetado || 'Documento');
             const cat = categorizarErroSlack((ap.descricao || '') + ' ' + (ap.documento_afetado || ''));
             const alvo = extrairAlvoErro(ap.descricao, ap.documento_afetado);
             const chave = chaveReincidencia(cat, equipAtual, alvo);
             const info = reincMap.get(chave) || { nivel: 'pontual', ocorr30d: 0, incid30d: 0, base: 0 };
-            const reincidente = info.nivel !== 'pontual';
+            const reincidente = !ehRessalva && info.nivel !== 'pontual';
             const desc = String(ap.descricao || '').replace(/\s+/g, ' ').trim();
             const rec = String(ap.recomendacao || '').replace(/\s+/g, ' ').trim();
             const sep = separarRecomendacao(rec);
@@ -9014,12 +9239,14 @@ ${parecer.parecer_tecnico ? `
             const nivelLabel = info.nivel === 'reincidente' ? 'Reincidente' : info.nivel === 'emergente' ? 'Em alta' : info.nivel === 'possivel' ? 'Possível reincidente' : 'Pontual';
             // Slack = operacional: SÓ o que corrigir agora. Causa raiz e ação corretiva
             // saem do alerta e passam para o relatório de reincidência (aba Dashboard).
-            // O canal segue o RESPONSÁVEL pela correção (dono do documento):
-            // etiqueta → Almoxarifado (almoxarifado_gq); OP/RC/FORM/etc → PCP (pcp_gq).
-            const responsavel = responsavelPorSlot(slotKey);
+            // O canal segue o RESPONSÁVEL: setor_responsavel explícito (ex.: tempo do
+            // estágio → Almoxarifado), senão o dono do documento (etiqueta →
+            // Almoxarifado; OP/RC/FORM/etc → PCP).
+            const responsavel = ap.setor_responsavel || responsavelPorSlot(slotKey);
             const setor = responsavel;
             return {
-              codigo: ap.codigo || 'NC',
+              codigo: ap.codigo || (ehRessalva ? 'R' : 'NC'),
+              severidade: ap.severidade,
               doc,
               responsavel,
               erro: desc,
@@ -9033,10 +9260,11 @@ ${parecer.parecer_tecnico ? `
               ocorr30d: info.ocorr30d || 0,
               cat,
               setor,           // PCP | Almoxarifado → define o canal
+              estagioResp: (ap.estagio_responsavel != null ? ap.estagio_responsavel : null), // estágio executor (menção)
               tipo: 'correcao',                     // 'correcao' | 'duvida' (verificar ficha)
               perguntas: perguntasDuvidaPadrao(cat), // sugeridas p/ o card de dúvida (editáveis)
-              // Por padrão, casos PONTUAIS já vêm desmarcados (normalmente não precisam ir ao Slack).
-              enviar: info.nivel !== 'pontual',
+              // NC pontual e ressalva vêm desmarcadas por padrão; NC não-pontual, marcada.
+              enviar: !ehRessalva && info.nivel !== 'pontual',
             };
           });
           // === Menção por estágio: quem EXECUTOU o Estágio 50 (Embalagem) é o
@@ -9061,8 +9289,22 @@ ${parecer.parecer_tecnico ? `
           } catch (e) { /* best-effort */ }
           const mencaoEtiqueta = acharMencao(50, 'Almoxarifado');
           const mencaoOP = acharMencao(60, 'PCP');
+          // Estágio 5 (Separação de Componentes) — usado nos apontamentos de tempo
+          // do estágio 5, cujo executor é do Almoxarifado (não o mesmo do 50).
+          const mencaoEstagio5 = acharMencao(5, 'Almoxarifado');
+          // Gestor do Almoxarifado — marcado em toda DÚVIDA de setor Almoxarifado,
+          // ciente mesmo quando não foi ele quem executou o Estágio 50 (e sem
+          // duplicar a menção quando ele mesmo executou).
+          const normNome = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+          const gestorMatch = operadoresRef.find((o) => normNome(o.nome) === normNome(GESTOR_ALMOXARIFADO_NOME));
+          const mencaoGestorAlmoxarifado = {
+            nome: GESTOR_ALMOXARIFADO_NOME,
+            slackId: gestorMatch?.slack_user_id || '',
+            incluir: !!gestorMatch?.slack_user_id,
+            encontrado: !!gestorMatch,
+          };
           // incluirReinc: aviso de reincidência junto da NC (ligado por padrão; quem envia pode desmarcar).
-          setSlackModal({ itens, incluirReinc: true, mencaoEtiqueta, mencaoOP });
+          setSlackModal({ itens, incluirReinc: true, mencaoEtiqueta, mencaoOP, mencaoEstagio5, mencaoGestorAlmoxarifado });
         } catch (e) { toast.error('Erro ao preparar o alerta: ' + (e?.message || e)); }
         finally { setEnviandoSlack(false); }
       };
@@ -9079,10 +9321,34 @@ ${parecer.parecer_tecnico ? `
         setEnviandoSlack(true);
         try {
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          // Menção de quem executou o estágio responsável nesta OP (Estágio 50 →
+          // Almoxarifado; Estágio 60 → PCP), quando marcado no modal e com Slack ID.
+          // Fica discreta, colada no "responsável" de cada item — não como linha solta.
+          // Menção do item: por padrão, o executor do estágio-referência do setor
+          // (Almoxarifado → Estágio 50; PCP → Estágio 60). Se o apontamento fixa um
+          // estágio executor específico (ex.: tempo do Estágio 5), usa esse.
+          const mencaoDoItemObj = (it) => {
+            if (it.estagioResp === 5) return slackModal.mencaoEstagio5;
+            if (it.estagioResp === 50) return slackModal.mencaoEtiqueta;
+            return it.setor === 'Almoxarifado' ? slackModal.mencaoEtiqueta : it.setor === 'PCP' ? slackModal.mencaoOP : null;
+          };
+          const mencaoDoItem = (it) => {
+            const ids = new Set();
+            const m = mencaoDoItemObj(it);
+            if (m && m.incluir && m.slackId) ids.add(m.slackId);
+            // Dúvida em item de Almoxarifado: também avisa o gestor do Almoxarifado
+            // (Bruno Mendes) — o Set evita duplicar caso ele mesmo tenha executado
+            // o Estágio 50 desta OP.
+            if (it.tipo === 'duvida' && it.setor === 'Almoxarifado') {
+              const g = slackModal.mencaoGestorAlmoxarifado;
+              if (g && g.incluir && g.slackId) ids.add(g.slackId);
+            }
+            return ids.size ? ` (${[...ids].map((id) => `<@${id}>`).join(' ')})` : '';
+          };
           // Bloco de SOLICITAÇÃO DE CORREÇÃO (o que existe hoje).
           const montarBloco = (it) => {
             const linhas = [
-              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*`,
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${mencaoDoItem(it)}`,
               `   *O que está errado:* ${it.erro}`,
             ];
             if (it.correto) linhas.push(`   *Registro correto:* ${it.correto}`);
@@ -9097,7 +9363,7 @@ ${parecer.parecer_tecnico ? `
           // Bloco de DÚVIDA (verificar se é Ficha Mestre desatualizada).
           const montarBlocoDuvida = (it) => {
             const linhas = [
-              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*`,
+              `• *${it.codigo}* — ${it.doc}  →  responsável: *${it.responsavel}*${mencaoDoItem(it)}`,
               `   *O que foi verificado:* ${it.erro}`,
               `   *Perguntas:*`,
             ];
@@ -9141,20 +9407,12 @@ ${parecer.parecer_tecnico ? `
             if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(`(${rotulo}) ` + (err.error || `HTTP ${resp.status}`)); }
             enviados.push(rotulo);
           };
-          // Menção de quem executou o estágio responsável nesta OP (Estágio 50 →
-          // Almoxarifado; Estágio 60 → PCP), quando marcado no modal e com Slack ID.
-          const mencaoDoSetor = (setor) => {
-            const m = setor === 'Almoxarifado' ? slackModal.mencaoEtiqueta : setor === 'PCP' ? slackModal.mencaoOP : null;
-            return (m && m.incluir && m.slackId) ? `<@${m.slackId}>` : '';
-          };
           for (const [setor, lista] of Object.entries(porSetor)) {
             const canal = canalDoSetor(setor);
-            const mencao = mencaoDoSetor(setor);
             const corr = lista.filter((it) => it.tipo !== 'duvida');
             const duv = lista.filter((it) => it.tipo === 'duvida');
             if (corr.length > 0) {
               const texto = [
-                ...(mencao ? [mencao] : []),
                 `:rotating_light: *NÃO CONFORMIDADE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
                 `Conferência da Qualidade identificou ${corr.length} não conformidade(s) sob responsabilidade do *${setor}*:`,
                 '',
@@ -9164,7 +9422,6 @@ ${parecer.parecer_tecnico ? `
             }
             if (duv.length > 0) {
               const texto = [
-                ...(mencao ? [mencao] : []),
                 `:question: *DÚVIDA — VERIFICAR FICHA MESTRE — OP ${p.numero_op || '—'} / ${p.numero_serie || '—'}* (${p.modelo || '—'})`,
                 `A Qualidade tem ${duv.length} ponto(s) que podem indicar Ficha Mestre desatualizada, sob responsabilidade do *${setor}*. Por favor, respondam *nesta thread*:`,
                 '',
@@ -9300,9 +9557,9 @@ ${parecer.parecer_tecnico ? `
                 {carregandoFicha ? (<><Icon name="loader" className="animate-spin" />Abrindo ficha…</>) : (<><Icon name="edit" />Atualizar ficha e refazer</>)}
               </Button>
             )}
-            {ncsAbertas.length > 0 && (
-              <Button variant="outline" onClick={abrirAlertaSlack} disabled={enviandoSlack} title="Revisar e enviar as não conformidades para o canal do Slack (PCP e Almoxarifado)">
-                {enviandoSlack ? (<><Icon name="loader" className="animate-spin" />Preparando…</>) : (<><Icon name="bell" />Enviar NC ao Slack</>)}
+            {apontAbertos.length > 0 && (
+              <Button variant="outline" onClick={abrirAlertaSlack} disabled={enviandoSlack} title="Revisar e enviar os apontamentos para o canal do Slack (PCP e Almoxarifado)">
+                {enviandoSlack ? (<><Icon name="loader" className="animate-spin" />Preparando…</>) : (<><Icon name="bell" />Enviar ao Slack</>)}
               </Button>
             )}
             {parecer._formXlsxBytes && (
@@ -9740,11 +9997,50 @@ ${parecer.parecer_tecnico ? `
                       <span className="font-semibold">{it.codigo}</span>
                       <span className="text-muted-foreground">· {it.doc}</span>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
-                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }} title="Canal do Slack para onde esta NC será enviada">canal: {it.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</span>
-                      {it.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
-                      {it.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
-                      {it.nivel === 'possivel' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.12)', color: 'hsl(var(--status-ressalva))' }}>POSSÍVEL REINCIDENTE</span>}
-                      {it.nivel === 'pontual' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-conforme) / 0.15)', color: 'hsl(var(--status-conforme))' }}>PONTUAL</span>}
+                      {(() => {
+                        const chave = it.estagioResp === 5 ? 'mencaoEstagio5'
+                          : it.estagioResp === 50 ? 'mencaoEtiqueta'
+                          : it.setor === 'Almoxarifado' ? 'mencaoEtiqueta' : it.setor === 'PCP' ? 'mencaoOP' : null;
+                        const m = chave ? slackModal[chave] : null;
+                        if (!m || !m.encontrado) return null;
+                        const estagioNum = chave === 'mencaoEstagio5' ? 5 : chave === 'mencaoEtiqueta' ? 50 : 60;
+                        if (!m.slackId) return <span className="text-[10px] text-muted-foreground" title={`Executou o Estágio ${estagioNum} nesta OP, mas sem Slack ID cadastrado (Configurações → Operadores)`}>sem Slack: {m.nome}</span>;
+                        return (
+                          <button type="button"
+                            onClick={() => setSlackModal((prev) => ({ ...prev, [chave]: { ...prev[chave], incluir: !prev[chave].incluir } }))}
+                            className="text-[10px] px-1.5 py-0.5 rounded-full border leading-none"
+                            title={`Executou o Estágio ${estagioNum} nesta OP — clique para marcar/desmarcar a menção`}
+                            style={m.incluir ? { backgroundColor: 'hsl(var(--secondary) / 0.15)', color: 'hsl(var(--secondary))', borderColor: 'transparent' } : { borderColor: 'hsl(var(--input))', color: 'hsl(var(--muted-foreground))' }}>
+                            @{m.nome}
+                          </button>
+                        );
+                      })()}
+                      {it.tipo === 'duvida' && it.setor === 'Almoxarifado' && (() => {
+                        const g = slackModal.mencaoGestorAlmoxarifado;
+                        const chaveExec = it.estagioResp === 5 ? 'mencaoEstagio5' : 'mencaoEtiqueta';
+                        const m = slackModal[chaveExec];
+                        if (!g || !g.encontrado) return null;
+                        if (m && m.slackId && g.slackId === m.slackId) return null; // já mencionado como executor do estágio
+                        if (!g.slackId) return <span className="text-[10px] text-muted-foreground" title="Gestor do Almoxarifado sem Slack ID cadastrado (Configurações → Operadores)">sem Slack: {g.nome}</span>;
+                        return (
+                          <button type="button"
+                            onClick={() => setSlackModal((prev) => ({ ...prev, mencaoGestorAlmoxarifado: { ...prev.mencaoGestorAlmoxarifado, incluir: !prev.mencaoGestorAlmoxarifado.incluir } }))}
+                            className="text-[10px] px-1.5 py-0.5 rounded-full border leading-none"
+                            title="Gestor do Almoxarifado — clique para marcar/desmarcar a menção"
+                            style={g.incluir ? { backgroundColor: 'hsl(var(--secondary) / 0.15)', color: 'hsl(var(--secondary))', borderColor: 'transparent' } : { borderColor: 'hsl(var(--input))', color: 'hsl(var(--muted-foreground))' }}>
+                            @{g.nome} (gestor)
+                          </button>
+                        );
+                      })()}
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }} title="Canal do Slack para onde este apontamento será enviado">canal: {it.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</span>
+                      {it.severidade === 'ressalva'
+                        ? <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>RESSALVA</span>
+                        : (<>
+                            {it.nivel === 'reincidente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' }}>REINCIDENTE</span>}
+                            {it.nivel === 'emergente' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>EM ALTA</span>}
+                            {it.nivel === 'possivel' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.12)', color: 'hsl(var(--status-ressalva))' }}>POSSÍVEL REINCIDENTE</span>}
+                            {it.nivel === 'pontual' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--status-conforme) / 0.15)', color: 'hsl(var(--status-conforme))' }}>PONTUAL</span>}
+                          </>)}
                     </div>
                     <div className="flex items-center gap-1.5 text-xs">
                       <span className="text-muted-foreground">Tipo:</span>
@@ -9787,30 +10083,6 @@ ${parecer.parecer_tecnico ? `
                 <span>Incluir <strong>aviso de reincidência</strong> nas NCs (níveis possível reincidente / reincidente / em alta) — mostra quantas vezes o problema ocorreu na janela e sugere averiguação.</span>
               </label>
 
-              {/* Menção de quem EXECUTOU o estágio responsável nesta OP (não é lista fixa —
-                  é resolvido por OP: Estágio 50/Embalagem para etiqueta, Estágio 60/Conciliação
-                  para OP). Só mostra quando a mensagem daquele setor vai ser enviada. */}
-              {['mencaoEtiqueta', 'mencaoOP'].map((chave) => {
-                const m = slackModal[chave];
-                if (!m) return null;
-                const temItemDoSetor = slackModal.itens.some((it) => it.setor === m.setorLabel);
-                if (!temItemDoSetor) return null;
-                const rotuloEstagio = chave === 'mencaoEtiqueta' ? 'Estágio 50 — Embalagem' : 'Estágio 60 — Conciliação da Produção';
-                return (
-                  <div key={chave} className="mt-2 p-2.5 rounded-md border bg-muted/30 text-sm">
-                    {!m.encontrado ? (
-                      <span className="text-xs text-muted-foreground">Não foi possível identificar quem executou o {rotuloEstagio} nesta OP — mensagem de {m.setorLabel} vai sem menção.</span>
-                    ) : !m.slackId ? (
-                      <span className="text-xs text-muted-foreground">Quem executou o {rotuloEstagio} nesta OP foi <strong>{m.nome}</strong>, mas ele(a) ainda não tem Slack ID cadastrado (Configurações → Operadores → Todos os colaboradores). Mensagem de {m.setorLabel} vai sem menção.</span>
-                    ) : (
-                      <label className="flex items-start gap-2 cursor-pointer select-none">
-                        <input type="checkbox" checked={!!m.incluir} onChange={(e) => setSlackModal((prev) => ({ ...prev, [chave]: { ...prev[chave], incluir: e.target.checked } }))} className="h-4 w-4 mt-0.5" />
-                        <span>Marcar <strong>{m.nome}</strong> na mensagem de {m.setorLabel} — executou o {rotuloEstagio} nesta OP.</span>
-                      </label>
-                    )}
-                  </div>
-                );
-              })}
               {(() => { const sel = slackModal.itens.filter((it) => it.enviar).length; return (
               <div className="flex items-center justify-end gap-2 mt-4">
                 <span className="text-xs text-muted-foreground mr-auto">{sel} de {slackModal.itens.length} NC(s) marcada(s) para envio</span>
@@ -10913,6 +11185,440 @@ ${parecer.parecer_tecnico ? `
     }
 
     /* ====================================================================
+       MODAL: Importar Produtos por planilha (Catálogo de Produtos)
+       Mesmo padrão do ImportarAnalisesManuaisModal: template com instruções
+       + exemplos (ExcelJS), leitura/validação linha a linha, edição inline
+       antes de confirmar, e bloqueio de modelo duplicado (catálogo já
+       cadastrado ou repetido na própria planilha).
+       ==================================================================== */
+    /* ====================================================================
+       MODAL: Reanalisar com OP corrigida (individual e em massa)
+       Você sobe as OPs corrigidas; o sistema casa cada arquivo com a análise
+       existente PELO NÚMERO DA OP, refaz a análise e — só quando o resultado
+       muda — deixa o pacote pendente de download (substituindo, no download,
+       a mesma pasta da rede). Resultado idêntico é ignorado.
+       ==================================================================== */
+    function ReanalisarOpCorrigidaModal({ open, onClose, onDone, perfil }) {
+      const toast = useToast();
+      const [parsing, setParsing] = useState(false);
+      const [rodando, setRodando] = useState(false);
+      const [pares, setPares] = useState([]);   // [{ file, opNum, serie, row, status, sel }]
+      const [semMatch, setSemMatch] = useState([]); // [{ file, opNum }]
+      const [prog, setProg] = useState({ idx: 0, total: 0 });
+      const [resumo, setResumo] = useState(null);
+
+      const reset = () => { setPares([]); setSemMatch([]); setResumo(null); setProg({ idx: 0, total: 0 }); };
+      const handleClose = () => { if (rodando) return; reset(); onClose(); };
+      const normOp = (v) => String(v || '').replace(/\D/g, '');
+
+      // Lê os arquivos, extrai o nº da OP e casa com a análise mais recente daquela OP.
+      const receberArquivos = async (arqs) => {
+        const pdfs = (arqs || []).filter((f) => /\.pdf$/i.test(f.name) || /\.xlsx$/i.test(f.name) || /\.docx$/i.test(f.name));
+        if (pdfs.length === 0) { toast.error('Selecione as OPs corrigidas (PDF, XLSX ou DOCX).'); return; }
+        setParsing(true);
+        try {
+          // Extrai OP de cada arquivo
+          const lidos = [];
+          for (const f of pdfs) {
+            let opNum = '', serie = '', text = '';
+            try { text = await extractTextFromFile(f); const p = parseOP(text); opNum = normOp(p?.op); serie = p?.serie || ''; } catch (e) {}
+            lidos.push({ file: f, opNum, serie, text });
+          }
+          // Busca as análises mais recentes das OPs encontradas
+          const ops = [...new Set(lidos.map((l) => l.opNum).filter(Boolean))];
+          const porOp = new Map();
+          if (ops.length) {
+            const { data } = await supabase.from('analises')
+              .select('id, numero_op, numero_serie, modelo, status, created_at, parecer_completo, pasta_rede_path, data_ref_original, origem_analise')
+              .order('created_at', { ascending: false });
+            for (const a of (data || [])) {
+              const k = normOp(a.numero_op);
+              if (k && ops.includes(k) && !porOp.has(k)) porOp.set(k, a);
+            }
+          }
+          const casados = [], faltando = [];
+          for (const l of lidos) {
+            const row = l.opNum ? porOp.get(l.opNum) : null;
+            const temOriginais = !!(row?.parecer_completo?.arquivos_originais?.op?.path);
+            if (row && temOriginais) casados.push({ file: l.file, opNum: l.opNum, serie: l.serie, text: l.text, row, sel: true, status: null });
+            else faltando.push({ file: l.file, opNum: l.opNum, motivo: !row ? 'nenhuma análise com esse nº de OP' : 'análise sem documentos originais guardados (não dá para reprocessar)' });
+          }
+          setPares(casados);
+          setSemMatch(faltando);
+        } catch (e) { toast.error('Erro ao ler arquivos: ' + (e?.message || e)); }
+        setParsing(false);
+      };
+
+      const executar = async () => {
+        const sel = pares.filter((p) => p.sel);
+        if (sel.length === 0) { toast.error('Nenhuma OP marcada para reanalisar.'); return; }
+        setRodando(true);
+        setProg({ idx: 0, total: sel.length });
+        let mudaram = 0, iguais = 0; const falhas = [];
+        for (let i = 0; i < sel.length; i++) {
+          const p = sel[i];
+          setProg({ idx: i + 1, total: sel.length });
+          setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: 'rodando' } : x)));
+          try {
+            const { mudou } = await reanalisarComOpCorrigida(p.row, p.file, p.text);
+            if (mudou) mudaram++; else iguais++;
+            setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: mudou ? 'mudou' : 'igual' } : x)));
+          } catch (e) {
+            falhas.push(`OP ${p.opNum}: ${e?.message || e}`);
+            setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: 'falha' } : x)));
+          }
+        }
+        await registrarLog(perfil, 'reanalisar_op_corrigida', 'analise', 'lote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} reanalisou ${sel.length} OP(s) corrigida(s): ${mudaram} com mudança (pendentes de download), ${iguais} sem mudança${falhas.length ? `, ${falhas.length} falha(s)` : ''}`);
+        setResumo({ mudaram, iguais, falhas });
+        setRodando(false);
+        onDone?.();
+      };
+
+      if (!open) return null;
+      const selCount = pares.filter((p) => p.sel).length;
+      const StatusChip = ({ s }) => {
+        if (!s) return null;
+        const map = { rodando: ['…', 'hsl(var(--muted-foreground))'], mudou: ['pendente ✓', 'hsl(var(--status-ressalva))'], igual: ['sem mudança', 'hsl(var(--muted-foreground))'], falha: ['falha', 'hsl(var(--status-nao-conforme))'] };
+        const [txt, col] = map[s] || ['', ''];
+        return <span className="text-[10px] font-semibold" style={{ color: col }}>{txt}</span>;
+      };
+
+      return (
+        <Modal open={open} onClose={handleClose} title="Reanalisar com OP corrigida" description="Suba as OPs corrigidas (uma ou várias). O sistema casa cada arquivo com a análise pelo número da OP e refaz a análise. Só as que mudarem de resultado voltam a ficar pendentes de download." size="lg">
+          <div className="space-y-4">
+            <DropZone
+              onFiles={(arqs) => { if (!parsing && !rodando) receberArquivos(arqs); }}
+              disabled={parsing || rodando}
+              className="rounded-md border border-dashed p-3 transition-colors"
+            >
+              {(dragging) => (<>
+                <Input type="file" accept=".pdf,.xlsx,.docx" multiple onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ''; if (fs.length) receberArquivos(fs); }} disabled={parsing || rodando} />
+                <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte as OPs corrigidas aqui' : 'ou arraste as OPs corrigidas para cá (pode soltar várias de uma vez)'}</div>
+              </>)}
+            </DropZone>
+            {parsing && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Lendo e casando com as análises…</div>}
+
+            {semMatch.length > 0 && (
+              <div className="text-xs rounded-md border border-dashed p-2 space-y-0.5" style={{ borderColor: 'hsl(var(--status-nao-conforme) / 0.4)' }}>
+                <div className="font-semibold text-destructive">{semMatch.length} arquivo(s) não casaram:</div>
+                {semMatch.map((s, i) => <div key={i} className="text-muted-foreground">{s.file.name} — {s.opNum ? `OP ${s.opNum}: ` : ''}{s.motivo}</div>)}
+              </div>
+            )}
+
+            {pares.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">{pares.length} OP(s) casada(s) — {selCount} marcada(s)</span>
+                  <div className="flex gap-2 text-xs">
+                    <button className="underline" onClick={() => setPares((a) => a.map((x) => ({ ...x, sel: true })))} disabled={rodando}>marcar todas</button>
+                    <button className="underline" onClick={() => setPares((a) => a.map((x) => ({ ...x, sel: false })))} disabled={rodando}>desmarcar</button>
+                  </div>
+                </div>
+                <div className="max-h-72 overflow-auto border rounded-lg divide-y">
+                  {pares.map((p, i) => (
+                    <div key={i} className="flex items-center gap-2 p-2 text-sm">
+                      <input type="checkbox" checked={p.sel} disabled={rodando} onChange={(e) => setPares((a) => a.map((x) => (x.file === p.file ? { ...x, sel: e.target.checked } : x)))} className="h-4 w-4" />
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium">OP {p.opNum}{p.serie ? ` · ${p.serie}` : ''} <span className="text-xs text-muted-foreground">— {p.row.modelo || '—'}</span></div>
+                        <div className="text-[11px] text-muted-foreground truncate">{p.file.name} · análise de {p.row.created_at ? new Date(p.row.created_at).toLocaleDateString('pt-BR') : '?'} ({(p.row.status || '').toUpperCase()})</div>
+                      </div>
+                      <StatusChip s={p.status} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {rodando && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Reprocessando {prog.idx}/{prog.total}…</div>}
+
+            {resumo && (
+              <div className="text-sm rounded-md border p-3 bg-muted/30 space-y-1">
+                <div><strong>{resumo.mudaram}</strong> reanalisada(s) com mudança → pendente(s) de download.</div>
+                <div className="text-muted-foreground">{resumo.iguais} sem mudança (mantidas como estavam).{resumo.falhas.length ? ` ${resumo.falhas.length} falha(s).` : ''}</div>
+                {resumo.falhas.length > 0 && <div className="text-[11px] text-destructive">{resumo.falhas.map((f, i) => <div key={i}>{f}</div>)}</div>}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <Button variant="outline" onClick={handleClose} disabled={rodando}>{resumo ? 'Fechar' : 'Cancelar'}</Button>
+              {!resumo && <Button onClick={executar} disabled={rodando || selCount === 0}>{rodando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Reprocessando…</> : `Reanalisar ${selCount} OP(s)`}</Button>}
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    function ImportarProdutosModal({ open, onClose, onImported }) {
+      const toast = useToast();
+      const [file, setFile] = useState(null);
+      const [rows, setRows] = useState([]);
+      const [parsing, setParsing] = useState(false);
+      const [saving, setSaving] = useState(false);
+      const modelosExistentesRef = useRef(new Set());
+
+      const reset = () => { setFile(null); setRows([]); };
+      const handleClose = () => { reset(); onClose(); };
+
+      const norm = (s) => String(s || '').trim().toLowerCase();
+
+      // Revalida uma linha: obrigatoriedade dos campos + duplicidade de modelo
+      // (contra o catálogo já cadastrado e contra as demais linhas da planilha).
+      const revalidar = (item, modelosNaPlanilha) => {
+        const r = { ...item, erro: null };
+        if (!r.equipamento) r.erro = 'Equipamento é obrigatório';
+        else if (!r.modelo) r.erro = 'Modelo é obrigatório';
+        else if (!r.codigo_referencia) r.erro = 'Código de Referência é obrigatório';
+        else if (!r.registro_anvisa) r.erro = 'Registro/Notificação ANVISA é obrigatório';
+        else if (modelosExistentesRef.current.has(norm(r.modelo))) r.erro = `Modelo "${r.modelo}" já está cadastrado no Catálogo`;
+        else if (modelosNaPlanilha.filter((m) => m === norm(r.modelo)).length > 1) r.erro = `Modelo "${r.modelo}" aparece duplicado nesta planilha`;
+        return r;
+      };
+
+      // Atualiza uma célula e revalida TODAS as linhas (duplicidade entre linhas
+      // pode mudar quando qualquer uma delas é editada).
+      const updateCell = (linha, campo, valor) => {
+        setRows((prev) => {
+          const atualizado = prev.map((r) => (r.linha === linha ? { ...r, [campo]: valor } : r));
+          const modelosNaPlanilha = atualizado.map((r) => norm(r.modelo));
+          return atualizado.map((r) => revalidar(r, modelosNaPlanilha));
+        });
+      };
+
+      const parseXlsx = async (f) => {
+        setParsing(true);
+        setRows([]);
+        try {
+          if (!window.ExcelJS) throw new Error('ExcelJS não carregou. Recarregue a página (Ctrl+F5).');
+          const { data: produtos } = await supabase.from('produtos').select('modelo');
+          modelosExistentesRef.current = new Set((produtos || []).map((p) => norm(p.modelo)));
+
+          const buf = new Uint8Array(await f.arrayBuffer());
+          const wb = new window.ExcelJS.Workbook();
+          await wb.xlsx.load(buf);
+          const ws = wb.getWorksheet('Produtos') || wb.worksheets[0];
+          const out = [];
+          for (let r = 2; r <= ws.rowCount; r++) {
+            const row = ws.getRow(r);
+            const item = {
+              linha: r,
+              equipamento: String(row.getCell(1).value || '').trim(),
+              modelo: String(row.getCell(2).value || '').trim(),
+              codigo_referencia: String(row.getCell(3).value || '').trim(),
+              registro_anvisa: String(row.getCell(4).value || '').trim(),
+              codigo_sapiens: String(row.getCell(5).value || '').trim(),
+              erro: null,
+            };
+            if (!item.equipamento && !item.modelo && !item.codigo_referencia && !item.registro_anvisa && !item.codigo_sapiens) continue; // linha em branco
+            out.push(item);
+          }
+          const modelosNaPlanilha = out.map((r) => norm(r.modelo));
+          setRows(out.map((r) => revalidar(r, modelosNaPlanilha)));
+        } catch (e) {
+          toast.error('Erro ao ler XLSX: ' + (e?.message || e));
+        }
+        setParsing(false);
+      };
+
+      const handleFile = async (fileOrEvent) => {
+        const f = fileOrEvent && fileOrEvent.target ? fileOrEvent.target.files?.[0] : fileOrEvent;
+        if (!f) return;
+        setFile(f);
+        await parseXlsx(f);
+      };
+
+      const handleConfirmar = async () => {
+        const validas = rows.filter((r) => !r.erro);
+        if (validas.length === 0) { toast.error('Nenhuma linha válida para importar.'); return; }
+        setSaving(true);
+        try {
+          let inseridos = 0, erros = 0;
+          for (const r of validas) {
+            const { error } = await supabase.from('produtos').insert({
+              equipamento: r.equipamento,
+              modelo: r.modelo,
+              codigo_referencia: r.codigo_referencia,
+              registro_anvisa: r.registro_anvisa,
+              codigo_sapiens: r.codigo_sapiens || null,
+            });
+            if (error) erros++; else inseridos++;
+          }
+          toast.success(`${inseridos} produto(s) importado(s).${erros > 0 ? ` ${erros} erro(s) ao salvar.` : ''}`);
+          onImported?.();
+          handleClose();
+        } catch (e) {
+          toast.error('Erro na importação: ' + (e?.message || e));
+        }
+        setSaving(false);
+      };
+
+      if (!open) return null;
+      const validas = rows.filter((r) => !r.erro).length;
+      const invalidas = rows.length - validas;
+
+      // Gera o template XLSX no navegador (instruções + exemplos), mesmo padrão
+      // usado no template de análises manuais.
+      const handleBaixarTemplate = async () => {
+        try {
+          if (!window.ExcelJS) { toast.error('ExcelJS não carregou. Recarregue a página.'); return; }
+          const wb = new window.ExcelJS.Workbook();
+          wb.creator = 'Confiance Medical';
+          const inst = wb.addWorksheet('Instruções');
+          inst.getColumn(1).width = 110;
+          const lin = (texto, fmt) => {
+            const row = inst.addRow([texto]);
+            if (fmt) {
+              const c = row.getCell(1);
+              c.font = { bold: fmt.bold, size: fmt.size, color: fmt.fg ? { argb: fmt.fg } : undefined };
+              if (fmt.bg) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fmt.bg } };
+              row.height = fmt.size ? 24 : 18;
+            }
+          };
+          lin('IMPORTAÇÃO DE PRODUTOS — Confiance Medical', { bold: true, size: 14, bg: 'FF1F3A5C', fg: 'FFFFFFFF' });
+          lin('');
+          lin('Use esta planilha para cadastrar vários produtos/modelos de uma vez no Catálogo de Produtos (FORM-GQ-0085).');
+          lin('Cada linha = 1 produto. Apague as linhas de exemplo (em cinza/itálico) antes de salvar.');
+          lin('A derivação NÃO é cadastrada aqui — ela é informada na criação de cada Ficha Mestre do produto.');
+          lin('');
+          lin('COLUNAS (em ordem):', { bold: true });
+          lin('');
+          lin('1. Equipamento — obrigatório. Ex.: FONTE DE LUZ LED.');
+          lin('2. Modelo — obrigatório e único (não pode repetir um já cadastrado). Ex.: CM-LED.');
+          lin('3. Código de Referência — obrigatório. Ex.: LEDT.');
+          lin('4. Registro/Notificação ANVISA — obrigatório. Ex.: 80337650008.');
+          lin('5. Código Sapiens — opcional. Ex.: FNT0001.');
+          lin('');
+          lin('A plataforma valida cada linha antes de importar e mostra o erro (ex.: modelo já cadastrado, campo faltando).');
+          lin('Linhas com erro podem ser corrigidas direto na tela antes de confirmar a importação.');
+
+          const ws = wb.addWorksheet('Produtos');
+          ws.columns = [
+            { header: 'Equipamento', key: 'equipamento', width: 30 },
+            { header: 'Modelo', key: 'modelo', width: 18 },
+            { header: 'Código de Referência', key: 'codigo_referencia', width: 22 },
+            { header: 'Registro/Notificação ANVISA', key: 'registro_anvisa', width: 26 },
+            { header: 'Código Sapiens', key: 'codigo_sapiens', width: 18 },
+          ];
+          const h = ws.getRow(1);
+          h.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+          h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3A5C' } };
+          h.alignment = { horizontal: 'left', vertical: 'middle' };
+          h.height = 24;
+          ws.views = [{ state: 'frozen', ySplit: 1 }];
+          const exemplos = [
+            ['FONTE DE LUZ LED', 'CM-LED', 'LEDT', '80337650008', 'FNT0001'],
+            ['ENDOSCÓPIO RÍGIDO PARA ARTROSCOPIA', 'CM-OTC0041A', 'ART41', '80337659009', 'ART0014'],
+          ];
+          exemplos.forEach((rowVals) => {
+            const r = ws.addRow(rowVals);
+            r.font = { italic: true, color: { argb: 'FF888888' } };
+          });
+
+          const buf = await wb.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'Template_Importar_Produtos.xlsx';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+          toast.success('Template baixado.');
+        } catch (e) {
+          toast.error('Erro ao gerar template: ' + (e?.message || e));
+        }
+      };
+
+      return (
+        <Modal open={open} onClose={handleClose} title="Importar produtos" description="Selecione a planilha de produtos preenchida. A plataforma valida cada linha antes de importar." size="lg">
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <Label>Planilha (.xlsx)</Label>
+                <Button variant="outline" size="sm" onClick={handleBaixarTemplate} title="Gerar e baixar o template oficial">
+                  <Icon name="download" className="h-3.5 w-3.5" />Baixar template
+                </Button>
+              </div>
+              <DropZone
+                onFiles={(arqs) => { if (parsing || saving) return; const f = arqs.find((x) => /\.xlsx$/i.test(x.name)) || arqs[0]; if (f) handleFile(f); }}
+                disabled={parsing || saving}
+                className="rounded-md border border-dashed p-2 transition-colors"
+              >
+                {(dragging) => (<>
+                  <Input type="file" accept=".xlsx" onChange={handleFile} disabled={parsing || saving} />
+                  <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte o .xlsx aqui' : 'ou arraste o arquivo .xlsx para cá'}</div>
+                </>)}
+              </DropZone>
+              <p className="text-xs text-muted-foreground mt-1">Não tem o arquivo? Clique em <strong>Baixar template</strong> acima — ele vem com as instruções e exemplos.</p>
+            </div>
+            {parsing && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Lendo planilha…</div>}
+            {rows.length > 0 && (
+              <>
+                <div className="flex items-center gap-4 text-sm">
+                  <span><strong>{rows.length}</strong> linha(s) lidas</span>
+                  <span className="text-green-600"><strong>{validas}</strong> válida(s)</span>
+                  {invalidas > 0 && <span className="text-destructive"><strong>{invalidas}</strong> com erro</span>}
+                </div>
+                <p className="text-xs text-muted-foreground">Edite qualquer célula abaixo para corrigir os dados antes de importar.</p>
+                <div className="max-h-96 overflow-auto border rounded-lg">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted sticky top-0 z-10">
+                      <tr className="text-left">
+                        <th className="px-2 py-1.5 w-12">Linha</th>
+                        <th className="px-2 py-1.5">Equipamento</th>
+                        <th className="px-2 py-1.5">Modelo</th>
+                        <th className="px-2 py-1.5">Código Ref.</th>
+                        <th className="px-2 py-1.5">Registro ANVISA</th>
+                        <th className="px-2 py-1.5">Código Sapiens</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r) => {
+                        const cellInput = "w-full h-7 px-1.5 text-xs rounded border border-input bg-background focus:outline-none focus:ring-1 focus:ring-ring";
+                        return (
+                          <tr key={r.linha} className={cn('border-t align-top', r.erro && 'bg-destructive/10')}>
+                            <td className="px-2 py-1.5 font-mono">{r.linha}</td>
+                            <td className="px-2 py-1.5">
+                              <input type="text" value={r.equipamento} onChange={(e) => updateCell(r.linha, 'equipamento', e.target.value)} className={cellInput} />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input type="text" value={r.modelo} onChange={(e) => updateCell(r.linha, 'modelo', e.target.value)} className={cn(cellInput, 'font-mono')} />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input type="text" value={r.codigo_referencia} onChange={(e) => updateCell(r.linha, 'codigo_referencia', e.target.value)} className={cn(cellInput, 'font-mono')} />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input type="text" value={r.registro_anvisa} onChange={(e) => updateCell(r.linha, 'registro_anvisa', e.target.value)} className={cn(cellInput, 'font-mono')} />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input type="text" value={r.codigo_sapiens} onChange={(e) => updateCell(r.linha, 'codigo_sapiens', e.target.value)} className={cn(cellInput, 'font-mono')} placeholder="opcional" />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {rows.filter((r) => r.erro).length > 0 && (
+                    <div className="border-t p-2 space-y-0.5">
+                      {rows.filter((r) => r.erro).map((r) => (
+                        <div key={r.linha} className="text-[11px] text-destructive">Linha {r.linha}: {r.erro}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <Button variant="outline" onClick={handleClose} disabled={saving}>Cancelar</Button>
+              <Button onClick={handleConfirmar} disabled={validas === 0 || saving}>
+                {saving ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Importando…</> : `Importar ${validas} produto(s)`}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    /* ====================================================================
        MODAL: Marcar análise manual NC como Corrigida — decisão 23/06/2026
        Cria uma re-análise manual conforme, vinculada à NC original via
        analise_origem_id. Dashboard automaticamente conta como "Corrigida".
@@ -11514,6 +12220,7 @@ ${parecer.parecer_tecnico ? `
       const [importOpen, setImportOpen] = useState(false);
       const [novaManualOpen, setNovaManualOpen] = useState(false);
       const [auditOpen, setAuditOpen] = useState(false);
+      const [reanalisarOpOpen, setReanalisarOpOpen] = useState(false);
       const [editandoManual, setEditandoManual] = useState(null);
       const [corrigindo, setCorrigindo] = useState(null);
       // Filtros temporais (decisão 26/06/2026) — espelha o Dashboard
@@ -11951,6 +12658,12 @@ ${parecer.parecer_tecnico ? `
                   Importar planilha
                 </Button>
                 )}
+                {can('historico_correcao') && (
+                <Button variant="outline" onClick={() => setReanalisarOpOpen(true)} title="Subir OP(s) corrigida(s) e reanalisar (individual ou em massa) — o pacote volta a ficar pendente de download">
+                  <Icon name="upload" />
+                  Reanalisar OP corrigida
+                </Button>
+                )}
                 <Button variant="outline" onClick={() => setAuditOpen(true)} title="Selecionar várias análises e gerar pacote consolidado para auditoria">
                   <Icon name="download" />
                   Exportar p/ auditoria
@@ -11975,6 +12688,12 @@ ${parecer.parecer_tecnico ? `
             open={importOpen}
             onClose={() => setImportOpen(false)}
             onImported={() => { registrarLog(perfil, 'importar_analises', 'analise', 'planilha', `${perfil?.nome_completo || perfil?.email || 'Usuário'} importou análises manuais por planilha`); setReloadKey((k) => k + 1); }}
+          />
+          <ReanalisarOpCorrigidaModal
+            open={reanalisarOpOpen}
+            onClose={() => setReanalisarOpOpen(false)}
+            perfil={perfil}
+            onDone={() => setReloadKey((k) => k + 1)}
           />
           <NovaAnaliseManualModal
             open={novaManualOpen}
@@ -12486,6 +13205,7 @@ ${parecer.parecer_tecnico ? `
 
     function CatalogoTab() {
       const toast = useToast();
+      const { perfil } = usePerm();
       const [produtos, setProdutos] = useState([]);
       const [loading, setLoading] = useState(true);
       const [editing, setEditing] = useState(null);
@@ -12493,6 +13213,7 @@ ${parecer.parecer_tecnico ? `
       const [busca, setBusca] = useState('');
       const [filtroEquipamento, setFiltroEquipamento] = useState('');
       const [filtroModelo, setFiltroModelo] = useState('');
+      const [importOpen, setImportOpen] = useState(false);
 
       const load = useCallback(async () => {
         setLoading(true);
@@ -12551,7 +13272,12 @@ ${parecer.parecer_tecnico ? `
                 <button onClick={limparFiltros} className="ml-2 text-xs underline text-accent hover:opacity-80">limpar filtros</button>
               )}
             </p>
-            <Button onClick={() => setEditing({})}><Icon name="plus" />Novo produto</Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => setImportOpen(true)} title="Cadastrar vários produtos de uma vez por planilha XLSX">
+                <Icon name="upload" className="h-4 w-4" />Importar planilha
+              </Button>
+              <Button onClick={() => setEditing({})}><Icon name="plus" />Novo produto</Button>
+            </div>
           </div>
 
           {/* === Filtros e busca === */}
@@ -12643,6 +13369,11 @@ ${parecer.parecer_tecnico ? `
           {editing !== null && (
             <ProdutoModal produto={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
           )}
+          <ImportarProdutosModal
+            open={importOpen}
+            onClose={() => setImportOpen(false)}
+            onImported={() => { registrarLog(perfil, 'importar_produtos', 'produto', 'planilha', `${perfil?.nome_completo || perfil?.email || 'Usuário'} importou produtos por planilha`); load(); }}
+          />
         </div>
       );
     }
