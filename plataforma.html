@@ -11375,6 +11375,16 @@ ${parecer.parecer_tecnico ? `
       };
       const templateProblema = (desc, doc) => (doc || '') + ' :: ' + String(desc || '').replace(/\d+([.,]\d+)?/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 160);
       const setorDe = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+      // Reconhece o apontamento de TEMPO de estágio para montar um cabeçalho específico
+      // (estágio + faixa esperada) e agrupar sem misturar estágios/faixas diferentes.
+      const parseApontTempo = (desc) => {
+        const d = String(desc || '');
+        const est = d.match(/Est[áa]gio\s+(\d+)\s*\(([^)]+)\)/);
+        const dir = d.match(/(acima|abaixo)\s+do\s+tempo\s+esperado/i);
+        if (!est || !dir) return null;
+        const fx = d.match(/faixa esperada\s+([\d.,]+\s*[–\-]\s*[\d.,]+\s*min\s*\(m[ée]dia[^)]*\))/i);
+        return { estagio: est[1], nome: est[2].trim(), direcao: dir[1].toLowerCase(), faixa: fx ? fx[1].trim() : '' };
+      };
 
       const carregar = async () => {
         setCarregando(true); setGrupos([]); setSel(null); setMarcadas(new Set()); setResultado(null);
@@ -11398,13 +11408,24 @@ ${parecer.parecer_tecnico ? `
                 const c = crono.find((x) => x.estagio_numero === ap.estagio_responsavel);
                 if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
               }
-              const key = (ap.severidade || '') + '|' + templateProblema(ap.descricao, ap.documento_afetado);
-              if (!gruposMap.has(key)) gruposMap.set(key, { key, severidade: ap.severidade, setor: setorDe(ap), recomendacao: ap.recomendacao || '', labelBase: ap.descricao || '', itens: [] });
+              const tempo = parseApontTempo(ap.descricao);
+              // Chave: no tempo, separa por estágio + direção + faixa (não mistura rígido/não-rígido).
+              const key = tempo
+                ? `TEMPO|${tempo.estagio}|${tempo.direcao}|${tempo.faixa}`
+                : (ap.severidade || '') + '|' + templateProblema(ap.descricao, ap.documento_afetado);
+              if (!gruposMap.has(key)) gruposMap.set(key, { key, severidade: ap.severidade, setor: setorDe(ap), recomendacao: ap.recomendacao || '', labelBase: ap.descricao || '', tempo, itens: [] });
               gruposMap.get(key).itens.push({ opNum: a.numero_op, serie: a.numero_serie, modelo: a.modelo, data: a.created_at, valor: extrairValor(ap.descricao), operador, operadorId, slackId });
             }
           }
           const arr = [...gruposMap.values()].filter((g) => g.itens.length >= 2).sort((a, b) => b.itens.length - a.itens.length);
-          for (const g of arr) g.label = String(g.labelBase).replace(/\d+([.,]\d+)?/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 130);
+          for (const g of arr) {
+            if (g.tempo) {
+              g.label = `Estágio ${g.tempo.estagio} (${g.tempo.nome}) — tempo ${g.tempo.direcao} do esperado${g.tempo.faixa ? ` · faixa ${g.tempo.faixa}` : ''}`;
+            } else {
+              const gen = String(g.labelBase).replace(/\s+/g, ' ').trim();
+              g.label = gen.length > 160 ? gen.slice(0, 160).replace(/\s+\S*$/, '') + '…' : gen;
+            }
+          }
           setGrupos(arr);
         } catch (e) { toast.error('Erro ao carregar: ' + (e?.message || e)); }
         setCarregando(false);
@@ -11427,11 +11448,21 @@ ${parecer.parecer_tecnico ? `
           const mencaoIds = [...new Set(itens.map((it) => it.slackId).filter(Boolean))];
           const mencao = mencaoIds.map((id) => `<@${id}>`).join(' ');
           const linhas = itens.map((it) => `• OP ${it.opNum || '—'} · ${it.serie || '—'}${it.valor ? ` · *${it.valor}*` : ''}${it.operador ? ` · ${it.operador}` : ''}`);
+          const t = grupoSel.tempo;
+          // Cabeçalho específico + linha do responsável com a menção (como nos alertas individuais).
+          const cabecalho = t
+            ? `:warning: *TEMPO DO ESTÁGIO ${t.estagio} (${t.nome}) ${t.direcao.toUpperCase()} DO ESPERADO — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`
+            : `:warning: *APONTAMENTO EM LOTE — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`;
+          const contexto = t
+            ? `Faixa esperada do Estágio ${t.estagio} (${t.nome}): *${t.faixa || '—'}*.`
+            : grupoSel.label;
+          const intro = t
+            ? `As OPs abaixo ficaram com o tempo *${t.direcao}* do esperado (o tempo varia por lote):`
+            : 'As OPs abaixo apresentaram o mesmo apontamento (o valor varia por lote):';
           const texto = [
-            ...(mencao ? [mencao] : []),
-            `:warning: *APONTAMENTO EM LOTE — ${itens.length} OP(s)* (responsável: *${grupoSel.setor}*)`,
-            grupoSel.label,
-            'As OPs abaixo apresentaram o mesmo apontamento (o valor varia por lote):',
+            cabecalho,
+            contexto,
+            intro,
             linhas.join('\n'),
             ...(grupoSel.recomendacao ? [`*Ação:* ${grupoSel.recomendacao}`] : []),
           ].join('\n\n');
