@@ -321,6 +321,39 @@
     // executou o Estágio 50), para ele ficar ciente. Slack ID vem do cadastro de
     // colaboradores (Configurações → Operadores), casado por nome.
     const GESTOR_ALMOXARIFADO_NOME = 'Bruno Mendes';
+
+    /* --------------------------------------------------------------------
+       Resolve o cadastro do operador (para pegar o Slack ID) a partir do que
+       a OP informa: código e nome. Antes a busca tentava o código, e se
+       achasse a linha devolvia o Slack DELA e parava — então um colaborador
+       cadastrado duas vezes (uma sem Slack) ou registrado por apelido saía
+       como "sem Slack" mesmo estando cadastrado.
+       Agora reúne TODOS os candidatos (código, nome, apelido) e prefere o que
+       tem Slack ID preenchido, caindo para o primeiro só para exibir o nome.
+       -------------------------------------------------------------------- */
+    function resolverOperador(operadores, codigo, nome) {
+      const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const cod = String(codigo || '').trim();
+      const nomeN = norm(nome);
+      const candidatos = [];
+      for (const o of (operadores || [])) {
+        const codOk = cod && String(o.codigo || '').trim() === cod;
+        const nomeOk = nomeN && norm(o.nome) === nomeN;
+        const apelidoOk = nomeN && Array.isArray(o.apelidos) && o.apelidos.some((ap) => norm(ap) === nomeN);
+        // Nome do cadastro contido no nome da OP (ou vice-versa) — cobre
+        // "Kaiky Nascimento" x "Kaiky Nascimento da Silva".
+        const parcialOk = !codOk && !nomeOk && !apelidoOk && nomeN && norm(o.nome).length >= 6 &&
+          (nomeN.startsWith(norm(o.nome)) || norm(o.nome).startsWith(nomeN));
+        if (codOk || nomeOk || apelidoOk || parcialOk) {
+          candidatos.push({ operador: o, peso: codOk ? 0 : nomeOk ? 1 : apelidoOk ? 2 : 3 });
+        }
+      }
+      if (!candidatos.length) return { operador: null, slackId: '' };
+      candidatos.sort((a, b) => a.peso - b.peso);
+      const comSlack = candidatos.find((c) => String(c.operador.slack_user_id || '').trim());
+      const escolhido = comSlack || candidatos[0];
+      return { operador: escolhido.operador, slackId: String(escolhido.operador.slack_user_id || '').trim() };
+    }
     const CARGOS = [
       { id: 'estagiario_gq',          label: 'Estagiário da Garantia da Qualidade' },
       { id: 'assistente_gq',          label: 'Assistente da Garantia da Qualidade' },
@@ -581,6 +614,7 @@
         trash: <><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>,
         package: <><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" x2="12" y1="22.08" y2="12"/></>,
         book: <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2zM22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>,
+        file: <><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><polyline points="15 2 15 7 20 7"/><line x1="8" x2="14" y1="13" y2="13"/><line x1="8" x2="14" y1="17" y2="17"/></>,
         chevronLeft: <polyline points="15 18 9 12 15 6"/>,
         info: <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></>,
         loader: <><line x1="12" x2="12" y1="2" y2="6"/><line x1="12" x2="12" y1="18" y2="22"/><line x1="4.93" x2="7.76" y1="4.93" y2="7.76"/><line x1="16.24" x2="19.07" y1="16.24" y2="19.07"/><line x1="2" x2="6" y1="12" y2="12"/><line x1="18" x2="22" y1="12" y2="12"/><line x1="4.93" x2="7.76" y1="19.07" y2="16.24"/><line x1="16.24" x2="19.07" y1="7.76" y2="4.93"/></>,
@@ -662,6 +696,54 @@
       );
     };
 
+    /* --------------------------------------------------------------------
+       Menu suspenso de ações. Evita a fileira de botões que quebrava em duas
+       linhas no cabeçalho das telas. Cada item: { label, icon, onClick,
+       title, oculto, separadorAntes }.
+       -------------------------------------------------------------------- */
+    const MenuAcoes = ({ rotulo = 'Ações', icon = 'settings', itens = [], variant = 'outline' }) => {
+      const [aberto, setAberto] = useState(false);
+      const ref = useRef(null);
+      useEffect(() => {
+        if (!aberto) return;
+        const fora = (e) => { if (ref.current && !ref.current.contains(e.target)) setAberto(false); };
+        const esc = (e) => { if (e.key === 'Escape') setAberto(false); };
+        document.addEventListener('mousedown', fora);
+        window.addEventListener('keydown', esc);
+        return () => { document.removeEventListener('mousedown', fora); window.removeEventListener('keydown', esc); };
+      }, [aberto]);
+      const visiveis = itens.filter((i) => i && !i.oculto);
+      if (!visiveis.length) return null;
+      return (
+        <div className="relative" ref={ref}>
+          <Button variant={variant} onClick={() => setAberto((v) => !v)} title="Mais ações desta tela">
+            <Icon name={icon} />{rotulo}
+            <Icon name="chevronLeft" className={cn('h-3.5 w-3.5 transition-transform', aberto ? 'rotate-90' : '-rotate-90')} />
+          </Button>
+          {aberto && (
+            <div className="absolute right-0 z-40 mt-1 w-72 rounded-lg border bg-card shadow-lg py-1">
+              {visiveis.map((it, i) => (
+                <React.Fragment key={i}>
+                  {it.separadorAntes && i > 0 && <div className="my-1 border-t" />}
+                  <button
+                    onClick={() => { setAberto(false); it.onClick(); }}
+                    title={it.title || ''}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-muted transition-colors flex items-start gap-2"
+                  >
+                    <Icon name={it.icon || 'chevronLeft'} className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                    <span>
+                      <span className="font-medium block">{it.label}</span>
+                      {it.descricao && <span className="text-xs text-muted-foreground block mt-0.5">{it.descricao}</span>}
+                    </span>
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const PageHeader = ({ title, description, actions }) => (
       <div className="mb-8 flex items-start justify-between gap-4">
         <div>
@@ -687,7 +769,7 @@
       if (!open) return null;
       const widths = { sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' };
       return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in" onClick={onClose}>
+        <div data-modal-aberto="1" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in" onClick={onClose}>
           <div className={cn('relative w-full bg-card border rounded-xl shadow-xl max-h-[90vh] overflow-y-auto', widths[size])} onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between p-6 pb-4">
               <div>
@@ -809,60 +891,97 @@
         { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'dashboard_ver' },
         { id: 'analise', label: 'Análise', icon: 'search', perm: 'analise_executar' },
         { id: 'historico', label: 'Histórico', icon: 'history', perm: 'historico_ver' },
+        { id: 'nfs', label: 'NFs de venda', icon: 'file', perm: 'historico_ver' },
         { id: 'cadastro', label: 'Cadastro', icon: 'database', perm: 'cadastro_ver' },
         { id: 'solicitacoes', label: 'Solicitações', icon: 'alert' },
         { id: 'logs', label: 'Histórico de alterações', icon: 'clock', perm: 'logs_ver' },
         { id: 'configuracoes', label: 'Configurações', icon: 'settings', perm: 'config_ver' },
       ].filter((it) => !it.perm || permitido(it.perm));
+      // Menu recolhido: só ícones, para sobrar largura de tela nas tabelas.
+      // A escolha fica no navegador de cada pessoa.
+      const [recolhido, setRecolhido] = useState(() => localStorage.getItem('confiance_menu_recolhido') === 'true');
+      const alternar = () => setRecolhido((v) => {
+        const n = !v;
+        try { localStorage.setItem('confiance_menu_recolhido', n ? 'true' : 'false'); } catch (e) {}
+        return n;
+      });
+      const itemClasse = (ativo) => cn(
+        'flex w-full items-center rounded-lg text-sm font-medium transition-colors',
+        recolhido ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2.5',
+        ativo
+          ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+          : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
+      );
       return (
-        <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border no-print"
+        <aside className={cn('sticky top-0 flex h-screen shrink-0 flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border no-print transition-[width] duration-200', recolhido ? 'w-16' : 'w-64')}
           style={theme === 'dark' ? undefined : { background: 'linear-gradient(165deg, hsl(199 45% 34%) 0%, hsl(210 44% 26%) 45%, hsl(223 43% 20%) 100%)' }}>
-          <div className="flex items-center gap-3 px-5 py-5 border-b border-sidebar-border">
+          <div className={cn('flex items-center border-b border-sidebar-border', recolhido ? 'justify-center px-2 py-4' : 'gap-3 px-5 py-5')}>
             {/* Logo oficial Confiance (embutido em base64) sobre chip branco. */}
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white shrink-0 p-1.5">
+            <div className={cn('flex items-center justify-center rounded-xl bg-white shrink-0 p-1.5', recolhido ? 'h-10 w-10' : 'h-11 w-11')}>
               <img src={LOGO_CONFIANCE} alt="Confiance Medical" className="h-full w-full object-contain" />
             </div>
-            <span className="font-montserrat font-semibold text-sm leading-snug">Sistema de Análise da Conciliação da Produção</span>
+            {!recolhido && <span className="font-montserrat font-semibold text-sm leading-snug">Sistema de Análise da Conciliação da Produção</span>}
           </div>
-          <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-            <div className="px-3 pb-2 text-xs uppercase tracking-wider text-sidebar-foreground/50 font-semibold">
-              Menu
-            </div>
+
+          <button
+            onClick={alternar}
+            title={recolhido ? 'Expandir o menu' : 'Recolher o menu (só ícones)'}
+            className={cn(
+              'flex items-center text-xs font-medium text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors border-b border-sidebar-border',
+              recolhido ? 'justify-center py-2.5' : 'gap-2 px-5 py-2.5'
+            )}
+          >
+            <Icon name="chevronLeft" className={cn('h-4 w-4 transition-transform', recolhido && 'rotate-180')} />
+            {!recolhido && 'Recolher menu'}
+          </button>
+
+          <nav className={cn('flex-1 overflow-y-auto py-4 space-y-1', recolhido ? 'px-2' : 'px-3')}>
+            {!recolhido && (
+              <div className="px-3 pb-2 text-xs uppercase tracking-wider text-sidebar-foreground/50 font-semibold">
+                Menu
+              </div>
+            )}
             {navItems.map((item) => (
               <button
                 key={item.id}
                 onClick={() => onNavigate(item.id)}
-                className={cn(
-                  'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
-                  currentPage === item.id
-                    ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                    : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
-                )}
+                title={recolhido ? item.label : ''}
+                className={itemClasse(currentPage === item.id)}
               >
                 <Icon name={item.icon} />
-                {item.label}
+                {!recolhido && item.label}
               </button>
             ))}
           </nav>
-          <div className="border-t border-sidebar-border p-4 space-y-2">
+          <div className={cn('border-t border-sidebar-border space-y-2', recolhido ? 'p-2' : 'p-4')}>
             <button
               onClick={onToggleTheme}
-              className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors"
+              title={recolhido ? (theme === 'dark' ? 'Modo claro' : 'Modo escuro') : ''}
+              className={cn(
+                'flex w-full items-center rounded-lg text-sm font-medium text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors',
+                recolhido ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+              )}
             >
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
-              {theme === 'dark' ? 'Modo claro' : 'Modo escuro'}
+              {!recolhido && (theme === 'dark' ? 'Modo claro' : 'Modo escuro')}
             </button>
             <button
               onClick={onLogout}
-              className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors"
+              title={recolhido ? 'Sair' : ''}
+              className={cn(
+                'flex w-full items-center rounded-lg text-sm font-medium text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors',
+                recolhido ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+              )}
             >
               <Icon name="logout" />
-              Sair
+              {!recolhido && 'Sair'}
             </button>
-            <div className="px-2 pt-2 text-xs text-sidebar-foreground/60 border-t border-sidebar-border">
-              <div className="mt-2 font-medium truncate">{userEmail}</div>
-              <div className="mt-1 text-[10px] uppercase tracking-wider text-sidebar-foreground/40">Garantia da Qualidade</div>
-            </div>
+            {!recolhido && (
+              <div className="px-2 pt-2 text-xs text-sidebar-foreground/60 border-t border-sidebar-border">
+                <div className="mt-2 font-medium truncate">{userEmail}</div>
+                <div className="mt-1 text-[10px] uppercase tracking-wider text-sidebar-foreground/40">Garantia da Qualidade</div>
+              </div>
+            )}
           </div>
         </aside>
       );
@@ -1078,7 +1197,13 @@
       // (= a análise mais nova daquele OP/série, seja ela original ou re-análise).
       // Análises substituídas por re-análises NÃO aparecem.
       const reanalises = analisesFiltradas.filter((a) => a.analise_origem_id);
-      const idsSubstituidas = new Set(reanalises.map((a) => a.analise_origem_id));
+      // Correção 24/08/2026: a cadeia de substituição é calculada sobre o
+      // histórico COMPLETO, não sobre o período filtrado. Antes, um lote
+      // analisado em dezembro e corrigido em janeiro aparecia em dezembro com o
+      // status antigo ("não conforme"), porque a re-análise que o substituiu
+      // estava fora da janela do filtro — e o indicador do mês ficava errado
+      // para sempre.
+      const idsSubstituidas = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
       // --- Ajuste de ficha (não conta como correção) ---
       // Sobe a chain e diz se houve ALGUMA re-análise de correção de documento
       // (i.e., qualquer passo que NÃO seja 'atualizacao_ficha'). Se a única
@@ -1091,11 +1216,18 @@
       };
       const temCorrecaoReal = (a) => passosReanalise(a).some((p) => p.tipo_reanalise !== 'atualizacao_ficha' && p.tipo_reanalise !== 'atualizacao_cadastro');
       const ehAjusteFichaSomente = (a) => !!a.analise_origem_id && !temCorrecaoReal(a);
-      // Agrupa análises por OP/série, mantendo a mais recente de cada
+      // Agrupa por LOTE (OP + nº de série). O período define QUAIS lotes entram
+      // (basta ter alguma análise na janela); o ESTADO de cada um vem sempre da
+      // análise mais recente do histórico completo. Sem isso, um lote analisado
+      // no período e corrigido depois sumiria da contagem — a original está
+      // substituída e a correção está fora da janela.
+      const chaveLote = (a) => `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+      const lotesDoPeriodo = new Set(analisesFiltradas.map(chaveLote));
       const porLoteMap = new Map();
-      for (const a of analisesFiltradas) {
-        if (idsSubstituidas.has(a.id)) continue; // pula análises que foram substituídas
-        const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+      for (const a of analises) {
+        const chave = chaveLote(a);
+        if (!lotesDoPeriodo.has(chave)) continue;
+        if (idsSubstituidas.has(a.id)) continue; // foi substituída por uma re-análise
         const atual = porLoteMap.get(chave);
         if (!atual || new Date(a.created_at) > new Date(atual.created_at)) {
           porLoteMap.set(chave, a);
@@ -1513,13 +1645,12 @@
       const melhoriasPendentes = melhorias.filter((m) => m.status === 'pendente');
       const melhoriasDecididas = melhorias.filter((m) => m.status !== 'pendente');
 
-      // Últimas 5 análises (filtradas) — só MAIS RECENTE por OP/série (mesma lógica do Histórico)
-      const idsCorrigidasNoFiltro = new Set(
-        analisesFiltradas.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id)
-      );
+      // Últimas 5 análises (filtradas) — só MAIS RECENTE por OP/série (mesma
+      // lógica do Histórico). Usa a cadeia de substituição do histórico
+      // completo (idsSubstituidas), pelo mesmo motivo do bloco acima.
       const recentMapa = new Map();
       for (const a of analisesFiltradas) {
-        if (idsCorrigidasNoFiltro.has(a.id)) continue;
+        if (idsSubstituidas.has(a.id)) continue;
         const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
         const atual = recentMapa.get(chave);
         if (!atual || new Date(a.created_at) > new Date(atual.created_at)) {
@@ -7674,7 +7805,7 @@
       if (!open) return null;
 
       return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in" onClick={onClose}>
+        <div data-modal-aberto="1" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in" onClick={onClose}>
           <div className="relative w-full max-w-6xl bg-card border rounded-xl shadow-xl max-h-[95vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between p-5 pb-3 border-b">
               <div className="min-w-0 flex-1">
@@ -7942,13 +8073,30 @@
       return { imediata: imediata.join(' '), causa: causa.join(' ') };
     }
 
-    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId, dataAnalise, autoBaixar = false, onAutoBaixarDone, onAutoBaixarErro }) {
+    function ParecerView({ parecer: parecerInicial, onBack, backLabel = 'Nova análise', backIcon = 'plus', allowDelete = false, onDelete, analiseId, dataAnalise, autoBaixar = false, onAutoBaixarDone, onAutoBaixarErro, nav }) {
       const toast = useToast();
       const { perfil: usuarioAtual, can, isAdmin } = usePerm();
       const { pedirOuExecutar } = useSolic();
       // Mantém o parecer em estado local para refletir justificativas/re-análises sem recarregar
       const [parecer, setParecer] = useState(parecerInicial);
       const autoRanRef = useRef(false); // evita disparar o download automático (lote) mais de uma vez
+
+      // Setas ← → navegam entre as análises. Ignora quando o foco está num campo
+      // de texto ou quando há modal aberto (senão atrapalha justificativa/edição).
+      useEffect(() => {
+        if (!nav || nav.total <= 1) return;
+        const onKey = (e) => {
+          if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+          const el = document.activeElement;
+          const tag = el && el.tagName ? el.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select' || (el && el.isContentEditable)) return;
+          if (document.querySelector('[data-modal-aberto="1"]')) return;
+          if (e.key === 'ArrowLeft' && nav.temAnterior) { e.preventDefault(); nav.onAnterior(); }
+          if (e.key === 'ArrowRight' && nav.temProxima) { e.preventDefault(); nav.onProxima(); }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [nav]);
       useEffect(() => { setParecer(parecerInicial); }, [parecerInicial]);
 
       // Modal de justificativa (para ressalvas) e modal de re-análise (para NCs)
@@ -9274,17 +9422,13 @@ ${parecer.parecer_tecnico ? `
           const acharMencao = (estagioNum, setorLabel) => {
             const crono = (parecer.cronologia || []).find((c) => c.estagio_numero === estagioNum);
             if (!crono || !crono.operador_nome) return { nome: '', operadorId: '', slackId: '', incluir: false, encontrado: false, setorLabel };
-            const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
             const cod = String(crono.operador_id || '').trim();
-            let match = null;
-            if (cod) match = operadoresRef.find((o) => String(o.codigo || '').trim() === cod);
-            if (!match) match = operadoresRef.find((o) => norm(o.nome) === norm(crono.operador_nome));
-            const slackId = match?.slack_user_id || '';
+            const { slackId } = resolverOperador(operadoresRef, cod, crono.operador_nome);
             return { nome: crono.operador_nome, operadorId: cod, slackId, incluir: !!slackId, encontrado: true, setorLabel };
           };
           let operadoresRef = [];
           try {
-            const { data } = await supabase.from('operadores').select('nome, codigo, slack_user_id');
+            const { data } = await supabase.from('operadores').select('nome, codigo, apelidos, slack_user_id');
             operadoresRef = data || [];
           } catch (e) { /* best-effort */ }
           const mencaoEtiqueta = acharMencao(50, 'Almoxarifado');
@@ -9593,6 +9737,32 @@ ${parecer.parecer_tecnico ? `
               <Button variant="ghost" onClick={onDelete} title="Excluir análise">
                 <Icon name="trash" />
               </Button>
+            )}
+            {/* Navegação entre análises sem voltar ao Histórico. Percorre a MESMA
+                lista filtrada/ordenada de lá, então os filtros continuam valendo.
+                Também responde às setas ← → do teclado. */}
+            {nav && nav.total > 1 && (
+              <div className="inline-flex items-center rounded-lg border border-input bg-background">
+                <button
+                  onClick={nav.onAnterior}
+                  disabled={!nav.temAnterior}
+                  title={nav.temAnterior ? `Análise anterior (OP ${nav.opAnterior || '—'}) — seta ←` : 'Já é a primeira da lista'}
+                  className="h-10 px-2.5 rounded-l-lg hover:bg-muted disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+                >
+                  <Icon name="chevronLeft" className="h-4 w-4" />
+                </button>
+                <span className="px-2 text-xs text-muted-foreground whitespace-nowrap border-x border-input h-10 inline-flex items-center">
+                  {nav.posicao} de {nav.total}
+                </span>
+                <button
+                  onClick={nav.onProxima}
+                  disabled={!nav.temProxima}
+                  title={nav.temProxima ? `Próxima análise (OP ${nav.opProxima || '—'}) — seta →` : 'Já é a última da lista'}
+                  className="h-10 px-2.5 rounded-r-lg hover:bg-muted disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+                >
+                  <Icon name="chevronLeft" className="h-4 w-4 rotate-180" />
+                </button>
+              </div>
             )}
             {onBack && (
               <Button variant="outline" onClick={onBack}>
@@ -11365,6 +11535,8 @@ ${parecer.parecer_tecnico ? `
       const [marcadas, setMarcadas] = useState(new Set());
       const [enviando, setEnviando] = useState(false);
       const [resultado, setResultado] = useState(null);
+      const [preview, setPreview] = useState(null);        // texto editável da mensagem (null = ainda na seleção)
+      const [mencaoNomes, setMencaoNomes] = useState([]);  // nomes marcados, p/ legenda
 
       const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
       const extrairValor = (desc) => {
@@ -11387,27 +11559,46 @@ ${parecer.parecer_tecnico ? `
       };
 
       const carregar = async () => {
-        setCarregando(true); setGrupos([]); setSel(null); setMarcadas(new Set()); setResultado(null);
+        setCarregando(true); setGrupos([]); setSel(null); setMarcadas(new Set()); setResultado(null); setPreview(null);
         try {
           const desde = new Date(Date.now() - dias * 864e5).toISOString();
+          // Cadeia de correção: uma análise que foi SUBSTITUÍDA por outra (existe uma
+          // reanálise com analise_origem_id apontando para ela) não é mais o estado
+          // atual do lote — é a "folha" que vale. Buscamos isso globalmente (barato)
+          // para não depender da janela de datas nem da ordem de created_at.
+          const { data: chain } = await supabase.from('analises').select('id, analise_origem_id');
+          const supersededIds = new Set((chain || []).map((c) => c.analise_origem_id).filter(Boolean));
           const { data } = await supabase.from('analises')
-            .select('numero_op, numero_serie, modelo, created_at, parecer_completo')
+            .select('id, numero_op, numero_serie, modelo, created_at, status, analise_origem_id, parecer_completo')
             .gte('created_at', desde).order('created_at', { ascending: false });
+          // Só entram as FOLHAS (não substituídas), uma por OP, ainda EM ABERTO
+          // (ressalva ou não conforme). Lote já resolvido (conforme/corrigido) fica de fora.
+          const numOpKey = (v) => String(v || '').replace(/\D/g, '');
           const vistos = new Set(); const recentes = [];
-          for (const a of (data || [])) { const k = `${a.numero_op}|${a.numero_serie}`; if (vistos.has(k)) continue; vistos.add(k); recentes.push(a); }
-          const { data: ops } = await supabase.from('operadores').select('nome, codigo, slack_user_id');
+          for (const a of (data || [])) {
+            if (supersededIds.has(a.id)) continue; // foi substituída por uma reanálise → não é a atual
+            const k = numOpKey(a.numero_op) || `${a.numero_op}|${a.numero_serie}`;
+            if (vistos.has(k)) continue; vistos.add(k);
+            const st = (a.status || a.parecer_completo?.resultado_geral || '').toLowerCase();
+            if (st !== 'nao_conforme' && st !== 'ressalva') continue; // conforme/corrigido → fora
+            recentes.push(a);
+          }
+          const { data: ops } = await supabase.from('operadores').select('nome, codigo, apelidos, slack_user_id');
           const operadores = ops || [];
-          const acharSlack = (codigo, nome) => { let m = codigo ? operadores.find((o) => String(o.codigo || '').trim() === String(codigo).trim()) : null; if (!m && nome) m = operadores.find((o) => norm(o.nome) === norm(nome)); return m?.slack_user_id || ''; };
+          const acharSlack = (codigo, nome) => resolverOperador(operadores, codigo, nome).slackId;
           const gruposMap = new Map();
           for (const a of recentes) {
             const pc = a.parecer_completo || {};
             const crono = pc.cronologia || [];
             for (const ap of (pc.apontamentos || [])) {
               let operador = '', operadorId = '', slackId = '';
-              if (ap.estagio_responsavel != null) {
-                const c = crono.find((x) => x.estagio_numero === ap.estagio_responsavel);
-                if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
-              }
+              // Operador responsável pela correção: se o apontamento tem um estágio
+              // próprio (ex.: tempo do Estágio 5/50), usa o executor daquele estágio;
+              // senão (apontamentos de horário/cronologia a nível de OP), usa quem fez
+              // a Conciliação (Estágio 60) — é ele quem regulariza a OP.
+              const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
+              const c = crono.find((x) => x.estagio_numero === estOper);
+              if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
               const tempo = parseApontTempo(ap.descricao);
               // Chave: no tempo, separa por estágio + direção + faixa (não mistura rígido/não-rígido).
               const key = tempo
@@ -11418,6 +11609,9 @@ ${parecer.parecer_tecnico ? `
             }
           }
           const arr = [...gruposMap.values()].filter((g) => g.itens.length >= 2).sort((a, b) => b.itens.length - a.itens.length);
+          // Ordena as OPs de cada grupo do número MAIOR para o MENOR.
+          const numOp = (v) => parseInt(String(v || '').replace(/\D/g, ''), 10) || 0;
+          for (const g of arr) g.itens.sort((a, b) => numOp(b.opNum) - numOp(a.opNum));
           for (const g of arr) {
             if (g.tempo) {
               g.label = `Estágio ${g.tempo.estagio} (${g.tempo.nome}) — tempo ${g.tempo.direcao} do esperado${g.tempo.faixa ? ` · faixa ${g.tempo.faixa}` : ''}`;
@@ -11432,44 +11626,59 @@ ${parecer.parecer_tecnico ? `
       };
 
       useEffect(() => { if (open) carregar(); }, [open]);
-      useEffect(() => { if (sel) { const g = grupos.find((x) => x.key === sel); setMarcadas(new Set((g?.itens || []).map((it) => `${it.opNum}|${it.serie}`))); } }, [sel]);
+      useEffect(() => { setPreview(null); if (sel) { const g = grupos.find((x) => x.key === sel); setMarcadas(new Set((g?.itens || []).map((it) => `${it.opNum}|${it.serie}`))); } }, [sel]);
 
       const grupoSel = grupos.find((g) => g.key === sel) || null;
       const toggleOp = (chave) => setMarcadas((m) => { const n = new Set(m); n.has(chave) ? n.delete(chave) : n.add(chave); return n; });
 
-      const enviar = async () => {
+      // Monta o texto da mensagem (com as marcações <@ID>) para PRÉ-VISUALIZAÇÃO/edição.
+      const montarTexto = () => {
+        const itens = grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`));
+        const mencaoIds = [...new Set(itens.map((it) => it.slackId).filter(Boolean))];
+        const mencao = mencaoIds.map((id) => `<@${id}>`).join(' ');
+        const nomes = [...new Set(itens.filter((it) => it.slackId).map((it) => it.operador))];
+        const linhas = itens.map((it) => `• OP ${it.opNum || '—'} · ${it.serie || '—'}${it.valor ? ` · *${it.valor}*` : ''}${it.operador ? ` · ${it.operador}` : ''}`);
+        const t = grupoSel.tempo;
+        const cabecalho = t
+          ? `:warning: *TEMPO DO ESTÁGIO ${t.estagio} (${t.nome}) ${t.direcao.toUpperCase()} DO ESPERADO — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`
+          : `:warning: *APONTAMENTO EM LOTE — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`;
+        const contexto = t
+          ? `Faixa esperada do Estágio ${t.estagio} (${t.nome}): *${t.faixa || '—'}*.`
+          : String(grupoSel.labelBase || grupoSel.label);
+        const intro = t
+          ? `As OPs abaixo ficaram com o tempo *${t.direcao}* do esperado (o tempo varia por lote):`
+          : 'As OPs abaixo apresentaram o mesmo apontamento (o valor varia por lote):';
+        const texto = [
+          cabecalho,
+          contexto,
+          intro,
+          linhas.join('\n'),
+          ...(grupoSel.recomendacao ? [`*Ação:* ${grupoSel.recomendacao}`] : []),
+        ].join('\n\n');
+        return { texto, nomes };
+      };
+
+      const gerarPreview = () => {
         if (!grupoSel) return;
         const itens = grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`));
         if (itens.length === 0) { toast.error('Marque ao menos uma OP.'); return; }
+        const { texto, nomes } = montarTexto();
+        setMencaoNomes(nomes);
+        setPreview(texto);
+      };
+
+      // Envia EXATAMENTE o texto do preview (já editado pela usuária).
+      const enviar = async () => {
+        if (!grupoSel || !preview || !preview.trim()) { toast.error('A mensagem está vazia.'); return; }
+        const itens = grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`));
         setEnviando(true);
         try {
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
           const canal = canalDoSetor(grupoSel.setor);
-          const mencaoIds = [...new Set(itens.map((it) => it.slackId).filter(Boolean))];
-          const mencao = mencaoIds.map((id) => `<@${id}>`).join(' ');
-          const linhas = itens.map((it) => `• OP ${it.opNum || '—'} · ${it.serie || '—'}${it.valor ? ` · *${it.valor}*` : ''}${it.operador ? ` · ${it.operador}` : ''}`);
-          const t = grupoSel.tempo;
-          // Cabeçalho específico + linha do responsável com a menção (como nos alertas individuais).
-          const cabecalho = t
-            ? `:warning: *TEMPO DO ESTÁGIO ${t.estagio} (${t.nome}) ${t.direcao.toUpperCase()} DO ESPERADO — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`
-            : `:warning: *APONTAMENTO EM LOTE — ${itens.length} OP(s)*  (responsável: *${grupoSel.setor}*${mencao ? ` — ${mencao}` : ''})`;
-          const contexto = t
-            ? `Faixa esperada do Estágio ${t.estagio} (${t.nome}): *${t.faixa || '—'}*.`
-            : grupoSel.label;
-          const intro = t
-            ? `As OPs abaixo ficaram com o tempo *${t.direcao}* do esperado (o tempo varia por lote):`
-            : 'As OPs abaixo apresentaram o mesmo apontamento (o valor varia por lote):';
-          const texto = [
-            cabecalho,
-            contexto,
-            intro,
-            linhas.join('\n'),
-            ...(grupoSel.recomendacao ? [`*Ação:* ${grupoSel.recomendacao}`] : []),
-          ].join('\n\n');
-          const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto, canal }) });
+          const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto: preview, canal }) });
           if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error((e.error || `HTTP ${resp.status}`)); }
           await registrarLog(perfil, 'notificar_slack_pacote', 'analise', 'pacote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou apontamento em pacote ao Slack (${grupoSel.setor}) — ${itens.length} OP(s): ${grupoSel.label}`);
-          setResultado({ total: itens.length, setor: grupoSel.setor, mencoes: mencaoIds.length });
+          setResultado({ total: itens.length, setor: grupoSel.setor, mencoes: mencaoNomes.length });
           toast.success(`Pacote enviado ao canal do ${grupoSel.setor} — ${itens.length} OP(s).`);
         } catch (e) { toast.error('Falha ao enviar: ' + (e?.message || e)); }
         setEnviando(false);
@@ -11489,7 +11698,7 @@ ${parecer.parecer_tecnico ? `
 
             {!carregando && grupos.length === 0 && <div className="text-sm text-muted-foreground">Nenhum problema com 2+ OPs no período. Aumente o período e atualize.</div>}
 
-            {grupos.length > 0 && (
+            {grupos.length > 0 && !preview && (
               <div>
                 <Label className="text-xs">Problema (agrupado)</Label>
                 <div className="max-h-40 overflow-auto border rounded-lg divide-y mt-1">
@@ -11504,7 +11713,7 @@ ${parecer.parecer_tecnico ? `
               </div>
             )}
 
-            {grupoSel && (
+            {grupoSel && !preview && (
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <Label className="text-xs">OPs afetadas ({selCount}/{grupoSel.itens.length} marcadas) — canal: {grupoSel.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</Label>
@@ -11533,13 +11742,31 @@ ${parecer.parecer_tecnico ? `
               </div>
             )}
 
+            {/* Pré-visualização editável da mensagem exata que vai ao canal */}
+            {preview != null && !resultado && (
+              <div>
+                <Label className="text-xs">Mensagem que será enviada ao canal <strong>{grupoSel?.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</strong> (edite à vontade)</Label>
+                <Textarea rows={12} value={preview} onChange={(e) => setPreview(e.target.value)} className="mt-1 font-mono text-xs" />
+                <div className="text-[11px] text-muted-foreground mt-1">
+                  Formatação do Slack: <code>*negrito*</code>, <code>•</code> para tópicos. As marcações aparecem como <code>&lt;@ID&gt;</code> aqui e viram menção real no Slack{mencaoNomes.length ? ` (${mencaoNomes.join(', ')})` : ''}. Apagar um <code>&lt;@ID&gt;</code> remove a marcação daquela pessoa.
+                </div>
+              </div>
+            )}
+
             {resultado && (
               <div className="text-sm rounded-md border p-3 bg-muted/30">Pacote enviado ao canal do <strong>{resultado.setor}</strong> com {resultado.total} OP(s){resultado.mencoes ? `, marcando ${resultado.mencoes} operador(es)` : ''}.</div>
             )}
 
             <div className="flex justify-end gap-2 pt-2 border-t">
-              <Button variant="outline" onClick={() => onClose()} disabled={enviando}>{resultado ? 'Fechar' : 'Cancelar'}</Button>
-              {!resultado && <Button onClick={enviar} disabled={enviando || !grupoSel || selCount === 0}>{enviando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Enviando…</> : <><Icon name="bell" className="h-4 w-4" />Enviar pacote ({selCount})</>}</Button>}
+              {resultado ? (
+                <Button variant="outline" onClick={() => onClose()}>Fechar</Button>
+              ) : preview != null ? (<>
+                <Button variant="outline" onClick={() => setPreview(null)} disabled={enviando}>Voltar</Button>
+                <Button onClick={enviar} disabled={enviando || !preview.trim()}>{enviando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Enviando…</> : <><Icon name="bell" className="h-4 w-4" />Enviar ao Slack</>}</Button>
+              </>) : (<>
+                <Button variant="outline" onClick={() => onClose()}>Cancelar</Button>
+                <Button onClick={gerarPreview} disabled={!grupoSel || selCount === 0}><Icon name="search" className="h-4 w-4" />Pré-visualizar ({selCount})</Button>
+              </>)}
             </div>
           </div>
         </Modal>
@@ -12432,6 +12659,9 @@ ${parecer.parecer_tecnico ? `
       const [filtroModelo, setFiltroModelo] = useState('todos');
       const [filtroOrigem, setFiltroOrigem] = useState('todos');     // 'todos' | 'agente' | 'manual'
       const [filtroStatus, setFiltroStatus] = useState('todos'); // 'todos' | 'conforme' | 'corrigido' | 'nao_conforme'
+      // NF de venda vinculada por número de série (rastreabilidade) + filtro "sem NF"
+      const [nfsVenda, setNfsVenda] = useState([]);
+      const [filtroSemNf, setFiltroSemNf] = useState(false);
       // Ordenação clicável nas colunas — decisão 29/06/2026
       const [sort, setSort] = useState({ campo: 'data', dir: 'desc' });
       const toggleSort = (campo) => setSort((s) => s.campo === campo
@@ -12443,10 +12673,37 @@ ${parecer.parecer_tecnico ? `
           setLoading(true);
           const { data } = await supabase.from('analises').select('*').order('created_at', { ascending: false });
           setAnalises(data || []);
+          // NFs de venda já vinculadas (para a coluna "NF de venda" e o filtro).
+          // Paginado: o Supabase corta em 1000 linhas por consulta.
+          try {
+            let de = 0, todas = [];
+            for (;;) {
+              const { data: nv, error } = await supabase.from('nfs_venda')
+                .select('numero_serie, numero_nf, serie_nf, data_emissao, cliente_nome')
+                .order('numero_serie', { ascending: true })
+                .range(de, de + 999);
+              if (error) throw error;
+              todas = todas.concat(nv || []);
+              if (!nv || nv.length < 1000) break;
+              de += 1000;
+            }
+            setNfsVenda(todas);
+          } catch (e) { setNfsVenda([]); }
           setLoading(false);
         };
         load();
       }, [reloadKey]);
+
+      // Índice série → NF(s). Uma série pode aparecer em mais de uma nota.
+      const nfPorSerie = useMemo(() => {
+        const m = new Map();
+        for (const n of nfsVenda) {
+          if (!n.numero_serie) continue;
+          if (!m.has(n.numero_serie)) m.set(n.numero_serie, []);
+          m.get(n.numero_serie).push(n);
+        }
+        return m;
+      }, [nfsVenda]);
 
       // Filtro do histórico: apenas a análise MAIS RECENTE por OP/série.
       // Análises originais que foram corrigidas (têm re-análises filhas) são
@@ -12568,8 +12825,16 @@ ${parecer.parecer_tecnico ? `
           unicas = unicas.filter((a) => a.status === 'conforme' && getCorrecaoInfo(a, analises).iteracoes <= 1);
         } else if (filtroStatus === 'corrigido') {
           unicas = unicas.filter((a) => a.status === 'conforme_corrigido' || getCorrecaoInfo(a, analises).iteracoes > 1);
+        } else if (filtroStatus === 'ressalva') {
+          unicas = unicas.filter((a) => a.status === 'ressalva');
         } else if (filtroStatus === 'nao_conforme') {
           unicas = unicas.filter((a) => a.status === 'nao_conforme');
+        } else if (filtroStatus === 'em_aberto') {
+          // Atalho para a fila de trabalho: tudo que ainda precisa de correção.
+          unicas = unicas.filter((a) => a.status === 'nao_conforme' || a.status === 'ressalva');
+        }
+        if (filtroSemNf) {
+          unicas = unicas.filter((a) => a.numero_serie && !nfPorSerie.has(a.numero_serie));
         }
         if (!filter) return unicas;
         const q = filter.toLowerCase();
@@ -12578,7 +12843,7 @@ ${parecer.parecer_tecnico ? `
           (a.numero_serie || '').toLowerCase().includes(q) ||
           (a.modelo || '').toLowerCase().includes(q)
         );
-      }, [analises, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, sort]);
+      }, [analises, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, nfPorSerie, sort]);
 
       // Contador de pacotes pendentes (apenas análises do agente, com período aplicado)
       const totalPendentes = useMemo(() => {
@@ -12737,6 +13002,98 @@ ${parecer.parecer_tecnico ? `
         }
       };
 
+      /* ------------------------------------------------------------------
+         Exportar OPs EM ABERTO (não conforme + conforme com ressalvas).
+         Diferente do "Exportar Histórico": aqui a linha é o APONTAMENTO, não
+         a análise — uma OP com três pendências rende três linhas. Traz o erro
+         e quem tem que corrigir, para virar lista de cobrança.
+         Operador responsável: o executor do estágio do apontamento; quando o
+         apontamento não tem estágio próprio (cronologia/horário a nível de
+         OP), usa quem fez a Conciliação (Estágio 60) — é ele quem regulariza.
+         ------------------------------------------------------------------ */
+      const exportarEmAbertoXlsx = async () => {
+        if (!window.ExcelJS) { toast.error('ExcelJS não carregou. Recarregue a página.'); return; }
+        const EM_ABERTO = new Set(['nao_conforme', 'ressalva']);
+        const abertas = (filtered || []).filter((a) => EM_ABERTO.has(a.status));
+        if (!abertas.length) { toast.error('Nenhuma OP em aberto na lista atual. Confira os filtros de status e período.'); return; }
+        try {
+          const wb = new window.ExcelJS.Workbook();
+          const ws = wb.addWorksheet('OPs em aberto');
+          ws.columns = [
+            { header: 'Data', key: 'data', width: 12 },
+            { header: 'Dias em aberto', key: 'dias', width: 14 },
+            { header: 'Nº OP', key: 'op', width: 10 },
+            { header: 'Nº Série', key: 'serie', width: 22 },
+            { header: 'Equipamento', key: 'equip', width: 30 },
+            { header: 'Modelo', key: 'modelo', width: 18 },
+            { header: 'Status', key: 'status', width: 16 },
+            { header: 'Gravidade', key: 'sev', width: 14 },
+            { header: 'Documento', key: 'doc', width: 24 },
+            { header: 'Apontamento (erro)', key: 'erro', width: 80 },
+            { header: 'Setor responsável', key: 'setor', width: 16 },
+            { header: 'Estágio', key: 'estagio', width: 9 },
+            { header: 'Operador pendente', key: 'operador', width: 24 },
+            { header: 'Ação recomendada', key: 'acao', width: 60 },
+            { header: 'NF de venda', key: 'nf', width: 14 },
+          ];
+          const h = ws.getRow(1);
+          h.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+          h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3A5C' } };
+          ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+          let linhas = 0;
+          for (const a of abertas) {
+            const pc = a.parecer_completo || {};
+            const crono = pc.cronologia || [];
+            const aps = (pc.apontamentos || []).filter((ap) => EM_ABERTO.has(ap.severidade) || ap.severidade === 'nao_conforme' || ap.severidade === 'ressalva');
+            const dias = a.created_at ? Math.floor((Date.now() - new Date(a.created_at).getTime()) / 86400000) : '';
+            const nfs = nfPorSerie.get(a.numero_serie) || [];
+            const equip = pc.produto?.familia || pc.produto?.equipamento || a.nome_produto || '';
+            const base = {
+              data: formatDate(a.created_at),
+              dias,
+              op: a.numero_op || '',
+              serie: a.numero_serie || '',
+              equip,
+              modelo: a.modelo || pc.produto?.modelo || '',
+              status: a.status === 'ressalva' ? 'Conforme c/ ressalvas' : 'Não conforme',
+              nf: nfs.length ? nfs[0].numero_nf : '',
+            };
+            if (!aps.length) {
+              ws.addRow({ ...base, erro: '(sem apontamento detalhado no parecer)' });
+              linhas++;
+              continue;
+            }
+            for (const ap of aps) {
+              const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
+              const c = crono.find((x) => x.estagio_numero === estOper);
+              ws.addRow({
+                ...base,
+                sev: ap.severidade === 'ressalva' ? 'Ressalva' : 'Não conforme',
+                doc: ap.documento_afetado || '',
+                erro: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
+                setor: ap.setor_responsavel || '',
+                estagio: ap.estagio_responsavel != null ? ap.estagio_responsavel : (c ? estOper : ''),
+                operador: c ? (c.operador_nome || '') : '',
+                acao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim(),
+              });
+              linhas++;
+            }
+          }
+          ws.autoFilter = { from: 'A1', to: 'O1' };
+          const buf = await wb.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+          const url = URL.createObjectURL(blob);
+          const el = document.createElement('a');
+          el.href = url; el.download = `OPs_em_aberto_${new Date().toISOString().slice(0, 10)}.xlsx`;
+          document.body.appendChild(el); el.click();
+          setTimeout(() => { document.body.removeChild(el); URL.revokeObjectURL(url); }, 500);
+          toast.success(`${abertas.length} OP(s) em aberto · ${linhas} apontamento(s) exportado(s).`);
+        } catch (e) {
+          toast.error('Erro ao exportar: ' + (e?.message || e));
+        }
+      };
+
       // Backup completo do histórico em XLSX — decisão 01/07/2026 (Maria Luiza):
       // substitui o antigo "Limpar histórico" que era arriscado demais.
       // Uso: QG deve rodar todo dia 1 do mês e enviar por e-mail para
@@ -12784,8 +13141,31 @@ ${parecer.parecer_tecnico ? `
       };
 
       if (viewing) {
+        // Navegação entre análises percorrendo a MESMA lista já filtrada e
+        // ordenada da tela — os filtros ativos continuam valendo. Só entram as
+        // que têm parecer (as sem parecer não abrem).
+        const navegaveis = filtered.filter((a) => a.parecer_completo);
+        const idx = navegaveis.findIndex((a) => a.id === viewing.id);
+        const irPara = (i) => {
+          const alvo = navegaveis[i];
+          if (!alvo) return;
+          setViewing(alvo);
+          try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
+        };
+        const nav = idx >= 0 ? {
+          posicao: idx + 1,
+          total: navegaveis.length,
+          temAnterior: idx > 0,
+          temProxima: idx < navegaveis.length - 1,
+          opAnterior: idx > 0 ? navegaveis[idx - 1].numero_op : null,
+          opProxima: idx < navegaveis.length - 1 ? navegaveis[idx + 1].numero_op : null,
+          onAnterior: () => irPara(idx - 1),
+          onProxima: () => irPara(idx + 1),
+        } : null;
         return (
           <ParecerView
+            key={viewing.id}
+            nav={nav}
             parecer={viewing.parecer_completo}
             analiseId={viewing.id}
             dataAnalise={viewing.created_at}
@@ -12844,41 +13224,54 @@ ${parecer.parecer_tecnico ? `
             title="Histórico de análises"
             description="Consulta de todas as conciliações já executadas pelo agente."
             actions={
-              <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
                 {can('historico_correcao') && (
                 <Button variant="default" onClick={() => setNovaManualOpen(true)} title="Adicionar uma análise manual (sem planilha)">
                   <Icon name="plus" />
                   Nova análise manual
                 </Button>
                 )}
-                {can('historico_importar') && (
-                <Button variant="outline" onClick={() => setImportOpen(true)} title="Importar várias análises manuais por planilha XLSX">
-                  <Icon name="upload" />
-                  Importar planilha
-                </Button>
-                )}
-                {can('historico_correcao') && (
-                <Button variant="outline" onClick={() => setReanalisarOpOpen(true)} title="Subir OP(s) corrigida(s) e reanalisar (individual ou em massa) — o pacote volta a ficar pendente de download">
-                  <Icon name="upload" />
-                  Reanalisar OP corrigida
-                </Button>
-                )}
-                <Button variant="outline" onClick={() => setPacoteProblemaOpen(true)} title="Enviar ao Slack, em uma mensagem só, todas as OPs com o mesmo problema (texto resumido)">
-                  <Icon name="bell" />
-                  Enviar problema em pacote
-                </Button>
-                <Button variant="outline" onClick={() => setAuditOpen(true)} title="Selecionar várias análises e gerar pacote consolidado para auditoria">
-                  <Icon name="download" />
-                  Exportar p/ auditoria
-                </Button>
-                <Button variant="outline" onClick={() => exportarHistoricoXlsx()} title="Exportar tabela atual do histórico para Excel">
-                  <Icon name="download" />
-                  Exportar XLSX
-                </Button>
-                <Button variant="outline" onClick={handleBackupHistorico} title="Gerar backup completo do histórico em XLSX (rotina mensal QG)">
-                  <Icon name="download" />
-                  Backup mensal
-                </Button>
+                <MenuAcoes
+                  rotulo="Ações"
+                  icon="settings"
+                  itens={[
+                    {
+                      label: 'Importar planilha', icon: 'upload', oculto: !can('historico_importar'),
+                      descricao: 'Várias análises manuais de uma vez (XLSX)',
+                      onClick: () => setImportOpen(true),
+                    },
+                    {
+                      label: 'Reanalisar OP corrigida', icon: 'upload', oculto: !can('historico_correcao'),
+                      descricao: 'Sobe a OP corrigida e refaz a análise (individual ou em massa)',
+                      onClick: () => setReanalisarOpOpen(true),
+                    },
+                    {
+                      label: 'Enviar problema em pacote', icon: 'bell', separadorAntes: true,
+                      descricao: 'Uma mensagem no Slack para todas as OPs com o mesmo problema',
+                      onClick: () => setPacoteProblemaOpen(true),
+                    },
+                    {
+                      label: 'Exportar OPs em aberto', icon: 'download', separadorAntes: true,
+                      descricao: 'Uma linha por pendência, com o erro e quem precisa corrigir',
+                      onClick: () => exportarEmAbertoXlsx(),
+                    },
+                    {
+                      label: 'Exportar Histórico', icon: 'download',
+                      descricao: 'A tabela como está na tela, em Excel',
+                      onClick: () => exportarHistoricoXlsx(),
+                    },
+                    {
+                      label: 'Exportar p/ auditoria', icon: 'download',
+                      descricao: 'Escolher análises e gerar pacote consolidado',
+                      onClick: () => setAuditOpen(true),
+                    },
+                    {
+                      label: 'Backup mensal', icon: 'download', separadorAntes: true,
+                      descricao: 'Histórico completo do banco (rotina do dia 1º)',
+                      onClick: handleBackupHistorico,
+                    },
+                  ]}
+                />
               </div>
             }
           />
@@ -13000,8 +13393,10 @@ ${parecer.parecer_tecnico ? `
                     title="Filtrar por status da análise"
                   >
                     <option value="todos">Todos</option>
+                    <option value="em_aberto">Em aberto (NC + ressalva)</option>
                     <option value="conforme">Conforme</option>
                     <option value="corrigido">Conforme corrigido</option>
+                    <option value="ressalva">Conforme com ressalvas</option>
                     <option value="nao_conforme">Não conforme</option>
                   </select>
                   <button
@@ -13018,6 +13413,18 @@ ${parecer.parecer_tecnico ? `
                     {totalPendentes > 0 && (
                       <span className={cn('ml-1 px-1.5 rounded-full text-[10px] font-bold', filtroPendentes ? 'bg-white/25' : 'bg-orange-100 text-orange-800')}>{totalPendentes}</span>
                     )}
+                  </button>
+                  <button
+                    onClick={() => setFiltroSemNf((v) => !v)}
+                    className={cn(
+                      'inline-flex items-center gap-1 h-8 px-2 rounded-md border text-sm transition-colors',
+                      filtroSemNf ? 'border-transparent text-white' : 'border-input bg-background hover:bg-muted/40'
+                    )}
+                    style={filtroSemNf ? { backgroundColor: 'hsl(215 45% 40%)' } : undefined}
+                    title="Mostrar apenas lotes cuja série ainda não foi encontrada em nenhuma NF de venda"
+                  >
+                    <Icon name="file" className="h-3 w-3" />
+                    Sem NF de venda
                   </button>
                   {can('historico_baixar') && (
                     <Button variant="outline" size="sm" className="h-8" onClick={iniciarBatchDownload} disabled={batchAtivo || pendentesConformes.length === 0} title="Gera e salva na pasta da rede os pacotes de todos os lotes conformes ainda pendentes de download">
@@ -13069,6 +13476,7 @@ ${parecer.parecer_tecnico ? `
                             </th>
                           );
                         })}
+                        <th className="px-3 py-2 font-semibold bg-card">NF de venda</th>
                         <th className="px-3 py-2 font-semibold w-32 bg-card">Ações</th>
                       </tr>
                     </thead>
@@ -13106,6 +13514,27 @@ ${parecer.parecer_tecnico ? `
                                 </span>
                               )}
                             </div>
+                          </td>
+                          <td className="px-3 py-3 text-xs">
+                            {(() => {
+                              const lista = nfPorSerie.get(a.numero_serie) || [];
+                              if (!lista.length) return <span className="text-muted-foreground">—</span>;
+                              const n = lista[0];
+                              return (
+                                <span
+                                  className="font-mono"
+                                  title={[
+                                    `NF ${n.numero_nf}${n.serie_nf ? '/' + n.serie_nf : ''}`,
+                                    n.data_emissao ? `Emissão: ${formatDate(n.data_emissao)}` : '',
+                                    n.cliente_nome ? `Cliente: ${n.cliente_nome}` : '',
+                                    lista.length > 1 ? `+${lista.length - 1} outra(s) nota(s) com esta série` : '',
+                                  ].filter(Boolean).join('\n')}
+                                >
+                                  {n.numero_nf}
+                                  {lista.length > 1 && <span className="text-muted-foreground"> +{lista.length - 1}</span>}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-1">
@@ -15146,6 +15575,813 @@ ${parecer.parecer_tecnico ? `
     /* ====================================================================
        CONFIGURAÇÕES — pasta de destino do pacote e preferências
        ==================================================================== */
+    /* ====================================================================
+       NFs DE VENDA — rastreabilidade número de série × nota fiscal
+       --------------------------------------------------------------------
+       Antes da plataforma, as pastas eram renomeadas com o número da NF de
+       venda para dar rastreabilidade. Aqui isso volta de forma automática:
+       o serviço local varre a pasta de rede das NFs (uma vez por mês, ou
+       sob demanda), lê o número de série dentro do DANFE e grava em
+       public.nfs_venda. Esta tela mostra:
+         • OPs analisadas que ainda NÃO têm NF de venda vinculada
+         • séries faturadas que NÃO têm análise no sistema (sinal de alerta)
+         • busca por série, OP, NF ou cliente
+         • arquivos que não foi possível ler (PDF escaneado etc.)
+       ==================================================================== */
+    /* --------------------------------------------------------------------
+       Leitura de um DANFE no navegador — mesma lógica do serviço, usada no
+       vínculo pontual (quando uma nota específica escapou da varredura).
+       Mantida em paralelo de propósito: aqui roda no cliente, sobre um PDF
+       que a pessoa anexa, sem depender de a nota estar na pasta da rede.
+       -------------------------------------------------------------------- */
+    function lerDanfeNoNavegador(texto, prefixos) {
+      const t = String(texto || '').replace(/\r/g, '');
+      const r = { cfops: [], series: [] };
+      const jan = (re, tam) => {
+        const m = t.match(re);
+        if (!m) return '';
+        return t.slice(m.index + m[0].length, m.index + m[0].length + (tam || 200));
+      };
+      let m = t.match(/N[ÚU]MERO\s*\n?\s*(\d{1,9})/i);
+      if (m) r.numero_nf = m[1];
+      m = t.match(/S[ÉE]RIE\s*\n?\s*(\d{1,3})\b/i);
+      if (m) r.serie_nf = m[1];
+      m = t.match(/((?:\d{4}[\s.]?){11})/);
+      if (m && m[1].replace(/\D/g, '').length === 44) r.chave_acesso = m[1].replace(/\D/g, '');
+      m = jan(/DATA\s+EMISS[ÃA]O/i, 60).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+      if (m) r.data_emissao = `${m[3]}-${m[2]}-${m[1]}`;
+      m = jan(/NATUREZA DA OPERA[ÇC][ÃA]O/i, 200).match(/\n?\s*([A-Za-zÀ-ÿ][^\n]{4,80})/);
+      if (m) r.natureza = m[1].replace(/\s*\d{8,}.*$/, '').trim();
+      const jDest = jan(/NOME \/ RAZ[ÃA]O SOCIAL/i, 300);
+      m = jDest.match(/\n?\s*([A-Z0-9][^\n]{4,120})/);
+      if (m) r.cliente_nome = m[1].replace(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/, '').replace(/\d{2}\/\d{2}\/\d{4}/, '').trim();
+      for (const mm of jDest.matchAll(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/g)) {
+        if (mm[1] !== '05.209.279/0001-31') { r.cliente_cnpj = mm[1]; break; }
+      }
+      m = jan(/VALOR TOTAL DA NOTA/i, 120).match(/R?\$?\s?([\d.]+,\d{2})/);
+      if (m) r.valor_total = Number(m[1].replace(/\./g, '').replace(',', '.'));
+      const cfops = new Set();
+      for (const mm of t.matchAll(/\b([123567]\d{3})\s*\n?\s*(?:UN|PC|PÇ|CX|UND|KG|MT|LT|CJ)\b/gi)) cfops.add(mm[1]);
+      r.cfops = [...cfops];
+      const pref = [...new Set((prefixos || []).filter(Boolean))]
+        .sort((a, b) => b.length - a.length)
+        .map((p) => String(p).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      if (pref.length) {
+        const reSerie = new RegExp(`\\b(${pref.join('|')})[-\\s]{0,3}(\\d{5})[-\\s]{0,3}(\\d{1,3})\\b`, 'gi');
+        const vistos = new Set();
+        for (const mm of t.matchAll(reSerie)) {
+          const s = `${mm[1].toUpperCase()}-${mm[2]}-${mm[3]}`;
+          if (!vistos.has(s)) { vistos.add(s); r.series.push(s); }
+        }
+      }
+      const ehVenda = /\bvenda\b/i.test(r.natureza || '') || r.cfops.some((c) => /^[567]10\d$/.test(c));
+      r.tipo_movimento = ehVenda ? 'venda' : 'outra_saida';
+      return r;
+    }
+
+    /* --------------------------------------------------------------------
+       Vínculo pontual de NF a uma OP analisada. Dois caminhos:
+         1) anexar o PDF da nota → lê sozinho e só confirma
+         2) digitar os dados (para nota escaneada, sem texto extraível)
+       Evita reprocessar a pasta inteira por causa de uma nota.
+       -------------------------------------------------------------------- */
+    function VincularNfModal({ open, onClose, analise, prefixos, perfil, onDone }) {
+      const toast = useToast();
+      const [lendo, setLendo] = useState(false);
+      const [arquivo, setArquivo] = useState(null);
+      const [seriesLidas, setSeriesLidas] = useState([]);
+      const [salvando, setSalvando] = useState(false);
+      const [form, setForm] = useState({
+        numero_nf: '', serie_nf: '', data_emissao: '', cliente_nome: '', cliente_cnpj: '',
+        natureza: '', tipo_movimento: 'venda', chave_acesso: '', valor_total: '',
+      });
+
+      useEffect(() => {
+        if (!open) return;
+        setArquivo(null); setSeriesLidas([]); setLendo(false); setSalvando(false);
+        setForm({ numero_nf: '', serie_nf: '', data_emissao: '', cliente_nome: '', cliente_cnpj: '', natureza: '', tipo_movimento: 'venda', chave_acesso: '', valor_total: '' });
+      }, [open, analise?.id]);
+
+      const up = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+      const lerArquivo = async (file) => {
+        if (!file) return;
+        setArquivo(file); setLendo(true);
+        try {
+          const texto = await extractTextFromFile(file);
+          if (!texto || texto.replace(/\s+/g, '').length < 200) {
+            toast.error('Não foi possível extrair texto deste PDF (provavelmente escaneado). Preencha os campos manualmente.');
+            setSeriesLidas([]);
+            return;
+          }
+          const r = lerDanfeNoNavegador(texto, prefixos);
+          setSeriesLidas(r.series || []);
+          setForm({
+            numero_nf: r.numero_nf || '', serie_nf: r.serie_nf || '', data_emissao: r.data_emissao || '',
+            cliente_nome: r.cliente_nome || '', cliente_cnpj: r.cliente_cnpj || '', natureza: r.natureza || '',
+            tipo_movimento: r.tipo_movimento || 'venda', chave_acesso: r.chave_acesso || '',
+            valor_total: r.valor_total != null ? String(r.valor_total) : '',
+          });
+          const achouSerie = (r.series || []).includes(analise?.numero_serie);
+          if (achouSerie) toast.success(`Nota lida: NF ${r.numero_nf || '?'} — a série ${analise.numero_serie} está nesta nota.`);
+          else toast.error(`Nota lida (NF ${r.numero_nf || '?'}), mas a série ${analise?.numero_serie} NÃO foi encontrada nela. Confira se é a nota certa antes de salvar.`);
+        } catch (e) {
+          toast.error('Erro ao ler o PDF: ' + (e?.message || e));
+        } finally { setLendo(false); }
+      };
+
+      const salvar = async () => {
+        if (!form.numero_nf.trim()) { toast.error('Informe o número da NF.'); return; }
+        setSalvando(true);
+        try {
+          const linha = {
+            numero_nf: form.numero_nf.trim(),
+            serie_nf: (form.serie_nf || '').trim(),
+            chave_acesso: form.chave_acesso.trim() || null,
+            data_emissao: form.data_emissao || null,
+            natureza: form.natureza.trim() || null,
+            cfops: null,
+            cliente_nome: form.cliente_nome.trim() || null,
+            cliente_cnpj: form.cliente_cnpj.trim() || null,
+            valor_total: form.valor_total ? Number(String(form.valor_total).replace(',', '.')) : null,
+            numero_serie: analise.numero_serie,
+            codigo_produto: null,
+            modelo: analise.modelo || null,
+            tipo_movimento: form.tipo_movimento || 'venda',
+            arquivo_nome: arquivo ? arquivo.name : 'vínculo manual',
+            arquivo_path: null,
+            arquivo_mtime: null,
+            tem_analise: true,
+            detectada_por: 'manual:' + (perfil?.nome_completo || perfil?.email || 'usuário'),
+          };
+          const { error } = await supabase.from('nfs_venda')
+            .upsert([linha], { onConflict: 'numero_nf,serie_nf,numero_serie' });
+          if (error) throw error;
+          await registrarLog(perfil, 'vincular_nf', 'nfs_venda', `OP ${analise.numero_op} · ${analise.numero_serie}`,
+            `${perfil?.nome_completo || perfil?.email || 'Usuário'} vinculou manualmente a NF ${linha.numero_nf} à série ${analise.numero_serie}`);
+          toast.success(`NF ${linha.numero_nf} vinculada à série ${analise.numero_serie}.`);
+          onDone && onDone();
+          onClose();
+        } catch (e) {
+          toast.error('Erro ao salvar o vínculo: ' + (e?.message || e));
+        } finally { setSalvando(false); }
+      };
+
+      if (!open || !analise) return null;
+      return (
+        <Modal open={open} onClose={onClose} size="lg" title={`Vincular NF — OP ${analise.numero_op || '—'} · ${analise.numero_serie || '—'}`}>
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              Anexe o PDF da nota para o sistema ler sozinho, ou preencha os campos à mão se a nota for escaneada.
+              O vínculo é gravado para a série <strong className="font-mono">{analise.numero_serie}</strong> e fica marcado como manual no histórico.
+            </div>
+
+            <div>
+              <Label>PDF da nota (opcional)</Label>
+              <input
+                type="file" accept="application/pdf"
+                onChange={(e) => lerArquivo(e.target.files && e.target.files[0])}
+                className="mt-1 block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-primary file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-primary-foreground"
+              />
+              {lendo && <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1"><Icon name="loader" className="h-3 w-3 animate-spin" />Lendo a nota…</p>}
+              {!lendo && seriesLidas.length > 0 && (
+                <p className="text-xs mt-1">
+                  Séries encontradas na nota:{' '}
+                  {seriesLidas.map((s) => (
+                    <span key={s} className={cn('font-mono mr-1.5 px-1.5 py-0.5 rounded', s === analise.numero_serie ? 'bg-emerald-100 text-emerald-800 font-semibold' : 'bg-muted text-muted-foreground')}>{s}</span>
+                  ))}
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div><Label>Nº da NF *</Label><Input value={form.numero_nf} onChange={(e) => up('numero_nf', e.target.value)} placeholder="27907" /></div>
+              <div><Label>Série da nota</Label><Input value={form.serie_nf} onChange={(e) => up('serie_nf', e.target.value)} placeholder="1" /></div>
+              <div><Label>Emissão</Label><Input type="date" value={form.data_emissao} onChange={(e) => up('data_emissao', e.target.value)} /></div>
+              <div className="col-span-2"><Label>Cliente</Label><Input value={form.cliente_nome} onChange={(e) => up('cliente_nome', e.target.value)} /></div>
+              <div><Label>CNPJ do cliente</Label><Input value={form.cliente_cnpj} onChange={(e) => up('cliente_cnpj', e.target.value)} placeholder="00.000.000/0000-00" /></div>
+              <div className="col-span-2"><Label>Natureza da operação</Label><Input value={form.natureza} onChange={(e) => up('natureza', e.target.value)} placeholder="Venda de Producao do Estabelecimento" /></div>
+              <div>
+                <Label>Tipo de saída</Label>
+                <select value={form.tipo_movimento} onChange={(e) => up('tipo_movimento', e.target.value)} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm">
+                  <option value="venda">Venda</option>
+                  <option value="outra_saida">Outra saída (comodato, demonstração…)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 mt-6">
+            <Button variant="outline" onClick={onClose} disabled={salvando}>Cancelar</Button>
+            <Button onClick={salvar} disabled={salvando || lendo}>
+              {salvando ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Salvando…</>) : (<><Icon name="check" className="h-4 w-4" />Vincular NF</>)}
+            </Button>
+          </div>
+        </Modal>
+      );
+    }
+
+    /* --------------------------------------------------------------------
+       Linha do tempo de um número de série: todas as notas em que ele
+       apareceu, em ordem. É a história do equipamento — o que se perdia
+       quando as pastas deixaram de ser renomeadas com o número da nota.
+       -------------------------------------------------------------------- */
+    function HistoricoSerieModal({ open, onClose, analise, notas }) {
+      if (!open || !analise) return null;
+      const lista = [...(notas || [])].sort((a, b) => {
+        const da = String(a.data_emissao || ''), db = String(b.data_emissao || '');
+        if (da && db && da !== db) return da.localeCompare(db); // mais antiga primeiro
+        return String(a.numero_nf || '').localeCompare(String(b.numero_nf || ''));
+      });
+      return (
+        <Modal
+          open={open}
+          onClose={onClose}
+          size="lg"
+          title={`Rastreabilidade — ${analise.numero_serie}`}
+          description={`OP ${analise.numero_op || '—'} · ${analise.nome_produto || analise.modelo || ''} · análise de ${formatDate(analise.created_at)}`}
+        >
+          {!lista.length ? (
+            <div className="text-sm text-muted-foreground py-6 text-center">
+              Nenhuma nota encontrada para esta série. O equipamento pode não ter saído da fábrica ainda,
+              ou a nota não foi lida — nesse caso use "Vincular NF" na aba “OPs sem NF”.
+            </div>
+          ) : (
+            <ol className="relative border-l ml-2 pl-5 space-y-4">
+              {lista.map((n, i) => {
+                const ehVenda = n.tipo_movimento !== 'outra_saida';
+                return (
+                  <li key={n.id || i} className="relative">
+                    <span
+                      className="absolute -left-[27px] top-1 h-3 w-3 rounded-full border-2 border-card"
+                      style={{ backgroundColor: ehVenda ? 'hsl(150 60% 38%)' : 'hsl(35 85% 50%)' }}
+                    />
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="text-sm font-semibold">{n.data_emissao ? formatDate(n.data_emissao) : 'data não lida'}</span>
+                      <span
+                        className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                        style={ehVenda
+                          ? { backgroundColor: 'hsl(150 60% 92%)', color: 'hsl(150 60% 25%)' }
+                          : { backgroundColor: 'hsl(35 92% 90%)', color: 'hsl(28 80% 32%)' }}
+                      >
+                        {n.natureza || (ehVenda ? 'Venda' : 'Outra saída')}
+                      </span>
+                      <span className="text-xs text-muted-foreground font-mono">NF {n.numero_nf}{n.serie_nf ? `/${n.serie_nf}` : ''}</span>
+                    </div>
+                    <div className="text-sm mt-0.5">{n.cliente_nome || 'cliente não identificado'}
+                      {n.cliente_cnpj && <span className="text-muted-foreground text-xs"> · {n.cliente_cnpj}</span>}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">
+                      {n.valor_total != null && <>Valor da nota: {Number(n.valor_total).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} · </>}
+                      {String(n.detectada_por || '').startsWith('manual')
+                        ? `vínculo manual (${String(n.detectada_por).replace(/^manual:/, '')})`
+                        : 'lido pela varredura'}
+                      {n.arquivo_nome && <> · {n.arquivo_nome}</>}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+          <p className="text-[11px] text-muted-foreground mt-5 border-t pt-3">
+            Só aparecem notas de <strong>saída</strong>. Retornos (devolução, retorno de demonstração) são notas de
+            entrada e não entram na varredura hoje — então um equipamento que saiu em demonstração e voltou aparece
+            aqui apenas com a saída.
+          </p>
+        </Modal>
+      );
+    }
+
+    function NfsVendaPage() {
+      const toast = useToast();
+      const { perfil, isAdmin, can } = usePerm();
+      const podeVarrer = isAdmin || can('config_editar');
+      const [tab, setTab] = useState('pendentes');
+      const [nfs, setNfs] = useState([]);
+      const [analises, setAnalises] = useState([]);
+      const [falhas, setFalhas] = useState([]);
+      const [resumo, setResumo] = useState(null);
+      const [ultima, setUltima] = useState('');
+      const [carregando, setCarregando] = useState(true);
+      const [varrendo, setVarrendo] = useState(false);
+      const [progresso, setProgresso] = useState(null); // status vindo do serviço
+      const [busca, setBusca] = useState('');
+      const [reload, setReload] = useState(0);
+      // Idade mínima da análise na aba "OPs sem NF". Um lote analisado há poucos
+      // dias sem nota é normal (produção em estoque); o que merece investigação
+      // é o lote antigo que continua sem faturamento.
+      const [idadeMin, setIdadeMin] = useState(0); // em dias; 0 = todas
+      const [vincularAlvo, setVincularAlvo] = useState(null); // análise p/ vínculo pontual
+      const [serieDetalhe, setSerieDetalhe] = useState(null);  // análise p/ linha do tempo da série
+      const [prefixos, setPrefixos] = useState([]);            // codigo_referencia do catálogo
+
+      useRealtime('nfs_venda', () => setReload((r) => r + 1));
+
+      // O Supabase limita cada consulta a 1000 linhas. Como a tabela de NFs e a
+      // de análises passam disso, é obrigatório paginar — sem isso a tela lê só
+      // um pedaço e os vínculos novos não aparecem.
+      const buscarTudo = async (tabela, colunas, ordem) => {
+        const PAG = 1000;
+        let de = 0, out = [];
+        for (;;) {
+          let q = supabase.from(tabela).select(colunas);
+          if (ordem) q = q.order(ordem.campo, { ascending: !!ordem.asc });
+          const { data, error } = await q.range(de, de + PAG - 1);
+          if (error) throw error;
+          out = out.concat(data || []);
+          if (!data || data.length < PAG) break;
+          de += PAG;
+        }
+        return out;
+      };
+
+      useEffect(() => {
+        (async () => {
+          setCarregando(true);
+          try {
+            const [dNf, dAn, dFa, rCfg] = await Promise.all([
+              buscarTudo('nfs_venda', '*', { campo: 'numero_serie', asc: true }),
+              // (colunas completas: inclui natureza e tipo_movimento p/ a tela)
+              buscarTudo('analises', 'id, numero_op, numero_serie, modelo, nome_produto, status, created_at, analise_origem_id', { campo: 'created_at', asc: false }),
+              buscarTudo('nfs_venda_falhas', '*', { campo: 'arquivo_path', asc: true }),
+              supabase.from('config_app').select('chave, valor').in('chave', ['nf_ultima_varredura', 'nf_ultimo_resumo']),
+            ]);
+            setNfs(dNf);
+            setAnalises(dAn);
+            setFalhas(dFa);
+            // Prefixos de série do catálogo — usados na leitura do PDF anexado
+            try {
+              const { data: prods } = await supabase.from('produtos').select('codigo_referencia').eq('ativo', true);
+              setPrefixos([...new Set((prods || []).map((p) => String(p.codigo_referencia || '').trim()).filter(Boolean))]);
+            } catch (e) { setPrefixos([]); }
+            const map = Object.fromEntries((rCfg.data || []).map((r) => [r.chave, r.valor]));
+            setUltima(map.nf_ultima_varredura || '');
+            try { setResumo(map.nf_ultimo_resumo ? JSON.parse(map.nf_ultimo_resumo) : null); } catch (e) { setResumo(null); }
+          } catch (e) {
+            toast.error('Erro ao carregar as NFs de venda: ' + (e?.message || e));
+          } finally { setCarregando(false); }
+        })();
+      }, [reload]);
+
+      // Índice de NFs por número de série (uma série pode aparecer em mais de
+      // uma nota — reemissão, devolução seguida de nova venda).
+      const nfPorSerie = useMemo(() => {
+        const m = new Map();
+        for (const n of nfs) {
+          if (!n.numero_serie) continue;
+          if (!m.has(n.numero_serie)) m.set(n.numero_serie, []);
+          m.get(n.numero_serie).push(n);
+        }
+        return m;
+      }, [nfs]);
+
+      // Só a análise vigente de cada lote (descarta as que foram substituídas
+      // por reanálise/correção — mesma lógica usada no Histórico).
+      // A chave de lote é `numero_op|numero_serie`, a MESMA usada no Dashboard e
+      // no Histórico — para os números das três telas fecharem entre si.
+      const vigentesInfo = useMemo(() => {
+        const superadas = new Set(analises.map((a) => a.analise_origem_id).filter(Boolean));
+        const porLote = new Map();
+        let nSuperadas = 0;
+        for (const a of analises) {
+          if (superadas.has(a.id)) { nSuperadas++; continue; }
+          const k = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+          const atual = porLote.get(k);
+          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(k, a);
+        }
+        const vigentes = [...porLote.values()];
+        const semSerie = vigentes.filter((a) => !a.numero_serie).length;
+        return { vigentes, nSuperadas, semSerie, totalBanco: analises.length };
+      }, [analises]);
+      const analisesVigentes = vigentesInfo.vigentes;
+
+      // Regra (21/08/2026, Maria Luiza): a varredura é lida SEMPRE a partir do
+      // que já foi analisado. Cada análise vigente cai em uma de três situações:
+      //   • sem NF ...... a série não foi achada em nenhuma nota de venda
+      //   • vinculada ... a série foi achada E a análise está encerrada
+      //   • em aberto ... a série foi achada, mas a análise ainda é NC ou tem
+      //                   ressalva. Ao ser corrigida, migra sozinha p/ vinculada.
+      const EM_ABERTO = new Set(['nao_conforme', 'ressalva']);
+      const buckets = useMemo(() => {
+        const semNf = [], vinculadas = [], emAberto = [];
+        for (const a of analisesVigentes) {
+          if (!a.numero_serie) continue;
+          const lista = nfPorSerie.get(a.numero_serie);
+          if (!lista || !lista.length) { semNf.push({ a, nf: null }); continue; }
+          // Quando a série aparece em mais de uma nota, mostra a mais recente.
+          const nf = [...lista].sort((x, y) => String(y.data_emissao || '').localeCompare(String(x.data_emissao || '')))[0];
+          const item = { a, nf, outras: lista.length - 1 };
+          if (EM_ABERTO.has(a.status)) emAberto.push(item); else vinculadas.push(item);
+        }
+        return { semNf, vinculadas, emAberto };
+      }, [analisesVigentes, nfPorSerie]);
+      const { semNf, vinculadas, emAberto } = buckets;
+
+      // "Sem NF" filtrada por idade da análise (dias corridos desde a análise).
+      const diasDe = (iso) => {
+        if (!iso) return 0;
+        return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+      };
+      const semNfFiltrada = useMemo(
+        () => (idadeMin > 0 ? semNf.filter(({ a }) => diasDe(a.created_at) >= idadeMin) : semNf),
+        [semNf, idadeMin]
+      );
+      // Só entram na lista de pendências os arquivos que o serviço REALMENTE não
+      // conseguiu ler. Nota fora de venda e venda só de acessório ficam
+      // registradas apenas para não serem relidas — não são problema.
+      const ilegiveis = useMemo(() => falhas.filter((f) => f.motivo === 'sem_texto' || f.motivo === 'erro_leitura'), [falhas]);
+      const lidosSemVinculo = falhas.length - ilegiveis.length;
+
+      const filtrar = (lista, campos) => {
+        const q = busca.trim().toLowerCase();
+        if (!q) return lista;
+        return lista.filter((x) => campos.some((c) => String(x[c] || '').toLowerCase().includes(q)));
+      };
+      // Busca nos pares {análise, NF}: série, OP, equipamento, NF ou cliente.
+      const filtrarPares = (lista) => {
+        const q = busca.trim().toLowerCase();
+        if (!q) return lista;
+        return lista.filter(({ a, nf }) => [
+          a.numero_op, a.numero_serie, a.modelo, a.nome_produto,
+          nf?.numero_nf, nf?.cliente_nome, nf?.cliente_cnpj,
+        ].some((v) => String(v || '').toLowerCase().includes(q)));
+      };
+
+      const baseServico = () => (CONVERSAO_PDF_LOCAL || '').replace(/\/converter-pdf$/, '');
+
+      // A varredura roda em background no servidor; aqui só acompanhamos.
+      const consultarStatus = async () => {
+        try {
+          const resp = await fetch(baseServico() + '/varrer-nfs/status');
+          if (!resp.ok) return null;
+          const j = await resp.json();
+          return j.status || null;
+        } catch (e) { return null; }
+      };
+
+      // Ao abrir a tela, verifica se já existe varredura em andamento (pode ter
+      // sido disparada por outra pessoa, ou pelo agendamento mensal).
+      useEffect(() => {
+        if (!CONVERSAO_PDF_LOCAL) return;
+        (async () => {
+          const st = await consultarStatus();
+          if (st) { setProgresso(st); if (st.rodando) setVarrendo(true); }
+        })();
+      }, []);
+
+      // Enquanto estiver rodando, consulta o progresso a cada 3 segundos.
+      useEffect(() => {
+        if (!varrendo || !CONVERSAO_PDF_LOCAL) return;
+        let vivo = true;
+        const t = setInterval(async () => {
+          const st = await consultarStatus();
+          if (!vivo || !st) return;
+          setProgresso(st);
+          if (!st.rodando) {
+            setVarrendo(false);
+            const r = st.resumo || {};
+            if (st.erro) {
+              toast.error('A varredura terminou com erro: ' + st.erro);
+            } else {
+              toast.success(`Varredura concluída: ${r.arquivos_processados || 0} arquivo(s) lido(s) · ${r.nfs_venda || 0} NF(s) de venda · ${r.series_encontradas || 0} série(s) vinculada(s)${r.arquivos_ja_lidos ? ` · ${r.arquivos_ja_lidos} já lido(s) antes` : ''}.`);
+            }
+            setReload((k) => k + 1);
+          }
+        }, 3000);
+        return () => { vivo = false; clearInterval(t); };
+      }, [varrendo]);
+
+      const varrerAgora = async (forcar) => {
+        if (!CONVERSAO_PDF_LOCAL) { toast.error('Serviço local não configurado — a varredura roda no servidor.'); return; }
+        if (forcar && !window.confirm('Reprocessar TODOS os arquivos, inclusive os que já foram lidos? Só faz sentido depois de uma melhoria na leitura das notas — pode levar bastante tempo.')) return;
+        try {
+          const resp = await fetch(baseServico() + '/varrer-nfs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ origem: 'manual', forcar: forcar === true }),
+          });
+          const j = await resp.json().catch(() => ({}));
+          if (resp.status === 409) {
+            setProgresso(j.status || null); setVarrendo(true);
+            toast.error('Já existe uma varredura em andamento — acompanhe o progresso aqui.');
+            return;
+          }
+          if (!resp.ok) throw new Error(j.error || ('HTTP ' + resp.status));
+          setProgresso(j.status || null);
+          setVarrendo(true);
+          toast.success('Varredura iniciada no servidor. Pode fechar esta tela — ela continua rodando.');
+          registrarLog(perfil, 'varrer_nfs', 'config', 'nfs_venda', `${perfil?.nome_completo || perfil?.email || 'Usuário'} iniciou a varredura das NFs de venda${forcar ? ' (reprocessando tudo)' : ''}`);
+        } catch (e) {
+          toast.error('Não foi possível iniciar a varredura: ' + (e?.message || e));
+        }
+      };
+
+      const exportarCsv = () => {
+        const linhas = [['OP', 'Serie', 'Modelo', 'Status analise', 'Situacao NF', 'NF', 'Serie NF', 'Emissao', 'Cliente', 'CNPJ', 'Arquivo']];
+        for (const a of analisesVigentes) {
+          const lista = nfPorSerie.get(a.numero_serie) || [];
+          const situacao = !lista.length ? 'Sem NF' : (EM_ABERTO.has(a.status) ? 'Faturado com analise em aberto' : 'Vinculada');
+          if (!lista.length) {
+            linhas.push([a.numero_op || '', a.numero_serie || '', a.modelo || a.nome_produto || '', a.status || '', situacao, '', '', '', '', '', '']);
+            continue;
+          }
+          for (const n of lista) {
+            linhas.push([a.numero_op || '', a.numero_serie || '', a.modelo || a.nome_produto || '', a.status || '', situacao, n.numero_nf || '', n.serie_nf || '', n.data_emissao || '', n.cliente_nome || '', n.cliente_cnpj || '', n.arquivo_nome || '']);
+          }
+        }
+        const csv = linhas.map((l) => l.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+        const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+        const a = document.createElement('a');
+        a.href = url; a.download = `rastreabilidade_nf_venda_${new Date().toISOString().slice(0, 10)}.csv`;
+        a.click(); URL.revokeObjectURL(url);
+      };
+
+      const Kpi = ({ label, valor, tom, sub }) => (
+        <div className="rounded-lg border bg-card px-4 py-3">
+          <div className="text-2xl font-semibold" style={tom ? { color: tom } : undefined}>{valor}</div>
+          <div className="text-xs text-muted-foreground mt-0.5">{label}</div>
+          {sub && <div className="text-[11px] text-muted-foreground/80 mt-0.5">{sub}</div>}
+        </div>
+      );
+
+      return (
+        <div>
+          <PageHeader
+            title="NFs de venda"
+            description="Rastreabilidade do número de série até a nota fiscal. A leitura parte sempre das OPs já analisadas: o serviço varre a pasta de rede das NFs uma vez por mês e vincula pelo número de série. Vale qualquer nota de saída — venda, demonstração, comodato, consignação — com o tipo indicado em cada linha. Análises em aberto cujo equipamento já saiu migram sozinhas para 'Vinculadas' quando forem corrigidas."
+          />
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <Kpi label="Vinculadas (análise encerrada)" valor={vinculadas.length} tom={vinculadas.length ? 'hsl(150 60% 32%)' : undefined} sub={`${nfs.filter((n) => n.tipo_movimento === 'outra_saida').length} de saída sem venda`} />
+            <Kpi label={idadeMin > 0 ? `OPs sem NF há +${idadeMin} dias` : 'OPs analisadas sem NF'} valor={semNfFiltrada.length} tom={semNfFiltrada.length ? 'hsl(28 80% 45%)' : undefined} />
+            <Kpi label="Faturado com análise em aberto" valor={emAberto.length} tom={emAberto.length ? 'hsl(0 72% 48%)' : undefined} />
+            <Kpi label="Arquivos não lidos" valor={ilegiveis.length} />
+          </div>
+
+          {/* A conta aberta: os três primeiros quadros somam exatamente as
+              análises vigentes com número de série. Deixar explícito evita a
+              dúvida de "por que não bate com o total de análises". */}
+          <p className="text-xs text-muted-foreground mb-4">
+            <strong>{vinculadas.length}</strong> vinculadas + <strong>{semNf.length}</strong> sem NF + <strong>{emAberto.length}</strong> em aberto
+            {' = '}<strong>{vinculadas.length + semNf.length + emAberto.length}</strong> análises vigentes com nº de série.
+            {' '}Partindo de {vigentesInfo.totalBanco} registro(s) no banco, saem {vigentesInfo.nSuperadas} substituída(s) por reanálise/correção
+            {vigentesInfo.semSerie > 0 && <> e {vigentesInfo.semSerie} sem nº de série</>}
+            , sobrando {analisesVigentes.length} lote(s) único(s) — um lote por par OP + nº de série, valendo sempre a análise mais recente.
+            {' '}Esta tela cobre <strong>todo o histórico</strong>, sem filtro de período: se o número não bater com o Dashboard,
+            veja se lá o período está em "Tudo" (ele abre no ano corrente, então lotes de anos anteriores ficam de fora).
+          </p>
+
+          {/* Padding no próprio div: o CardContent tem "p-6 pt-0" fixo e uma
+              classe de padding passada por fora não substitui, só se soma —
+              o conteúdo ficava colado no topo com folga embaixo. */}
+          <Card className="mb-4">
+            <div className="p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={() => varrerAgora(false)} disabled={varrendo || !podeVarrer} title={podeVarrer ? 'Lê apenas os arquivos novos ou alterados desde a última varredura' : 'Sem permissão'}>
+                  {varrendo ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Varrendo a pasta…</>) : (<><Icon name="search" className="h-4 w-4" />Varrer agora</>)}
+                </Button>
+                {isAdmin && (
+                  <Button variant="outline" onClick={() => varrerAgora(true)} disabled={varrendo} title="Relê TODOS os arquivos, inclusive os já processados. Use só depois de melhorar a leitura das notas.">
+                    <Icon name="history" className="h-4 w-4" />Reprocessar tudo
+                  </Button>
+                )}
+                <Button variant="outline" onClick={exportarCsv}><Icon name="download" className="h-4 w-4" />Exportar CSV</Button>
+                <div className="ml-auto text-xs text-muted-foreground text-right">
+                  {ultima ? <>Última varredura: <strong>{formatDateTime(ultima)}</strong></> : 'Nenhuma varredura registrada ainda.'}
+                  {resumo && resumo.arquivos_na_pasta != null && <> · {resumo.arquivos_na_pasta} arquivo(s) na pasta</>}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Buscar por série, OP, equipamento, NF ou cliente…" className="w-full sm:w-80" />
+                <div className="flex items-center gap-2">
+                  <Label className="text-xs whitespace-nowrap shrink-0">Sem NF há mais de</Label>
+                  <select
+                    value={idadeMin}
+                    onChange={(e) => setIdadeMin(parseInt(e.target.value, 10) || 0)}
+                    className="h-10 rounded-lg border border-input bg-background px-3 text-sm shrink-0"
+                    title="Esconde da aba 'OPs sem NF' as análises recentes — produção que ainda pode estar em estoque"
+                  >
+                    <option value="0">qualquer tempo</option>
+                    <option value="30">30 dias</option>
+                    <option value="60">60 dias</option>
+                    <option value="90">90 dias</option>
+                    <option value="180">180 dias</option>
+                    <option value="365">1 ano</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Progresso da varredura em background — roda no servidor, dá para
+              sair desta tela sem interromper. */}
+          {varrendo && (
+            <Card className="mb-4">
+              <div className="p-4">
+                <div className="flex items-center gap-2 text-sm">
+                  <Icon name="loader" className="h-4 w-4 animate-spin text-accent" />
+                  {progresso && progresso.a_processar > 0 ? (
+                    <span>
+                      Lendo <strong>{progresso.processados || 0}</strong> de <strong>{progresso.a_processar}</strong> arquivo(s)
+                      {progresso.arquivos_ja_lidos > 0 && <span className="text-muted-foreground"> · {progresso.arquivos_ja_lidos} já lido(s) antes, ignorado(s)</span>}
+                      {progresso.series_encontradas > 0 && <span className="text-muted-foreground"> · {progresso.series_encontradas} série(s) encontrada(s)</span>}
+                    </span>
+                  ) : (
+                    <span>Listando os arquivos da pasta…</span>
+                  )}
+                </div>
+                {progresso && progresso.a_processar > 0 && (
+                  <div className="mt-2 h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.min(100, Math.round(((progresso.processados || 0) / progresso.a_processar) * 100))}%`,
+                        backgroundColor: 'hsl(var(--accent))',
+                      }}
+                    />
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground mt-2">
+                  A leitura roda no servidor. Você pode fechar esta tela ou navegar para outra parte do sistema — a varredura continua e o resultado aparece aqui depois.
+                </p>
+              </div>
+            </Card>
+          )}
+
+          <div className="flex items-center gap-1 border-b mb-4">
+            <TabButton active={tab === 'pendentes'} onClick={() => setTab('pendentes')} icon="alert">OPs sem NF ({semNfFiltrada.length}{idadeMin > 0 ? ` de ${semNf.length}` : ''})</TabButton>
+            <TabButton active={tab === 'vinculadas'} onClick={() => setTab('vinculadas')} icon="check">Vinculadas ({vinculadas.length})</TabButton>
+            <TabButton active={tab === 'orfas'} onClick={() => setTab('orfas')} icon="alertTriangle">Saiu com análise em aberto ({emAberto.length})</TabButton>
+            <TabButton active={tab === 'falhas'} onClick={() => setTab('falhas')} icon="clock">Não lidos ({ilegiveis.length})</TabButton>
+          </div>
+
+          {carregando ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-8"><Icon name="loader" className="h-4 w-4 animate-spin" />Carregando…</div>
+          ) : (
+            <Card>
+              <div className="overflow-x-auto">
+                {tab === 'pendentes' && (
+                  <table className="w-full text-sm">
+                    <thead className="bg-card border-b">
+                      <tr className="text-left text-xs uppercase text-muted-foreground">
+                        <th className="px-3 py-2 font-semibold">Data da análise</th>
+                        <th className="px-3 py-2 font-semibold">Dias sem NF</th>
+                        <th className="px-3 py-2 font-semibold">OP</th>
+                        <th className="px-3 py-2 font-semibold">Nº de Série</th>
+                        <th className="px-3 py-2 font-semibold">Equipamento</th>
+                        <th className="px-3 py-2 font-semibold">Status</th>
+                        <th className="px-3 py-2 font-semibold w-32"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtrarPares(semNfFiltrada).map(({ a }) => (
+                        <tr key={a.id} className="border-b hover:bg-muted/40">
+                          <td className="px-3 py-2.5">{formatDate(a.created_at)}</td>
+                          <td className="px-3 py-2.5 font-mono text-xs" style={diasDe(a.created_at) >= 90 ? { color: 'hsl(0 72% 48%)', fontWeight: 600 } : undefined}>
+                            {diasDe(a.created_at)}
+                          </td>
+                          <td className="px-3 py-2.5 font-mono text-xs">{a.numero_op || '—'}</td>
+                          <td className="px-3 py-2.5">
+                            <button
+                              onClick={() => setSerieDetalhe(a)}
+                              className="font-mono text-xs underline decoration-dotted underline-offset-2 hover:text-accent transition-colors"
+                              title="Ver a rastreabilidade desta série"
+                            >
+                              {a.numero_serie || '—'}
+                            </button>
+                          </td>
+                          <td className="px-3 py-2.5">{a.nome_produto || a.modelo || '—'}</td>
+                          <td className="px-3 py-2.5"><StatusBadge status={a.status === 'conforme_corrigido' ? 'conforme' : a.status} /></td>
+                          <td className="px-3 py-2.5">
+                            <Button variant="outline" size="sm" onClick={() => setVincularAlvo(a)} title="Anexar o PDF da nota ou informar os dados manualmente, sem revarrer a pasta">
+                              <Icon name="plus" className="h-3.5 w-3.5" />Vincular NF
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!semNfFiltrada.length && (
+                        <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-muted-foreground">
+                          {idadeMin > 0
+                            ? `Nenhuma OP analisada há mais de ${idadeMin} dias continua sem NF de venda.`
+                            : 'Todas as OPs analisadas já têm NF de venda vinculada.'}
+                        </td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                )}
+
+                {(tab === 'vinculadas' || tab === 'orfas') && (
+                  <table className="w-full text-sm">
+                    <thead className="bg-card border-b">
+                      <tr className="text-left text-xs uppercase text-muted-foreground">
+                        <th className="px-3 py-2 font-semibold">OP</th>
+                        <th className="px-3 py-2 font-semibold">Nº de Série</th>
+                        <th className="px-3 py-2 font-semibold">Equipamento</th>
+                        <th className="px-3 py-2 font-semibold">Status da análise</th>
+                        <th className="px-3 py-2 font-semibold">NF</th>
+                        <th className="px-3 py-2 font-semibold">Saída</th>
+                        <th className="px-3 py-2 font-semibold">Emissão</th>
+                        <th className="px-3 py-2 font-semibold">Cliente</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtrarPares(tab === 'orfas' ? emAberto : vinculadas).map(({ a, nf, outras }) => (
+                        <tr key={a.id} className="border-b hover:bg-muted/40">
+                          <td className="px-3 py-2.5 font-mono text-xs">{a.numero_op || '—'}</td>
+                          <td className="px-3 py-2.5">
+                            <button
+                              onClick={() => setSerieDetalhe(a)}
+                              className="font-mono text-xs underline decoration-dotted underline-offset-2 hover:text-accent transition-colors"
+                              title="Ver todas as notas em que esta série apareceu"
+                            >
+                              {a.numero_serie}
+                            </button>
+                          </td>
+                          <td className="px-3 py-2.5">{a.nome_produto || a.modelo || nf.modelo || '—'}</td>
+                          <td className="px-3 py-2.5"><StatusBadge status={a.status === 'conforme_corrigido' ? 'conforme' : a.status} /></td>
+                          <td className="px-3 py-2.5 font-mono text-xs" title={nf.arquivo_nome || ''}>
+                            {nf.numero_nf}{nf.serie_nf ? `/${nf.serie_nf}` : ''}
+                            {outras > 0 && (
+                              <button
+                                onClick={() => setSerieDetalhe(a)}
+                                className="ml-1 text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-accent"
+                                title={`Esta série aparece em ${outras + 1} notas — ver a linha do tempo`}
+                              >+{outras}</button>
+                            )}
+                          </td>
+                          <td className="px-3 py-2.5">
+                            {nf.tipo_movimento === 'outra_saida' ? (
+                              <span
+                                className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                style={{ backgroundColor: 'hsl(35 92% 90%)', color: 'hsl(28 80% 32%)' }}
+                                title={nf.natureza || 'Saída que não é venda'}
+                              >
+                                {nf.natureza || 'Outra saída'}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground" title={nf.natureza || 'Venda'}>Venda</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2.5">{nf.data_emissao ? formatDate(nf.data_emissao) : '—'}</td>
+                          <td className="px-3 py-2.5 text-xs">{nf.cliente_nome || '—'}{nf.cliente_cnpj ? <span className="text-muted-foreground"> · {nf.cliente_cnpj}</span> : null}</td>
+                        </tr>
+                      ))}
+                      {tab === 'orfas' && !emAberto.length && <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-muted-foreground">Nenhum equipamento com saída registrada e análise em aberto — todas as séries que saíram têm análise encerrada.</td></tr>}
+                      {tab === 'vinculadas' && !vinculadas.length && <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-muted-foreground">Nenhuma série vinculada ainda. Rode a varredura para buscar as notas.</td></tr>}
+                    </tbody>
+                  </table>
+                )}
+
+                {tab === 'falhas' && (
+                  <table className="w-full text-sm">
+                    <thead className="bg-card border-b">
+                      <tr className="text-left text-xs uppercase text-muted-foreground">
+                        <th className="px-3 py-2 font-semibold">Arquivo</th>
+                        <th className="px-3 py-2 font-semibold">Motivo</th>
+                        <th className="px-3 py-2 font-semibold">Detalhe</th>
+                        <th className="px-3 py-2 font-semibold">Detectado em</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtrar(ilegiveis, ['arquivo_nome', 'motivo', 'detalhe']).map((f) => (
+                        <tr key={f.id} className="border-b hover:bg-muted/40">
+                          <td className="px-3 py-2.5 text-xs" title={f.arquivo_path || ''}>{f.arquivo_nome}</td>
+                          <td className="px-3 py-2.5 text-xs font-semibold">
+                            {f.motivo === 'sem_texto' ? 'PDF sem texto (escaneado)'
+                              : f.motivo === 'sem_serie' ? 'Sem nº de série reconhecível'
+                              : f.motivo === 'nao_saida' || f.motivo === 'nao_venda' ? 'Nota de entrada (não é saída)'
+                              : 'Erro de leitura'}
+                          </td>
+                          <td className="px-3 py-2.5 text-xs text-muted-foreground">{f.detalhe || '—'}</td>
+                          <td className="px-3 py-2.5 text-xs">{formatDate(f.detectada_em)}</td>
+                        </tr>
+                      ))}
+                      {!ilegiveis.length && <tr><td colSpan={4} className="px-3 py-6 text-center text-sm text-muted-foreground">Nenhum arquivo com problema de leitura.{lidosSemVinculo > 0 && <> Outros {lidosSemVinculo} arquivo(s) foram lidos e não geraram vínculo (nota fora de venda ou venda só de acessório) — situação normal.</>}</td></tr>}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </Card>
+          )}
+
+          <HistoricoSerieModal
+            open={!!serieDetalhe}
+            analise={serieDetalhe}
+            notas={serieDetalhe ? (nfPorSerie.get(serieDetalhe.numero_serie) || []) : []}
+            onClose={() => setSerieDetalhe(null)}
+          />
+
+          <VincularNfModal
+            open={!!vincularAlvo}
+            analise={vincularAlvo}
+            prefixos={prefixos}
+            perfil={perfil}
+            onClose={() => setVincularAlvo(null)}
+            onDone={() => setReload((k) => k + 1)}
+          />
+        </div>
+      );
+    }
+
     function ConfiguracoesPage() {
       const toast = useToast();
       const { perfil, isAdmin, can } = usePerm();
@@ -15160,6 +16396,12 @@ ${parecer.parecer_tecnico ? `
       const [reincPct, setReincPct] = useState('3');
       const [reincFator, setReincFator] = useState('3');
       const [salvandoReinc, setSalvandoReinc] = useState(false);
+      // NFs de venda (rastreabilidade série × nota) — pasta de rede e agendamento
+      const [nfPasta, setNfPasta] = useState('');
+      const [nfDia, setNfDia] = useState('1');
+      const [nfHora, setNfHora] = useState('6');
+      const [nfAnoMin, setNfAnoMin] = useState('2026');
+      const [salvandoNf, setSalvandoNf] = useState(false);
       const MESES_PT = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
 
       // Carrega a configuração COMPARTILHADA do banco (vale para todos os usuários).
@@ -15167,7 +16409,7 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
@@ -15175,6 +16417,10 @@ ${parecer.parecer_tecnico ? `
               if (map.reinc_piso != null && map.reinc_piso !== '') setReincPiso(String(map.reinc_piso));
               if (map.reinc_incidencia_pct != null && map.reinc_incidencia_pct !== '') setReincPct(String(map.reinc_incidencia_pct));
               if (map.reinc_fator_salto != null && map.reinc_fator_salto !== '') setReincFator(String(map.reinc_fator_salto));
+              if (map.nf_pasta_rede != null) setNfPasta(String(map.nf_pasta_rede));
+              if (map.nf_dia_mes != null && map.nf_dia_mes !== '') setNfDia(String(map.nf_dia_mes));
+              if (map.nf_hora != null && map.nf_hora !== '') setNfHora(String(map.nf_hora));
+              if (map.nf_ano_minimo != null && map.nf_ano_minimo !== '') setNfAnoMin(String(map.nf_ano_minimo));
             }
           } catch (e) { /* segue com o cache local */ }
         })();
@@ -15213,6 +16459,29 @@ ${parecer.parecer_tecnico ? `
         } catch (e) {
           toast.error('Não foi possível falar com o serviço em ' + CONVERSAO_PDF_LOCAL + '. Verifique se está no ar.');
         } finally { setTestando(false); }
+      };
+
+      const salvarNf = async () => {
+        setSalvandoNf(true);
+        try {
+          const autor = perfil?.nome_completo || perfil?.email || null;
+          const agora = new Date().toISOString();
+          const dia = String(Math.min(28, Math.max(1, parseInt(nfDia, 10) || 1)));
+          const hora = String(Math.min(23, Math.max(0, parseInt(nfHora, 10) || 6)));
+          const anoMin = String(Math.min(2100, Math.max(2000, parseInt(nfAnoMin, 10) || 2026)));
+          const { error } = await supabase.from('config_app').upsert([
+            { chave: 'nf_pasta_rede', valor: (nfPasta || '').trim(), updated_at: agora, updated_by: autor },
+            { chave: 'nf_dia_mes', valor: dia, updated_at: agora, updated_by: autor },
+            { chave: 'nf_hora', valor: hora, updated_at: agora, updated_by: autor },
+            { chave: 'nf_ano_minimo', valor: anoMin, updated_at: agora, updated_by: autor },
+          ], { onConflict: 'chave' });
+          if (error) throw error;
+          setNfDia(dia); setNfHora(hora); setNfAnoMin(anoMin);
+          registrarLog(perfil, 'editar_config', 'config', 'nfs_venda', `${autor || 'Usuário'} configurou a varredura das NFs de venda (dia ${dia}, ${hora}h)`);
+          toast.success('Configuração das NFs de venda salva. A varredura roda no servidor no dia e hora definidos.');
+        } catch (e) {
+          toast.error('Erro ao salvar: ' + (e?.message || e));
+        } finally { setSalvandoNf(false); }
       };
 
       const salvarReinc = async () => {
@@ -15293,6 +16562,42 @@ ${parecer.parecer_tecnico ? `
                 </div>
                 <Button onClick={salvarReinc} disabled={salvandoReinc || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar limiares</Button>
                 <p className="text-xs text-muted-foreground">Regra: <strong>reincidente</strong> = ≥ piso de ocorrências <em>e</em> incidência ≥ mínimo. <strong>Tendência emergente</strong> = incidência ≥ fator × base histórica (ou base quase zero e incidência ≥ mínimo), com ao menos 2 ocorrências. Abaixo disso, é pontual (só correção imediata).</p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Icon name="file" className="h-5 w-5 text-accent" />NFs de venda (rastreabilidade da série)</CardTitle>
+                <CardDescription>Pasta de rede onde ficam as NFs de venda. O serviço lê o número de série dentro de cada DANFE e vincula à análise correspondente. Só notas de venda entram (remessa, comodato, demonstração e devolução são ignoradas pelo CFOP/natureza).</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <Label>Caminho da pasta das NFs</Label>
+                  <Input value={nfPasta} onChange={(e) => setNfPasta(e.target.value)} placeholder="Ex.: \\servidor\Rosana\DANFE\{ANO};\\servidor\Rosana\DANFE\{ANO-1}" disabled={!podeEditar} />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Caminho UNC visto pela conta que roda o serviço (letra de rede como <code>Y:\</code> normalmente não funciona). Subpastas são varridas até 6 níveis.
+                    Pode informar <strong>várias pastas separadas por ponto e vírgula</strong>, e usar <code>{'{ANO}'}</code> e <code>{'{ANO-1}'}</code> — assim a configuração não precisa ser trocada na virada do ano.
+                  </p>
+                </div>
+                <div className="grid grid-cols-3 gap-3 max-w-md">
+                  <div>
+                    <Label>Dia do mês</Label>
+                    <Input type="number" min="1" max="28" value={nfDia} onChange={(e) => setNfDia(e.target.value)} disabled={!podeEditar} />
+                  </div>
+                  <div>
+                    <Label>Hora</Label>
+                    <Input type="number" min="0" max="23" value={nfHora} onChange={(e) => setNfHora(e.target.value)} disabled={!podeEditar} />
+                  </div>
+                  <div>
+                    <Label>Ano mínimo</Label>
+                    <Input type="number" min="2000" max="2100" value={nfAnoMin} onChange={(e) => setNfAnoMin(e.target.value)} disabled={!podeEditar} />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  O <strong>ano mínimo</strong> descarta pastas de anos anteriores: como todo equipamento analisado na plataforma foi fabricado a partir de 2026, notas de 2025 para trás não têm série que casaria com alguma análise — varrê-las só gasta tempo. O curinga <code>{'{ANO-1}'}</code> passa a valer sozinho na virada do ano, sem precisar reconfigurar.
+                </p>
+                <Button onClick={salvarNf} disabled={salvandoNf || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar</Button>
+                <p className="text-xs text-muted-foreground">O resultado da varredura e as pendências ficam no menu <strong>NFs de venda</strong>, onde também dá para rodar a varredura na hora.</p>
               </CardContent>
             </Card>
 
@@ -16196,7 +17501,7 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         const applyHash = () => {
           const h = (window.location.hash || '').replace('#', '').trim();
-          if (['dashboard', 'analise', 'historico', 'cadastro'].includes(h)) setCurrentPage(h);
+          if (['dashboard', 'analise', 'historico', 'nfs', 'cadastro'].includes(h)) setCurrentPage(h);
         };
         applyHash();
         window.addEventListener('hashchange', applyHash);
@@ -16281,6 +17586,7 @@ ${parecer.parecer_tecnico ? `
           case 'dashboard': return <DashboardPage />;
           case 'analise':   return <AnalisePage />;
           case 'historico': return <HistoricoPage />;
+          case 'nfs':       return <NfsVendaPage />;
           case 'cadastro':  return <CadastroPage />;
           case 'solicitacoes': return <SolicitacoesPage />;
           case 'logs':      return <LogsPage />;
