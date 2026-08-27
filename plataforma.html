@@ -6916,7 +6916,7 @@
 
     function AnalisePage() {
       const toast = useToast();
-      const { perfil: usuarioAtual } = usePerm();
+      const { perfil: usuarioAtual, can } = usePerm();
       const [slots, setSlots] = useState({
         op: null,
         rc: null,
@@ -6926,6 +6926,12 @@
         op_reprocesso: null,
         rnc: null,
       });
+      // Bloqueio de Ficha Mestre (ausente ou não apta): em vez de só avisar por toast,
+      // guardamos o produto para oferecer o atalho de abrir a ficha SEM sair da tela,
+      // reaproveitando os documentos já anexados aqui. Decisão de 27/08/2026.
+      const [bloqueioFicha, setBloqueioFicha] = useState(null);   // { codigo, mensagem, produto }
+      const [fichaOverlay, setFichaOverlay] = useState(null);     // { ficha, produto, docs }
+      const [abrindoFicha, setAbrindoFicha] = useState(false);
       const [previewing, setPreviewing] = useState(null);
       const [prefilling, setPrefilling] = useState(null); // { kind: 'op'|'form', content: {...}, loading?: bool }
       const [analyzing, setAnalyzing] = useState(false);
@@ -7284,6 +7290,7 @@
         if (!allObrigatoriosOk || analyzing) return;
         setAnalyzing(true);
         setParecer(null);
+        setBloqueioFicha(null);
         try {
           // Análise 100% local — regras determinísticas em JS aplicadas aos textos extraídos.
           // Sem chamada a API externa de LLM.
@@ -7299,13 +7306,61 @@
           toast.success('Análise concluída. Parecer abaixo.');
         } catch (err) {
           // Bloqueios específicos têm tratamento diferenciado (sem stack trace, mensagem clara)
-          if (err?.code === 'PRODUTO_NAO_CADASTRADO' || err?.code === 'FICHA_MESTRE_AUSENTE' || err?.code === 'ANALISE_DUPLICADA') {
+          if (err?.code === 'FICHA_MESTRE_AUSENTE' || err?.code === 'FICHA_MESTRE_NAO_APTA') {
+            // Além do aviso, guarda o produto para o atalho "Abrir a Ficha Mestre",
+            // que abre o editor por cima desta tela reaproveitando os anexos.
+            setBloqueioFicha({ codigo: err.code, mensagem: err.message, produto: err.produto || null });
+            toast.error(err.message, { duration: 14000 });
+          } else if (err?.code === 'PRODUTO_NAO_CADASTRADO' || err?.code === 'ANALISE_DUPLICADA') {
             toast.error(err.message, { duration: 14000 });
           } else {
             toast.error('Erro na análise: ' + err.message);
           }
         } finally {
           setAnalyzing(false);
+        }
+      };
+
+      // Abre o editor da Ficha Mestre POR CIMA da tela de análise (sem trocar de página),
+      // já levando os documentos anexados aqui para o "Importar de documentos".
+      // Assim, ao salvar e fechar, os anexos continuam no lugar e basta reanalisar.
+      const abrirFichaDoBloqueio = async () => {
+        const prod = bloqueioFicha?.produto;
+        if (!prod || abrindoFicha) return;
+        setAbrindoFicha(true);
+        try {
+          let ficha = null;
+          if (prod.ficha_id) {
+            const { data, error } = await supabase.from('fichas_mestres')
+              .select('*, produto:produtos(id, equipamento, modelo, codigo_referencia, codigo_sapiens, registro_anvisa), acessorios:acessorios_aplicaveis(ordem, descricao, codigo_sapiens, obrigatorio, is_fabricante_confiance, esteril, pode_sair_apenas_na_nf, grupo_alternativo)')
+              .eq('id', prod.ficha_id).limit(1);
+            if (error) throw error;
+            ficha = (data && data[0]) || null;
+          }
+          // Produto no formato do editor (o objeto do motor usa outros nomes de campo).
+          let produtoRow = ficha?.produto || null;
+          if (!produtoRow) {
+            const { data } = await supabase.from('produtos')
+              .select('id, equipamento, modelo, codigo_referencia, codigo_sapiens, registro_anvisa')
+              .eq('id', prod.id).limit(1);
+            produtoRow = (data && data[0]) || {
+              id: prod.id, equipamento: prod.familia, modelo: prod.modelo,
+              codigo_referencia: prod.serialPrefix, codigo_sapiens: prod.codigoSapiens,
+              registro_anvisa: prod.registroAnvisa,
+            };
+          }
+          // Documentos já anexados nesta análise, no formato do ImportarDocumentosModal.
+          const docs = {
+            op:  slots.op?.status === 'done' ? slots.op.file : null,
+            rc:  slots.rc?.status === 'done' ? slots.rc.file : null,
+            et:  slots.etiqueta_externa?.status === 'done' ? slots.etiqueta_externa.file : null,
+            acs: (slots.etiqueta_acessorio || []).filter((it) => it.status === 'done' && it.file).map((it) => it.file),
+          };
+          setFichaOverlay({ ficha, produto: produtoRow, docs });
+        } catch (e) {
+          toast.error('Não foi possível abrir a Ficha Mestre: ' + (e?.message || e));
+        } finally {
+          setAbrindoFicha(false);
         }
       };
 
@@ -7370,6 +7425,45 @@
             title="Nova análise"
             description="Faça upload dos documentos do lote. A plataforma extrai o texto automaticamente no seu navegador antes de enviar para o agente."
           />
+
+          {/* Bloqueio de Ficha Mestre: atalho para resolver sem sair da tela nem perder os anexos */}
+          {bloqueioFicha && (
+            <div className="no-print mb-4 rounded-lg border p-4"
+              style={{ borderColor: 'hsl(var(--status-nao-conforme) / 0.45)', backgroundColor: 'hsl(var(--status-nao-conforme) / 0.06)' }}>
+              <div className="flex items-start gap-3 flex-wrap">
+                <Icon name="alert" className="h-5 w-5 mt-0.5 shrink-0" style={{ color: 'hsl(var(--status-nao-conforme))' }} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold">
+                    {bloqueioFicha.codigo === 'FICHA_MESTRE_AUSENTE'
+                      ? 'Este produto ainda não tem Ficha Mestre cadastrada'
+                      : 'A Ficha Mestre deste produto ainda não está apta para análise'}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {bloqueioFicha.produto
+                      ? `${bloqueioFicha.produto.familia || ''} · ${bloqueioFicha.produto.modelo || ''} (derivação ${bloqueioFicha.produto.derivacao || '—'})`
+                      : bloqueioFicha.mensagem}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Você pode resolver aqui mesmo: a ficha abre por cima desta tela e os documentos já anexados
+                    ficam disponíveis para o pré-preenchimento. Ao fechar, seus anexos continuam no lugar — basta
+                    clicar em “Analisar lote” de novo.
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {bloqueioFicha.produto && (can('cadastro_fichas') || can('cadastro_editar')) && (
+                    <Button onClick={abrirFichaDoBloqueio} disabled={abrindoFicha}>
+                      {abrindoFicha
+                        ? (<><Icon name="loader" className="h-4 w-4 animate-spin" />Abrindo…</>)
+                        : (<><Icon name="book" className="h-4 w-4" />Abrir a Ficha Mestre</>)}
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={() => setBloqueioFicha(null)} title="Fechar este aviso">
+                    <Icon name="x" className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <Card className="lg:col-span-2">
@@ -7554,6 +7648,33 @@
             state={prefilling}
             onClose={() => setPrefilling(null)}
           />
+
+          {/* === Editor da Ficha Mestre POR CIMA da análise (bloqueio de ficha) ===
+              Fica em overlay para a tela de análise continuar montada — assim os
+              documentos anexados não se perdem e a reanálise é imediata. */}
+          {fichaOverlay && (
+            <div className="fixed inset-0 z-50 overflow-y-auto bg-background p-6" data-modal-aberto="1">
+              <div className="max-w-6xl mx-auto">
+                <div className="mb-4 rounded-md border px-3 py-2 text-xs text-muted-foreground"
+                  style={{ backgroundColor: 'hsl(var(--accent) / 0.08)', borderColor: 'hsl(var(--accent) / 0.3)' }}>
+                  Você veio da análise. Use <strong>“Importar de documentos”</strong> (rodapé) para pré-preencher com os
+                  arquivos deste lote — eles já vêm carregados. Depois marque <strong>“Ficha revisada e apta para análise”</strong>,
+                  salve e feche: seus anexos continuam na tela de análise.
+                </div>
+                <FichaMestreEditor
+                  ficha={fichaOverlay.ficha}
+                  produto={fichaOverlay.produto}
+                  docsIniciais={fichaOverlay.docs}
+                  onClose={() => setFichaOverlay(null)}
+                  onSaved={() => {
+                    setFichaOverlay(null);
+                    setBloqueioFicha(null);
+                    toast.success('Ficha Mestre salva. Clique em "Analisar lote" para rodar a análise novamente.');
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -12733,6 +12854,10 @@ ${parecer.parecer_tecnico ? `
       // NF de venda vinculada por número de série (rastreabilidade) + filtro "sem NF"
       const [nfsVenda, setNfsVenda] = useState([]);
       const [filtroSemNf, setFiltroSemNf] = useState(false);
+      // Filtro por tipo de problema, pelo DOCUMENTO afetado do apontamento em
+      // aberto — para saber onde buscar o documento corrigido.
+      // 'todos' | 'etiqueta' | 'op' | 'ambos'
+      const [filtroProblema, setFiltroProblema] = useState('todos');
       // Ordenação clicável nas colunas — decisão 29/06/2026
       const [sort, setSort] = useState({ campo: 'data', dir: 'desc' });
       const toggleSort = (campo) => setSort((s) => s.campo === campo
@@ -12823,6 +12948,23 @@ ${parecer.parecer_tecnico ? `
         return [...set].sort((a, b) => b - a);
       }, [analises]);
 
+      // Classifica um lote pelo DOCUMENTO afetado dos apontamentos EM ABERTO:
+      // problema de etiqueta, de OP, ou os dois. Só olha o que ainda precisa de
+      // correção (NC ou ressalva sem justificativa), que é o que interessa para
+      // saber qual documento buscar corrigido.
+      const classificarProblema = (a) => {
+        const aps = (a.parecer_completo?.apontamentos || []).filter(
+          (ap) => ap.severidade === 'nao_conforme' || (ap.severidade === 'ressalva' && !ap.justificativa)
+        );
+        let etiqueta = false, op = false;
+        for (const ap of aps) {
+          const doc = String(ap.documento_afetado || '');
+          if (/etiqueta/i.test(doc)) etiqueta = true;
+          if (/\bOP\b/i.test(doc) || /FORM-GQ/i.test(doc)) op = true;
+        }
+        return { etiqueta, op };
+      };
+
       const filtered = useMemo(() => {
         // 1) Filtra por período (mês/ano/tudo)
         const dentroPeriodo = (a) => {
@@ -12907,6 +13049,16 @@ ${parecer.parecer_tecnico ? `
         if (filtroSemNf) {
           unicas = unicas.filter((a) => a.numero_serie && !nfPorSerie.has(a.numero_serie));
         }
+        if (filtroProblema !== 'todos') {
+          unicas = unicas.filter((a) => {
+            const t = classificarProblema(a);
+            // Exclusivo: cada opção mostra só quem se encaixa exatamente nela.
+            if (filtroProblema === 'ambos') return t.etiqueta && t.op;
+            if (filtroProblema === 'etiqueta') return t.etiqueta && !t.op;
+            if (filtroProblema === 'op') return t.op && !t.etiqueta;
+            return true;
+          });
+        }
         if (!filter) return unicas;
         const q = filter.toLowerCase();
         return unicas.filter((a) =>
@@ -12914,7 +13066,7 @@ ${parecer.parecer_tecnico ? `
           (a.numero_serie || '').toLowerCase().includes(q) ||
           (a.modelo || '').toLowerCase().includes(q)
         );
-      }, [analises, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, nfPorSerie, sort]);
+      }, [analises, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, filtroProblema, nfPorSerie, sort]);
 
       // Contador de pacotes pendentes (apenas análises do agente, com período aplicado)
       const totalPendentes = useMemo(() => {
@@ -13386,125 +13538,141 @@ ${parecer.parecer_tecnico ? `
           />
           <Card>
             <CardHeader>
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-4 flex-wrap">
-                  <div>
-                    <CardTitle>Análises registradas</CardTitle>
-                    <CardDescription>Clique na linha para abrir o parecer completo. Filtre por período, OP, série ou modelo.</CardDescription>
+              {(() => {
+                // Layout dos filtros em duas faixas: (1) grade de selects
+                // rotulados, alinhados; (2) chips de alternância + ação + contador.
+                const selClasse = 'h-9 w-full rounded-md border border-input bg-background px-2 text-sm';
+                const rotulo = 'text-[11px] uppercase tracking-wider text-muted-foreground mb-1 block';
+                const Campo = ({ label, children }) => (
+                  <div className="min-w-0"><span className={rotulo}>{label}</span>{children}</div>
+                );
+                const filtrosAtivos =
+                  (filtroPeriodo !== 'tudo' ? 1 : 0) + (filtroEquipamento !== 'todos' ? 1 : 0) +
+                  (filtroModelo !== 'todos' ? 1 : 0) + (filtroOrigem !== 'todos' ? 1 : 0) +
+                  (filtroStatus !== 'todos' ? 1 : 0) + (filtroProblema !== 'todos' ? 1 : 0) +
+                  (filtroPendentes ? 1 : 0) + (filtroSemNf ? 1 : 0) + (filter ? 1 : 0);
+                const limpar = () => {
+                  setFiltroPeriodo('tudo'); setFiltroEquipamento('todos'); setFiltroModelo('todos');
+                  setFiltroOrigem('todos'); setFiltroStatus('todos'); setFiltroProblema('todos');
+                  setFiltroPendentes(false); setFiltroSemNf(false); setFilter('');
+                };
+                return (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div>
+                      <CardTitle>Análises registradas</CardTitle>
+                      <CardDescription>Clique na linha para abrir o parecer completo.</CardDescription>
+                    </div>
+                    <Input placeholder="Buscar OP, série ou modelo…" value={filter} onChange={(e) => setFilter(e.target.value)} className="w-full sm:w-72" />
                   </div>
-                  <Input placeholder="Buscar…" value={filter} onChange={(e) => setFilter(e.target.value)} className="max-w-xs" />
-                </div>
-                <div className="flex items-center gap-2 flex-wrap text-xs">
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Período:</Label>
-                  <select
-                    value={filtroPeriodo}
-                    onChange={(e) => setFiltroPeriodo(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-                  >
-                    <option value="tudo">Tudo</option>
-                    <option value="ano">Ano</option>
-                    <option value="mes">Mês</option>
-                  </select>
-                  {filtroPeriodo !== 'tudo' && (
-                    <select
-                      value={filtroAno}
-                      onChange={(e) => setFiltroAno(parseInt(e.target.value, 10))}
-                      className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+
+                  {/* Faixa 1 — seletores */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-3 gap-y-2">
+                    <Campo label="Período">
+                      <div className="flex gap-1.5">
+                        <select value={filtroPeriodo} onChange={(e) => setFiltroPeriodo(e.target.value)} className={selClasse}>
+                          <option value="tudo">Tudo</option>
+                          <option value="ano">Ano</option>
+                          <option value="mes">Mês</option>
+                        </select>
+                        {filtroPeriodo !== 'tudo' && (
+                          <select value={filtroAno} onChange={(e) => setFiltroAno(parseInt(e.target.value, 10))} className={cn(selClasse, 'w-auto')}>
+                            {anosDisponiveis.map((a) => <option key={a} value={a}>{a}</option>)}
+                          </select>
+                        )}
+                        {filtroPeriodo === 'mes' && (
+                          <select value={filtroMes} onChange={(e) => setFiltroMes(parseInt(e.target.value, 10))} className={cn(selClasse, 'w-auto')}>
+                            {['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'].map((m, i) => <option key={i+1} value={i+1}>{m}</option>)}
+                          </select>
+                        )}
+                      </div>
+                    </Campo>
+                    <Campo label="Equipamento">
+                      <select value={filtroEquipamento} onChange={(e) => setFiltroEquipamento(e.target.value)} className={selClasse} title="Filtrar pela família/equipamento">
+                        <option value="todos">Todos</option>
+                        {equipamentosDisponiveis.map((p) => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </Campo>
+                    <Campo label="Modelo">
+                      <select value={filtroModelo} onChange={(e) => setFiltroModelo(e.target.value)} className={selClasse} title="Filtrar pelo modelo específico">
+                        <option value="todos">Todos</option>
+                        {modelosDisponiveis.map((p) => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </Campo>
+                    <Campo label="Origem">
+                      <select value={filtroOrigem} onChange={(e) => setFiltroOrigem(e.target.value)} className={selClasse} title="Feitas pelo agente ou importadas manualmente">
+                        <option value="todos">Todas</option>
+                        <option value="agente">Agente IA</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                    </Campo>
+                    <Campo label="Status">
+                      <select value={filtroStatus}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setFiltroStatus(v);
+                          // O filtro por problema só faz sentido sobre pendências;
+                          // se sair de um status que mostra apontamento em aberto,
+                          // zera para não filtrar por algo que não está mais visível.
+                          if (!['em_aberto', 'nao_conforme', 'ressalva'].includes(v)) setFiltroProblema('todos');
+                        }}
+                        className={selClasse} title="Filtrar por status da análise">
+                        <option value="todos">Todos</option>
+                        <option value="em_aberto">Em aberto (NC + ressalva)</option>
+                        <option value="conforme">Conforme</option>
+                        <option value="corrigido">Conforme corrigido</option>
+                        <option value="ressalva">Conforme com ressalvas</option>
+                        <option value="nao_conforme">Não conforme</option>
+                      </select>
+                    </Campo>
+                    {['em_aberto', 'nao_conforme', 'ressalva'].includes(filtroStatus) && (
+                      <Campo label="Problema">
+                        <select value={filtroProblema} onChange={(e) => setFiltroProblema(e.target.value)} className={selClasse} title="Filtrar pelo documento com apontamento em aberto — onde buscar o documento corrigido">
+                          <option value="todos">Todos</option>
+                          <option value="etiqueta">Etiqueta</option>
+                          <option value="op">OP</option>
+                          <option value="ambos">Etiqueta e OP</option>
+                        </select>
+                      </Campo>
+                    )}
+                  </div>
+
+                  {/* Faixa 2 — chips, ação e contador */}
+                  <div className="flex items-center gap-2 flex-wrap border-t pt-3">
+                    <button
+                      onClick={() => setFiltroPendentes((v) => !v)}
+                      className={cn('inline-flex items-center gap-1 h-8 px-2.5 rounded-full border text-xs font-medium transition-colors',
+                        filtroPendentes ? 'border-transparent text-white' : 'border-input bg-background hover:bg-muted/40')}
+                      style={filtroPendentes ? { backgroundColor: 'hsl(28 80% 45%)' } : undefined}
+                      title="Apenas análises do agente cujo pacote ZIP ainda não foi baixado/salvo"
                     >
-                      {anosDisponiveis.map((a) => <option key={a} value={a}>{a}</option>)}
-                    </select>
-                  )}
-                  {filtroPeriodo === 'mes' && (
-                    <select
-                      value={filtroMes}
-                      onChange={(e) => setFiltroMes(parseInt(e.target.value, 10))}
-                      className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                      <Icon name="download" className="h-3 w-3" />Só pendentes
+                      {totalPendentes > 0 && <span className={cn('ml-0.5 px-1.5 rounded-full text-[10px] font-bold', filtroPendentes ? 'bg-white/25' : 'bg-orange-100 text-orange-800')}>{totalPendentes}</span>}
+                    </button>
+                    <button
+                      onClick={() => setFiltroSemNf((v) => !v)}
+                      className={cn('inline-flex items-center gap-1 h-8 px-2.5 rounded-full border text-xs font-medium transition-colors',
+                        filtroSemNf ? 'border-transparent text-white' : 'border-input bg-background hover:bg-muted/40')}
+                      style={filtroSemNf ? { backgroundColor: 'hsl(215 45% 40%)' } : undefined}
+                      title="Apenas lotes cuja série ainda não foi encontrada em nenhuma NF de venda"
                     >
-                      {['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'].map((m, i) => (
-                        <option key={i+1} value={i+1}>{m}</option>
-                      ))}
-                    </select>
-                  )}
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Equipamento:</Label>
-                  <select
-                    value={filtroEquipamento}
-                    onChange={(e) => setFiltroEquipamento(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-sm max-w-[260px]"
-                    title="Filtrar análises pela família/equipamento"
-                  >
-                    <option value="todos">Todos</option>
-                    {equipamentosDisponiveis.map((p) => <option key={p} value={p}>{p}</option>)}
-                  </select>
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Modelo:</Label>
-                  <select
-                    value={filtroModelo}
-                    onChange={(e) => setFiltroModelo(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-sm max-w-[200px]"
-                    title="Filtrar análises pelo modelo específico"
-                  >
-                    <option value="todos">Todos</option>
-                    {modelosDisponiveis.map((p) => <option key={p} value={p}>{p}</option>)}
-                  </select>
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Origem:</Label>
-                  <select
-                    value={filtroOrigem}
-                    onChange={(e) => setFiltroOrigem(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-                    title="Filtrar análises feitas pelo agente IA ou importadas manualmente"
-                  >
-                    <option value="todos">Todas</option>
-                    <option value="agente">Agente IA</option>
-                    <option value="manual">Manual</option>
-                  </select>
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Status:</Label>
-                  <select
-                    value={filtroStatus}
-                    onChange={(e) => setFiltroStatus(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-                    title="Filtrar por status da análise"
-                  >
-                    <option value="todos">Todos</option>
-                    <option value="em_aberto">Em aberto (NC + ressalva)</option>
-                    <option value="conforme">Conforme</option>
-                    <option value="corrigido">Conforme corrigido</option>
-                    <option value="ressalva">Conforme com ressalvas</option>
-                    <option value="nao_conforme">Não conforme</option>
-                  </select>
-                  <button
-                    onClick={() => setFiltroPendentes((v) => !v)}
-                    className={cn(
-                      'inline-flex items-center gap-1 h-8 px-2 rounded-md border text-sm transition-colors',
-                      filtroPendentes ? 'border-transparent text-white' : 'border-input bg-background hover:bg-muted/40'
+                      <Icon name="file" className="h-3 w-3" />Sem NF de venda
+                    </button>
+                    {filtrosAtivos > 0 && (
+                      <button onClick={limpar} className="inline-flex items-center gap-1 h-8 px-2.5 rounded-full border border-input bg-background hover:bg-muted/40 text-xs font-medium text-muted-foreground transition-colors" title="Limpar todos os filtros">
+                        <Icon name="x" className="h-3 w-3" />Limpar filtros ({filtrosAtivos})
+                      </button>
                     )}
-                    style={filtroPendentes ? { backgroundColor: 'hsl(28 80% 45%)' } : undefined}
-                    title="Mostrar apenas análises do agente cujo pacote ZIP ainda não foi baixado/salvo"
-                  >
-                    <Icon name="download" className="h-3 w-3" />
-                    Só pendentes
-                    {totalPendentes > 0 && (
-                      <span className={cn('ml-1 px-1.5 rounded-full text-[10px] font-bold', filtroPendentes ? 'bg-white/25' : 'bg-orange-100 text-orange-800')}>{totalPendentes}</span>
+                    {can('historico_baixar') && (
+                      <Button variant="outline" size="sm" className="h-8" onClick={iniciarBatchDownload} disabled={batchAtivo || pendentesConformes.length === 0} title="Gera e salva na pasta da rede os pacotes de todos os lotes conformes ainda pendentes de download">
+                        {batchAtivo ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Baixando…</>) : (<><Icon name="download" className="h-3.5 w-3.5" />Baixar pendentes na pasta{pendentesConformes.length > 0 ? ` (${pendentesConformes.length})` : ''}</>)}
+                      </Button>
                     )}
-                  </button>
-                  <button
-                    onClick={() => setFiltroSemNf((v) => !v)}
-                    className={cn(
-                      'inline-flex items-center gap-1 h-8 px-2 rounded-md border text-sm transition-colors',
-                      filtroSemNf ? 'border-transparent text-white' : 'border-input bg-background hover:bg-muted/40'
-                    )}
-                    style={filtroSemNf ? { backgroundColor: 'hsl(215 45% 40%)' } : undefined}
-                    title="Mostrar apenas lotes cuja série ainda não foi encontrada em nenhuma NF de venda"
-                  >
-                    <Icon name="file" className="h-3 w-3" />
-                    Sem NF de venda
-                  </button>
-                  {can('historico_baixar') && (
-                    <Button variant="outline" size="sm" className="h-8" onClick={iniciarBatchDownload} disabled={batchAtivo || pendentesConformes.length === 0} title="Gera e salva na pasta da rede os pacotes de todos os lotes conformes ainda pendentes de download">
-                      {batchAtivo ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Baixando…</>) : (<><Icon name="download" className="h-3.5 w-3.5" />Baixar pendentes na pasta{pendentesConformes.length > 0 ? ` (${pendentesConformes.length})` : ''}</>)}
-                    </Button>
-                  )}
-                  <span className="text-muted-foreground ml-auto">{filtered.length} análise(s) no filtro</span>
+                    <span className="text-xs text-muted-foreground ml-auto font-medium">{filtered.length} análise(s)</span>
+                  </div>
                 </div>
-              </div>
+                );
+              })()}
             </CardHeader>
             <CardContent>
               {loading ? (
@@ -14596,7 +14764,10 @@ ${parecer.parecer_tecnico ? `
       );
     }
 
-    function FichaMestreEditor({ ficha, produto, onClose, onSaved }) {
+    // docsIniciais (opcional): { op, rc, et, acs[] } com os Files já anexados na tela de
+    // análise. Quando vem preenchido, o editor abre direto o "Importar de documentos"
+    // com esses arquivos carregados — evita anexar tudo de novo. (27/08/2026)
+    function FichaMestreEditor({ ficha, produto, onClose, onSaved, docsIniciais = null }) {
       const toast = useToast();
       const { perfil: usuarioAtual } = usePerm();
       const isNew = !ficha?.id;
@@ -14708,6 +14879,10 @@ ${parecer.parecer_tecnico ? `
       const [saving, setSaving] = useState(false);
       const [importOpen, setImportOpen] = useState(false);
       const [clonarOpen, setClonarOpen] = useState(false);
+      // Veio da tela de análise com documentos em mão: abre o importador já carregado.
+      useEffect(() => {
+        if (docsIniciais && (docsIniciais.op || docsIniciais.et || (docsIniciais.acs || []).length)) setImportOpen(true);
+      }, []);
       const [open, setOpen] = useState({
         identificacao: true, fabricante: false, acessorios: true, roteiro: true,
         regras: false,
@@ -15384,6 +15559,7 @@ ${parecer.parecer_tecnico ? `
             open={importOpen}
             onClose={() => setImportOpen(false)}
             onImport={handleImportFromDocs}
+            arquivosIniciais={docsIniciais}
           />
           <ClonarDerivacaoModal
             open={clonarOpen}
@@ -15535,7 +15711,7 @@ ${parecer.parecer_tecnico ? `
     }
 
     /* Modal para importar dados de documentos exemplo (OP+RC+Etiquetas) e pré-preencher a Ficha */
-    function ImportarDocumentosModal({ open, onClose, onImport }) {
+    function ImportarDocumentosModal({ open, onClose, onImport, arquivosIniciais = null }) {
       const [opFile, setOpFile] = useState(null);
       const [rcFile, setRcFile] = useState(null);
       const [etFile, setEtFile] = useState(null);
@@ -15544,7 +15720,14 @@ ${parecer.parecer_tecnico ? `
       const toast = useToast();
 
       useEffect(() => {
-        if (!open) { setOpFile(null); setRcFile(null); setEtFile(null); setAcFiles([]); }
+        if (!open) { setOpFile(null); setRcFile(null); setEtFile(null); setAcFiles([]); return; }
+        // Aberto com arquivos vindos da análise: já entram nos slots (pode trocar/remover).
+        if (arquivosIniciais) {
+          setOpFile(arquivosIniciais.op || null);
+          setRcFile(arquivosIniciais.rc || null);
+          setEtFile(arquivosIniciais.et || null);
+          setAcFiles(Array.isArray(arquivosIniciais.acs) ? arquivosIniciais.acs : []);
+        }
       }, [open]);
 
       const handleImport = async () => {
