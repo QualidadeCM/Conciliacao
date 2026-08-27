@@ -11729,6 +11729,10 @@ ${parecer.parecer_tecnico ? `
       const [resultado, setResultado] = useState(null);
       const [preview, setPreview] = useState(null);        // texto editável da mensagem (null = ainda na seleção)
       const [mencaoNomes, setMencaoNomes] = useState([]);  // nomes marcados, p/ legenda
+      // Histórico de cobranças já feitas: Map 'chaveProblema||OP|serie' -> { em, por, vezes }.
+      // Serve para sinalizar o que já foi enviado e não pré-marcar essas OPs.
+      const [enviosAnteriores, setEnviosAnteriores] = useState(new Map());
+      const [tabelaEnviosOk, setTabelaEnviosOk] = useState(true); // false = migration ainda não rodada
 
       const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
       const extrairValor = (desc) => {
@@ -11812,13 +11816,49 @@ ${parecer.parecer_tecnico ? `
               g.label = gen.length > 160 ? gen.slice(0, 160).replace(/\s+\S*$/, '') + '…' : gen;
             }
           }
+          // Cobranças já enviadas antes, por (problema + OP/série). Se a tabela ainda
+          // não existe (migration não rodada), segue sem sinalização em vez de quebrar.
+          try {
+            const { data: env, error: errEnv } = await supabase.from('envios_pacote')
+              .select('problema_chave, numero_op, numero_serie, enviado_em, enviado_por')
+              .order('enviado_em', { ascending: false });
+            if (errEnv) throw errEnv;
+            const mp = new Map();
+            for (const e of (env || [])) {
+              const k = `${e.problema_chave}||${e.numero_op}|${e.numero_serie || ''}`;
+              const at = mp.get(k);
+              if (at) { at.vezes += 1; }
+              else mp.set(k, { em: e.enviado_em, por: e.enviado_por || '', vezes: 1 });
+            }
+            setEnviosAnteriores(mp);
+            setTabelaEnviosOk(true);
+          } catch (e) {
+            setEnviosAnteriores(new Map());
+            setTabelaEnviosOk(false);
+          }
           setGrupos(arr);
         } catch (e) { toast.error('Erro ao carregar: ' + (e?.message || e)); }
         setCarregando(false);
       };
 
       useEffect(() => { if (open) carregar(); }, [open]);
-      useEffect(() => { setPreview(null); if (sel) { const g = grupos.find((x) => x.key === sel); setMarcadas(new Set((g?.itens || []).map((it) => `${it.opNum}|${it.serie}`))); } }, [sel]);
+
+      // Envio anterior DESTE problema para uma OP (null = nunca cobrada).
+      const envioDe = (chaveProblema, it) => enviosAnteriores.get(`${chaveProblema}||${it.opNum}|${it.serie || ''}`) || null;
+      const diasDesde = (iso) => {
+        const d = Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+        return d <= 0 ? 'hoje' : d === 1 ? 'ontem' : `há ${d} dias`;
+      };
+
+      // Ao trocar de grupo, pré-marca SÓ as OPs ainda não cobradas por esse problema —
+      // reenviar passa a ser uma decisão explícita (27/08/2026).
+      useEffect(() => {
+        setPreview(null);
+        if (!sel) return;
+        const g = grupos.find((x) => x.key === sel);
+        const novas = (g?.itens || []).filter((it) => !envioDe(sel, it));
+        setMarcadas(new Set(novas.map((it) => `${it.opNum}|${it.serie}`)));
+      }, [sel]);
 
       const grupoSel = grupos.find((g) => g.key === sel) || null;
       const toggleOp = (chave) => setMarcadas((m) => { const n = new Set(m); n.has(chave) ? n.delete(chave) : n.add(chave); return n; });
@@ -11870,6 +11910,36 @@ ${parecer.parecer_tecnico ? `
           const resp = await fetch(`${base}/notificar-slack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto: preview, canal }) });
           if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error((e.error || `HTTP ${resp.status}`)); }
           await registrarLog(perfil, 'notificar_slack_pacote', 'analise', 'pacote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} enviou apontamento em pacote ao Slack (${grupoSel.setor}) — ${itens.length} OP(s): ${grupoSel.label}`);
+          // Registra a cobrança por OP para sinalizar reenvios no futuro.
+          try {
+            const linhas = itens.map((it) => ({
+              problema_chave: grupoSel.key,
+              problema_label: grupoSel.label,
+              severidade: grupoSel.severidade || null,
+              setor: grupoSel.setor || null,
+              canal,
+              numero_op: String(it.opNum || ''),
+              numero_serie: String(it.serie || ''),
+              operador_nome: it.operador || null,
+              enviado_por_id: perfil?.id || null,
+              enviado_por: perfil?.nome_completo || perfil?.email || null,
+            }));
+            const { error: errIns } = await supabase.from('envios_pacote').insert(linhas);
+            if (errIns) throw errIns;
+            // Reflete na memória para o aviso aparecer sem precisar recarregar.
+            setEnviosAnteriores((m) => {
+              const n = new Map(m);
+              for (const it of itens) {
+                const k = `${grupoSel.key}||${it.opNum}|${it.serie || ''}`;
+                const at = n.get(k);
+                n.set(k, { em: new Date().toISOString(), por: perfil?.nome_completo || perfil?.email || '', vezes: (at?.vezes || 0) + 1 });
+              }
+              return n;
+            });
+          } catch (e) {
+            setTabelaEnviosOk(false);
+            console.warn('Não foi possível registrar o envio em pacote:', e?.message || e);
+          }
           setResultado({ total: itens.length, setor: grupoSel.setor, mencoes: mencaoNomes.length });
           toast.success(`Pacote enviado ao canal do ${grupoSel.setor} — ${itens.length} OP(s).`);
         } catch (e) { toast.error('Falha ao enviar: ' + (e?.message || e)); }
@@ -11894,13 +11964,21 @@ ${parecer.parecer_tecnico ? `
               <div>
                 <Label className="text-xs">Problema (agrupado)</Label>
                 <div className="max-h-40 overflow-auto border rounded-lg divide-y mt-1">
-                  {grupos.map((g) => (
+                  {grupos.map((g) => {
+                    const jaEnv = g.itens.filter((it) => envioDe(g.key, it)).length;
+                    return (
                     <button key={g.key} type="button" onClick={() => setSel(g.key)} className={cn('w-full text-left p-2 text-sm flex items-center gap-2', sel === g.key && 'bg-accent/10')}>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0" style={g.severidade === 'nao_conforme' ? { backgroundColor: 'hsl(var(--status-nao-conforme) / 0.15)', color: 'hsl(var(--status-nao-conforme))' } : { backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}>{g.severidade === 'nao_conforme' ? 'NC' : 'Ressalva'}</span>
                       <span className="min-w-0 flex-1 truncate">{g.label}</span>
+                      {jaEnv > 0 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: 'hsl(var(--muted))' }} title={`${jaEnv} OP(s) deste grupo já foram cobradas antes`}>
+                          {g.itens.length - jaEnv} nova(s)
+                        </span>
+                      )}
                       <span className="text-xs text-muted-foreground shrink-0">{g.itens.length} OP · {g.setor}</span>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -11910,6 +11988,7 @@ ${parecer.parecer_tecnico ? `
                 <div className="flex items-center justify-between mb-1">
                   <Label className="text-xs">OPs afetadas ({selCount}/{grupoSel.itens.length} marcadas) — canal: {grupoSel.setor === 'Almoxarifado' ? 'almoxarifado_gq' : 'pcp_gq'}</Label>
                   <div className="flex gap-2 text-xs">
+                    <button className="underline" onClick={() => setMarcadas(new Set(grupoSel.itens.filter((it) => !envioDe(grupoSel.key, it)).map((it) => `${it.opNum}|${it.serie}`)))} title="Marca apenas as OPs que ainda não foram cobradas por este problema">só as novas</button>
                     <button className="underline" onClick={() => setMarcadas(new Set(grupoSel.itens.map((it) => `${it.opNum}|${it.serie}`)))}>marcar todas</button>
                     <button className="underline" onClick={() => setMarcadas(new Set())}>limpar</button>
                   </div>
@@ -11917,12 +11996,20 @@ ${parecer.parecer_tecnico ? `
                 <div className="max-h-56 overflow-auto border rounded-lg divide-y">
                   {grupoSel.itens.map((it, i) => {
                     const chave = `${it.opNum}|${it.serie}`;
+                    const env = envioDe(grupoSel.key, it);
                     return (
-                      <label key={i} className="flex items-center gap-2 p-2 text-sm cursor-pointer">
+                      <label key={i} className={cn('flex items-center gap-2 p-2 text-sm cursor-pointer', env && 'bg-muted/40')}>
                         <input type="checkbox" checked={marcadas.has(chave)} onChange={() => toggleOp(chave)} className="h-4 w-4" />
                         <span className="font-mono">{it.opNum || '—'}</span>
                         <span className="text-muted-foreground">· {it.serie || '—'}</span>
                         {it.valor && <span className="font-semibold" style={{ color: 'hsl(var(--status-ressalva))' }}>· {it.valor}</span>}
+                        {env && (
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                            style={{ backgroundColor: 'hsl(var(--status-ressalva) / 0.18)', color: 'hsl(var(--status-ressalva))' }}
+                            title={`Já cobrada ${env.vezes}x por este mesmo problema. Último envio: ${new Date(env.em).toLocaleString('pt-BR')}${env.por ? ' por ' + env.por : ''}. Ainda está em aberto — marque se quiser cobrar de novo.`}>
+                            já enviada {diasDesde(env.em)}{env.vezes > 1 ? ` · ${env.vezes}x` : ''}
+                          </span>
+                        )}
                         <span className="ml-auto text-xs text-muted-foreground">{it.operador || 'operador ?'}{it.operador && !it.slackId ? ' (sem Slack)' : ''}</span>
                       </label>
                     );
@@ -11931,6 +12018,18 @@ ${parecer.parecer_tecnico ? `
                 <div className="text-[11px] text-muted-foreground mt-1">
                   Serão marcados no Slack: {[...new Set(grupoSel.itens.filter((it) => marcadas.has(`${it.opNum}|${it.serie}`) && it.slackId).map((it) => it.operador))].join(', ') || 'nenhum operador com Slack cadastrado'}.
                 </div>
+                {grupoSel.itens.some((it) => envioDe(grupoSel.key, it)) && (
+                  <div className="text-[11px] mt-1" style={{ color: 'hsl(var(--status-ressalva))' }}>
+                    As OPs com a marca “já enviada” foram cobradas antes por este mesmo problema e continuam em aberto.
+                    Elas vêm <strong>desmarcadas</strong> — marque só se quiser reforçar a cobrança.
+                  </div>
+                )}
+                {!tabelaEnviosOk && (
+                  <div className="text-[11px] text-muted-foreground mt-1">
+                    Sem histórico de envios: rode <code>migration-envios-pacote.sql</code> no Supabase para a plataforma
+                    passar a sinalizar as OPs já cobradas.
+                  </div>
+                )}
               </div>
             )}
 
