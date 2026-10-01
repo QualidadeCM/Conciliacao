@@ -1325,13 +1325,23 @@
       // 1. Conformes (não precisaram correção): status final = conforme E original = conforme
       // 2. Tiveram ressalvas: status final = ressalva
       // 3. Precisaram correção: original era NC (independente do estado final)
+      // Algum passo da cadeia (da original até a atual) foi NÃO CONFORME?
+      const statusDe = (x) => String(x?.parecer_completo?.resultado_geral || x?.status || '').toLowerCase();
+      const teveNcNaCadeia = (a) => {
+        let cursor = a, safety = 20;
+        while (cursor && safety-- > 0) {
+          if (statusDe(cursor) === 'nao_conforme') return true;
+          cursor = cursor.analise_origem_id ? byId.get(cursor.analise_origem_id) : null;
+        }
+        return false;
+      };
       const categoriasLote = { conformes: 0, ressalvas: 0, corrigidas: 0 };
       for (const a of lotesFinais) {
-        // "Precisou correção" usa o MESMO critério do KPI (temCorrecaoReal): o lote
-        // passou por uma correção real de documento (reanálise), independentemente de o
-        // original ser NC ou ressalva. Assim o donut bate com o cartão "Conciliações
-        // corrigidas". Ajuste de ficha/cadastro não conta (já excluído em temCorrecaoReal).
-        if (temCorrecaoReal(a)) {
+        // "Precisou correção" (decisão 01/10/2026): só entra o lote que teve NÃO
+        // CONFORMIDADE em algum momento e foi corrigido. Ressalva corrigida por troca
+        // de documento conta como CONFORME — não foi falha, foi ajuste de ponto de
+        // atenção. Ajuste de ficha/cadastro continua não contando (temCorrecaoReal).
+        if (temCorrecaoReal(a) && teveNcNaCadeia(a)) {
           categoriasLote.corrigidas++;
         } else if (a.status === 'nao_conforme') {
           // NC ainda aberta (sem correção concluída) — também precisa de correção.
