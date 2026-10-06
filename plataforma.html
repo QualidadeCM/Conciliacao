@@ -1103,6 +1103,117 @@
       );
     }
 
+    /* ====================================================================
+       VISÃO EXECUTIVA / ONDE ATACAR — construtores de gráfico (06/10/2026)
+       Geram SVG/HTML em STRING para servir tanto à tela (via innerHTML) quanto
+       ao relatório mensal impresso (janela própria) — um único desenho.
+       Texto e eixos usam currentColor, então funcionam em modo claro e escuro.
+       ==================================================================== */
+    const META_APROVACAO = 95; // % de lotes aprovados de primeira (conforme + ressalva)
+    const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const fmtPct1 = (x) => (x == null || isNaN(x)) ? '—' : `${x.toFixed(1).replace('.', ',')}%`;
+    const MESES_CURTOS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    const MESES_LONGOS = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+    const rotuloMes = (ym) => `${MESES_CURTOS[parseInt(ym.slice(5, 7), 10) - 1]}/${ym.slice(2, 4)}`;
+    const rotuloMesLongo = (ym) => `${MESES_LONGOS[parseInt(ym.slice(5, 7), 10) - 1]}/${ym.slice(0, 4)}`;
+    const COR_OK = '#2F9E44', COR_RUIM = '#E03131', COR_META = '#2F9E44', COR_NEUTRA = '#1E9DBA';
+
+    // Linha mensal da aprovação de primeira, com a meta tracejada.
+    // pontos: [{ mes:'2026-09', pct: 93.1 | null, n: 42 }]
+    function svgLinhaAprovacao(pontos, meta = META_APROVACAO) {
+      const W = 760, H = 250, L = 44, R = 34, T = 24, B = 46;
+      const vals = pontos.map((p) => p.pct).filter((v) => v != null);
+      const yMin = Math.max(0, Math.min(80, Math.floor(((vals.length ? Math.min(...vals) : 90) - 5) / 5) * 5));
+      const y = (v) => T + (100 - v) / (100 - yMin) * (H - T - B);
+      const passo = pontos.length > 1 ? (W - L - R) / (pontos.length - 1) : 0;
+      const x = (i) => L + (pontos.length > 1 ? i * passo : (W - L - R) / 2);
+      let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;font-family:inherit" xmlns="http://www.w3.org/2000/svg">`;
+      for (let v = yMin; v <= 100; v += (100 - yMin) > 30 ? 10 : 5) {
+        s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" stroke-opacity="0.08"/>`;
+        s += `<text x="${L - 6}" y="${y(v) + 3}" font-size="10" text-anchor="end" fill="currentColor" fill-opacity="0.55">${v}%</text>`;
+      }
+      s += `<line x1="${L}" x2="${W - R}" y1="${y(meta)}" y2="${y(meta)}" stroke="${COR_META}" stroke-width="1.5" stroke-dasharray="6 4"/>`;
+      s += `<text x="${L + 4}" y="${y(meta) - 5}" font-size="10" text-anchor="start" fill="${COR_META}" font-weight="600">Meta ${meta}%</text>`;
+      // Linha (com quebras onde o mês não teve lote)
+      let d = '', abre = true;
+      pontos.forEach((p, i) => {
+        if (p.pct == null) { abre = true; return; }
+        d += `${abre ? 'M' : 'L'}${x(i).toFixed(1)},${y(p.pct).toFixed(1)} `; abre = false;
+      });
+      if (d) s += `<path d="${d}" fill="none" stroke="${COR_NEUTRA}" stroke-width="2.5" stroke-linejoin="round"/>`;
+      pontos.forEach((p, i) => {
+        s += `<text x="${x(i)}" y="${H - B + 16}" font-size="10" text-anchor="middle" fill="currentColor" fill-opacity="0.7">${rotuloMes(p.mes)}</text>`;
+        s += `<text x="${x(i)}" y="${H - B + 30}" font-size="9" text-anchor="middle" fill="currentColor" fill-opacity="0.45">${p.n ? 'n=' + p.n : '—'}</text>`;
+        if (p.pct == null) return;
+        const cor = p.pct >= meta ? COR_OK : COR_RUIM;
+        s += `<circle cx="${x(i)}" cy="${y(p.pct)}" r="4.5" fill="${cor}"><title>${rotuloMesLongo(p.mes)}: ${fmtPct1(p.pct)} aprovados de primeira (${p.n} lote(s))</title></circle>`;
+        s += `<text x="${x(i)}" y="${y(p.pct) - 9}" font-size="10" text-anchor="middle" fill="${cor}" font-weight="600">${(Math.round(p.pct * 10) / 10).toString().replace('.', ',')}%</text>`;
+      });
+      return s + '</svg>';
+    }
+
+    // Pareto: barras em ordem decrescente + linha de % acumulado. As barras até
+    // cruzar 80% do total ficam em vermelho — é ali que a ação rende mais.
+    function svgPareto(itens, maxBarras = 12) {
+      let lista = itens.slice(0, maxBarras);
+      const resto = itens.slice(maxBarras).reduce((s, i) => s + i.value, 0);
+      if (resto > 0) lista = [...lista, { label: 'Outras causas', value: resto }];
+      const total = lista.reduce((s, i) => s + i.value, 0) || 1;
+      const W = 760, H = 310, L = 36, R = 40, T = 18, B = 96;
+      const maxV = Math.max(1, ...lista.map((i) => i.value));
+      const bw = (W - L - R) / Math.max(1, lista.length);
+      const yV = (v) => T + (1 - v / maxV) * (H - T - B);
+      const yP = (p) => T + (1 - p / 100) * (H - T - B);
+      let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;font-family:inherit" xmlns="http://www.w3.org/2000/svg">`;
+      [0, 25, 50, 75, 100].forEach((p) => {
+        s += `<line x1="${L}" x2="${W - R}" y1="${yP(p)}" y2="${yP(p)}" stroke="currentColor" stroke-opacity="0.07"/>`;
+        s += `<text x="${W - R + 4}" y="${yP(p) + 3}" font-size="9" fill="currentColor" fill-opacity="0.5">${p}%</text>`;
+      });
+      s += `<line x1="${L}" x2="${W - R}" y1="${yP(80)}" y2="${yP(80)}" stroke="${COR_RUIM}" stroke-opacity="0.45" stroke-dasharray="4 4"/>`;
+      let acum = 0, cruzou = false, pts = [];
+      lista.forEach((it, i) => {
+        const antes = acum / total * 100;
+        acum += it.value;
+        const pc = acum / total * 100;
+        const vital = !cruzou && it.label !== 'Outras causas';
+        if (antes < 80 && pc >= 80) cruzou = true;
+        const cx = L + i * bw + bw / 2;
+        const cor = vital ? COR_RUIM : '#94A3B8';
+        s += `<rect x="${(L + i * bw + bw * 0.15).toFixed(1)}" y="${yV(it.value).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${(H - B - yV(it.value)).toFixed(1)}" rx="3" fill="${cor}" fill-opacity="${vital ? 0.85 : 0.6}"><title>${escHtml(it.label)}: ${it.value} lote(s) — ${fmtPct1(it.value / total * 100)} do total · acumulado ${fmtPct1(pc)}</title></rect>`;
+        s += `<text x="${cx}" y="${yV(it.value) - 4}" font-size="10" text-anchor="middle" fill="currentColor" font-weight="600">${it.value}</text>`;
+        const lbl = it.label.length > 24 ? it.label.slice(0, 23) + '…' : it.label;
+        s += `<text transform="translate(${cx},${H - B + 10}) rotate(-38)" font-size="10" text-anchor="end" fill="currentColor" fill-opacity="0.75">${escHtml(lbl)}</text>`;
+        pts.push([cx, yP(pc), pc]);
+      });
+      s += `<path d="${pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}" fill="none" stroke="${COR_NEUTRA}" stroke-width="2"/>`;
+      pts.forEach((p) => { s += `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${COR_NEUTRA}"><title>Acumulado: ${fmtPct1(p[2])}</title></circle>`; });
+      return s + '</svg>';
+    }
+
+    // Mapa de calor em tabela HTML. celulas[l][c] = { v: número, i: intensidade 0..1, tip }.
+    function htmlMapaCalor({ linhas, colunas, celulas, totaisLinha = true, rotuloCanto = '' }) {
+      const td = 'padding:5px 7px;text-align:center;border:1px solid rgba(127,127,127,.18);font-size:12px;min-width:38px';
+      let h = '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%">';
+      h += `<thead><tr><th style="${td};text-align:left;font-weight:600;opacity:.7">${escHtml(rotuloCanto)}</th>`;
+      colunas.forEach((c) => { h += `<th style="${td};font-weight:600;opacity:.7;white-space:nowrap">${escHtml(c)}</th>`; });
+      if (totaisLinha) h += `<th style="${td};font-weight:700">Total</th>`;
+      h += '</tr></thead><tbody>';
+      linhas.forEach((ln, li) => {
+        h += `<tr><td style="${td};text-align:left;font-weight:500;white-space:nowrap">${escHtml(ln)}</td>`;
+        let tot = 0;
+        colunas.forEach((_, ci) => {
+          const c = (celulas[li] && celulas[li][ci]) || { v: 0, i: 0 };
+          tot += c.v || 0;
+          const bg = c.v ? `rgba(224,49,49,${(0.10 + 0.75 * Math.min(1, c.i || 0)).toFixed(2)})` : 'transparent';
+          const forte = (c.i || 0) > 0.55;
+          h += `<td style="${td};background:${bg};${forte ? 'color:#fff;font-weight:700' : ''}" title="${escHtml(c.tip || '')}">${c.v || ''}</td>`;
+        });
+        if (totaisLinha) h += `<td style="${td};font-weight:700">${tot}</td>`;
+        h += '</tr>';
+      });
+      return h + '</tbody></table></div>';
+    }
+
     function DashboardPage() {
       const toast = useToast();
       const { perfil } = usePerm();
@@ -1145,7 +1256,9 @@
       // Limiares de reincidência (carregados de config_app; defaults calibrados).
       const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
       // Aba interna do Dashboard: gráficos | correções | tendência.
-      const [dashTab, setDashTab] = useState('graficos');
+      const [dashTab, setDashTab] = useState('executiva');
+      // Mês do relatório mensal (null = último mês fechado).
+      const [mesRelatorio, setMesRelatorio] = useState(null);
       // Melhorias regulatórias (lista consolidada; aba do Dashboard).
       const [melhorias, setMelhorias] = useState([]);
       const [decidindoMelhoria, setDecidindoMelhoria] = useState(null); // id em decisão
@@ -1672,6 +1785,236 @@
         catch (e) { return true; }
       })();
 
+      // ====================================================================
+      // VISÃO EXECUTIVA + ONDE ATACAR (06/10/2026)
+      // Unidade = LOTE (OP + série). Cada lote pertence ao mês da sua PRIMEIRA
+      // análise. "Aprovado de primeira" = não teve NC corrigida por troca de
+      // documento nem está com NC aberta — conforme e conforme com ressalvas
+      // contam como aprovados (decisão da Qualidade, meta 95%). Mesmo critério
+      // da fatia "Precisaram de correção" do donut.
+      // ====================================================================
+      const exec = (() => {
+        const ymDe = (iso) => String(iso || '').slice(0, 7);
+        const diasEntre = (a, b) => (new Date(b) - new Date(a)) / 864e5;
+        // Cadeia completa de cada lote (da original até a atual).
+        const porLote = new Map();
+        for (const a of analises) {
+          const k = chaveLote(a);
+          const atual = porLote.get(k);
+          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(k, a);
+        }
+        const equipDoLote = (a) => {
+          const prod = a?.parecer_completo?.produto || {};
+          let e = (prod.equipamento || prod.familia || '').trim();
+          if (!e) {
+            const m = String(prod.modelo || a?.modelo || '').toLowerCase();
+            const sp = String(prod.codigo_sapiens || '').toLowerCase();
+            e = (equipBySapiens.get(sp) || equipByModelo.get(m) || '').trim();
+          }
+          return e || 'Sem equipamento';
+        };
+        const lotes = [];
+        for (const final of porLote.values()) {
+          const cadeia = []; let c = final, guard = 20;
+          while (c && guard-- > 0) { cadeia.push(c); c = c.analise_origem_id ? byId.get(c.analise_origem_id) : null; }
+          cadeia.reverse(); // [original, ..., atual]
+          const raiz = cadeia[0];
+          const aberto = final.status === 'nao_conforme';
+          const falhou = aberto || (temCorrecaoReal(final) && teveNcNaCadeia(final));
+          // Análise que registrou a NC (a primeira NC da cadeia) — é dela que saem as causas.
+          const ncAnalise = falhou ? (cadeia.find((x) => statusDe(x) === 'nao_conforme') || final) : null;
+          const ncAps = (ncAnalise?.parecer_completo?.apontamentos || [])
+            .filter((ap) => ap.severidade === 'nao_conforme' && !ehErroOperador(ap));
+          lotes.push({
+            chave: chaveLote(final), final, raiz, aberto, falhou, ncAps,
+            ini: raiz.created_at, mes: ymDe(raiz.created_at),
+            corrigidoEm: falhou && !aberto ? final.created_at : null,
+            equip: equipDoLote(raiz.parecer_completo ? raiz : final),
+          });
+        }
+
+        // Intervalo do filtro do topo e o período anterior equivalente.
+        const intervalo = (() => {
+          if (filtroPeriodo === 'tudo') return null;
+          const y = filtroAno;
+          let m0 = 0, nMeses = 12, nome = `${y}`;
+          if (filtroSubperiodo != null) {
+            if (filtroPeriodo === 'semestre') { m0 = (filtroSubperiodo - 1) * 6; nMeses = 6; nome = `${filtroSubperiodo}º semestre/${y}`; }
+            if (filtroPeriodo === 'trimestre') { m0 = (filtroSubperiodo - 1) * 3; nMeses = 3; nome = `${filtroSubperiodo}º trimestre/${y}`; }
+            if (filtroPeriodo === 'mes') { m0 = filtroSubperiodo - 1; nMeses = 1; nome = `${MESES_LONGOS[m0]}/${y}`; }
+          }
+          const ini = new Date(y, m0, 1), fim = new Date(y, m0 + nMeses, 1);
+          const pIni = new Date(y, m0 - nMeses, 1);
+          return { ini, fim, nome, ant: { ini: pIni, fim: ini } };
+        })();
+        const dentro = (iso, iv) => { const d = new Date(iso); return d >= iv.ini && d < iv.fim; };
+        const lotesPer = intervalo ? lotes.filter((l) => dentro(l.ini, intervalo)) : lotes;
+        const lotesAnt = intervalo ? lotes.filter((l) => dentro(l.ini, intervalo.ant)) : [];
+
+        const resumo = (ls) => {
+          const n = ls.length, f = ls.filter((l) => l.falhou).length;
+          const tempos = ls.filter((l) => l.corrigidoEm).map((l) => diasEntre(l.ini, l.corrigidoEm)).sort((a, b) => a - b);
+          const media = tempos.length ? tempos.reduce((s, t) => s + t, 0) / tempos.length : null;
+          const mediana = tempos.length ? tempos[Math.floor(tempos.length / 2)] : null;
+          return { n, falhas: f, aprov: n ? (n - f) / n * 100 : null, tempoMedio: media, tempoMediana: mediana, nTempos: tempos.length };
+        };
+        const atual = resumo(lotesPer), anterior = resumo(lotesAnt);
+
+        // NCs em aberto: estado ATUAL, independente do período.
+        const agora = new Date();
+        const abertos = lotes.filter((l) => l.aberto).map((l) => ({ ...l, idade: diasEntre(l.ini, agora) }))
+          .sort((a, b) => b.idade - a.idade);
+        const aging = { ate7: abertos.filter((l) => l.idade <= 7).length, ate30: abertos.filter((l) => l.idade > 7 && l.idade <= 30).length, mais30: abertos.filter((l) => l.idade > 30).length };
+
+        // Série mensal (12 meses terminando no fim do período, ou no mês atual).
+        const refFim = intervalo ? new Date(Math.min(intervalo.fim - 1, agora)) : agora;
+        const meses12 = [];
+        for (let i = 11; i >= 0; i--) { const d = new Date(refFim.getFullYear(), refFim.getMonth() - i, 1); meses12.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+        const serieMensal = meses12.map((mes) => {
+          const ls = lotes.filter((l) => l.mes === mes);
+          const f = ls.filter((l) => l.falhou).length;
+          return { mes, n: ls.length, falhas: f, pct: ls.length ? (ls.length - f) / ls.length * 100 : null };
+        });
+
+        // Causas (Pareto) — 1 contagem por lote e por causa.
+        const causasDe = (l) => [...new Set(l.ncAps.map((ap) => categoriaDoTexto(ap.descricao, ap.documento_afetado)))];
+        const contaCausas = (ls) => { const m = {}; for (const l of ls) if (l.falhou) for (const c of causasDe(l)) m[c] = (m[c] || 0) + 1; return m; };
+        const causasPer = contaCausas(lotesPer);
+        const pareto = Object.entries(causasPer).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
+
+        // Matriz setor × onde (estágio da OP ou documento). 1 contagem por lote e célula.
+        const setorDoAp = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+        const ondeDoAp = (ap) => {
+          const doc = classificarDocApontamento(ap);
+          if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
+          if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
+          if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
+          let est = ap.estagio_responsavel;
+          if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
+          if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
+          if (/form/i.test(ap.documento_afetado || '')) return { k: 'z4', lbl: 'FORM-GQ-0047' };
+          if (doc === 'op') return { k: 'e999', lbl: 'OP (geral)' };
+          return { k: 'z9', lbl: 'Outros' };
+        };
+        const matrizMap = new Map(), colunasMap = new Map();
+        for (const l of lotesPer) {
+          if (!l.falhou) continue;
+          const vistos = new Set();
+          for (const ap of l.ncAps) {
+            const s = setorDoAp(ap), o = ondeDoAp(ap), cel = `${s}|${o.k}`;
+            if (vistos.has(cel)) continue; vistos.add(cel);
+            colunasMap.set(o.k, o.lbl);
+            matrizMap.set(cel, (matrizMap.get(cel) || 0) + 1);
+          }
+        }
+        const colsK = [...colunasMap.keys()].sort();
+        const setores = ['Almoxarifado', 'PCP', ...new Set([...matrizMap.keys()].map((k) => k.split('|')[0]).filter((s) => s !== 'Almoxarifado' && s !== 'PCP'))];
+        const maxCel = Math.max(1, ...matrizMap.values());
+        const matriz = {
+          linhas: setores, colunas: colsK.map((k) => colunasMap.get(k)),
+          celulas: setores.map((s) => colsK.map((k) => { const v = matrizMap.get(`${s}|${k}`) || 0; return { v, i: v / maxCel, tip: v ? `${s} · ${colunasMap.get(k)}: ${v} lote(s) com NC` : '' }; })),
+          vazia: matrizMap.size === 0,
+        };
+        let celTop = null;
+        for (const [k, v] of matrizMap) if (!celTop || v > celTop.v) { const [s, ck] = k.split('|'); celTop = { setor: s, onde: colunasMap.get(ck), v }; }
+
+        // Taxa de NC por equipamento (no período).
+        const eqMap = new Map();
+        for (const l of lotesPer) { const e = eqMap.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (l.falhou) e.f++; eqMap.set(l.equip, e); }
+        const porEquip = [...eqMap.values()].map((e) => ({ ...e, taxa: e.f / e.n * 100 }))
+          .sort((a, b) => (b.taxa - a.taxa) || (b.n - a.n));
+
+        // Mapa de calor causa × mês (12 meses) — cor = % dos lotes do mês com aquela causa.
+        const causas12 = {};
+        const porMesCausa = new Map();
+        for (const l of lotes) {
+          if (!l.falhou || !meses12.includes(l.mes)) continue;
+          for (const c of causasDe(l)) {
+            causas12[c] = (causas12[c] || 0) + 1;
+            const k = `${c}|${l.mes}`; porMesCausa.set(k, (porMesCausa.get(k) || 0) + 1);
+          }
+        }
+        const topCausas12 = Object.entries(causas12).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([c]) => c);
+        const nMes = Object.fromEntries(serieMensal.map((m) => [m.mes, m.n]));
+        const maxPctCel = Math.max(0.0001, ...topCausas12.flatMap((c) => meses12.map((m) => (porMesCausa.get(`${c}|${m}`) || 0) / (nMes[m] || 1))));
+        const mapaCausaMes = {
+          linhas: topCausas12, colunas: meses12.map(rotuloMes),
+          celulas: topCausas12.map((c) => meses12.map((m) => {
+            const v = porMesCausa.get(`${c}|${m}`) || 0, pc = nMes[m] ? v / nMes[m] : 0;
+            return { v, i: pc / maxPctCel, tip: v ? `${c} — ${rotuloMesLongo(m)}: ${v} de ${nMes[m]} lote(s) (${fmtPct1(pc * 100)})` : '' };
+          })),
+          // Tendência por causa: últimos 3 meses × 3 anteriores (em % dos lotes).
+          tendencias: topCausas12.map((c) => {
+            const taxa = (ms) => { const n = ms.reduce((s, m) => s + (nMes[m] || 0), 0); const v = ms.reduce((s, m) => s + (porMesCausa.get(`${c}|${m}`) || 0), 0); return n ? v / n * 100 : 0; };
+            const rec = taxa(meses12.slice(-3)), prev = taxa(meses12.slice(-6, -3));
+            return { causa: c, rec, prev, dir: rec > prev * 1.2 && rec - prev >= 1 ? 'subindo' : rec < prev * 0.8 && prev - rec >= 1 ? 'caindo' : 'estável' };
+          }),
+        };
+
+        return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe };
+      })();
+
+      // ===== Relatório mensal (1 página) — abre numa janela própria para imprimir/salvar em PDF =====
+      const mesesRelatorio = exec.meses12.slice().reverse();
+      const gerarRelatorioMensal = () => {
+        const mes = mesRelatorio || mesesRelatorio[1] || mesesRelatorio[0]; // padrão: último mês fechado
+        const [yy, mm] = mes.split('-').map(Number);
+        const ini = new Date(yy, mm - 1, 1), fim = new Date(yy, mm, 1), pIni = new Date(yy, mm - 2, 1);
+        const noMes = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= ini && d < fim; });
+        const noAnt = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= pIni && d < ini; });
+        const r = (ls) => { const n = ls.length, f = ls.filter((l) => l.falhou).length; const t = ls.filter((l) => l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5); return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null }; };
+        const A = r(noMes), P = r(noAnt);
+        const causas = {}; for (const l of noMes) if (l.falhou) for (const c of exec.causasDe(l)) causas[c] = (causas[c] || 0) + 1;
+        const paretoMes = Object.entries(causas).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
+        const totC = paretoMes.reduce((s, i) => s + i.value, 0);
+        const top3 = paretoMes.slice(0, 3);
+        const eq = new Map(); for (const l of noMes) { const e = eq.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (l.falhou) e.f++; eq.set(l.equip, e); }
+        const eqs = [...eq.values()].filter((e) => e.f > 0).map((e) => ({ ...e, t: e.f / e.n * 100 })).sort((a, b) => b.t - a.t || b.n - a.n).slice(0, 6);
+        const serie = exec.lotes.length ? (() => {
+          const ms = []; for (let i = 11; i >= 0; i--) { const d = new Date(yy, mm - 1 - i, 1); ms.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+          return ms.map((m) => { const ls = exec.lotes.filter((l) => l.mes === m); const f = ls.filter((l) => l.falhou).length; return { mes: m, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }; });
+        })() : [];
+        const delta = A.ap != null && P.ap != null ? A.ap - P.ap : null;
+        const fmtD = (x) => x == null ? '' : `${x >= 0 ? '▲ +' : '▼ '}${x.toFixed(1).replace('.', ',')} p.p. vs ${rotuloMesLongo(`${pIni.getFullYear()}-${String(pIni.getMonth() + 1).padStart(2, '0')}`)}`;
+        const resumoTxt = A.n === 0 ? `Nenhum lote analisado em ${rotuloMesLongo(mes)}.`
+          : `Em ${rotuloMesLongo(mes)}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira (meta ${META_APROVACAO}%)${delta != null ? `, ${delta >= 0 ? 'alta' : 'queda'} de ${Math.abs(delta).toFixed(1).replace('.', ',')} p.p. em relação ao mês anterior` : ''}. `
+            + (A.f ? `${A.f} lote(s) tiveram não conformidade${top3.length ? `; as ${top3.length} principais causas — ${top3.map((t) => t.label).join(', ')} — respondem por ${fmtPct1(top3.reduce((s, t) => s + t.value, 0) / (totC || 1) * 100)} das ocorrências` : ''}.` : 'Nenhum lote teve não conformidade.');
+        const card = (titulo, valor, sub, cor) => `<div class="k"><div class="kt">${titulo}</div><div class="kv" style="color:${cor || 'inherit'}">${valor}</div><div class="ks">${sub || ''}</div></div>`;
+        const abertosTab = exec.abertos.slice(0, 10).map((l) => `<tr><td>${escHtml(l.final.numero_op || '—')}</td><td>${escHtml(l.final.numero_serie || '—')}</td><td>${escHtml(l.equip)}</td><td style="text-align:right">${Math.floor(l.idade)} dia(s)</td></tr>`).join('');
+        const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatorio_qualidade_${mes}</title>
+<style>
+ @page{size:A4;margin:12mm} body{font-family:Raleway,Segoe UI,Arial,sans-serif;color:#1a2238;font-size:11px;margin:0}
+ h1{font-size:17px;margin:0} h2{font-size:12px;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.04em;color:#4a5568}
+ .cab{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1E9DBA;padding-bottom:6px}
+ .ks,.sub{color:#64748b} .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+ .k{border:1px solid #e2e8f0;border-radius:8px;padding:8px} .kt{font-size:9px;text-transform:uppercase;color:#64748b;font-weight:600} .kv{font-size:20px;font-weight:700;margin:2px 0}
+ .res{background:#f1f5f9;border-radius:8px;padding:8px 10px;margin-top:10px;line-height:1.45}
+ .duas{display:grid;grid-template-columns:1fr 1fr;gap:14px} table{border-collapse:collapse;width:100%} th,td{padding:3px 6px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:10.5px}
+ .rod{margin-top:10px;font-size:9px;color:#94a3b8}
+</style></head><body>
+<div class="cab"><div><h1>Relatório mensal de qualidade — Conciliação da produção</h1><div class="sub">Confiance Medical · Garantia da Qualidade</div></div><div style="font-size:14px;font-weight:700">${rotuloMesLongo(mes)}</div></div>
+<div class="grid">
+ ${card('Aprovação de primeira', fmtPct1(A.ap), `Meta ${META_APROVACAO}% · ${fmtD(delta)}`, A.ap == null ? '' : A.ap >= META_APROVACAO ? COR_OK : COR_RUIM)}
+ ${card('Lotes analisados', A.n, `${A.f} com não conformidade`)}
+ ${card('Tempo médio até correção', A.tm == null ? '—' : `${A.tm.toFixed(1).replace('.', ',')} dias`, 'da 1ª análise à reanálise aprovada')}
+ ${card('NCs em aberto hoje', exec.abertos.length, `${exec.aging.mais30} há mais de 30 dias`, exec.abertos.length ? COR_RUIM : COR_OK)}
+</div>
+<div class="res">${escHtml(resumoTxt)}</div>
+<h2>Aprovação de primeira — últimos 12 meses</h2>${svgLinhaAprovacao(serie)}
+<h2>Principais causas de não conformidade no mês (Pareto)</h2>${paretoMes.length ? svgPareto(paretoMes, 8) : '<div class="sub">Sem não conformidades no mês.</div>'}
+<div class="duas">
+ <div><h2>Equipamentos com maior taxa de NC</h2>${eqs.length ? `<table><tr><th>Equipamento</th><th style="text-align:right">Lotes com NC</th><th style="text-align:right">Taxa</th></tr>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td style="text-align:right">${e.f} de ${e.n}</td><td style="text-align:right;color:${e.t > 100 - META_APROVACAO ? COR_RUIM : COR_OK};font-weight:600">${fmtPct1(e.t)}</td></tr>`).join('')}</table>` : '<div class="sub">Nenhum equipamento com NC no mês.</div>'}</div>
+ <div><h2>NCs em aberto mais antigas</h2>${abertosTab ? `<table><tr><th>OP</th><th>Série</th><th>Equipamento</th><th style="text-align:right">Em aberto</th></tr>${abertosTab}</table>` : '<div class="sub">Nenhuma NC em aberto.</div>'}</div>
+</div>
+<div class="rod">Unidade de contagem: lote (OP + nº de série), no mês da 1ª análise. Aprovado de primeira = conforme ou conforme com ressalvas sem correção de documento por não conformidade. Gerado em ${new Date().toLocaleString('pt-BR')} pela Plataforma de Conciliação.</div>
+<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>
+</body></html>`;
+        const w = window.open('', '_blank');
+        if (!w) { toast.error('O navegador bloqueou a janela do relatório. Libere pop-ups para este endereço e tente de novo.'); return; }
+        w.document.open(); w.document.write(html); w.document.close();
+        registrarLog(perfil, 'relatorio_mensal', 'dashboard', mes, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório mensal de qualidade de ${rotuloMesLongo(mes)}`);
+      };
+
       // Tratativa de reincidência via Slack removida daqui (22/07/2026): a aba é só
       // consulta; o aviso de reincidência é enviado junto da NC (ver ParecerView).
 
@@ -1876,7 +2219,7 @@
 
           {/* ===== Abas do Dashboard ===== */}
           <div className="flex items-center gap-1 mb-6 border-b no-print flex-wrap">
-            {[['graficos', 'Gráficos'], ['correcoes', 'Histórico de correções'], ['tendencia', 'Tendência e reincidência'], ['melhorias', 'Melhorias regulatórias']].map(([k, lbl]) => (
+            {[['executiva', 'Visão executiva'], ['atacar', 'Onde atacar'], ['graficos', 'Gráficos'], ['correcoes', 'Histórico de correções'], ['tendencia', 'Tendência e reincidência'], ['melhorias', 'Melhorias regulatórias']].map(([k, lbl]) => (
               <button
                 key={k}
                 onClick={() => setDashTab(k)}
@@ -1886,6 +2229,176 @@
               </button>
             ))}
           </div>
+
+          {/* ===== Aba: Visão executiva (06/10/2026) ===== */}
+          {dashTab === 'executiva' && (() => {
+            const A = exec.atual, P = exec.anterior;
+            const temComp = !!exec.intervalo && P.n > 0;
+            const Delta = ({ v, unid, bomQuandoSobe }) => {
+              if (!temComp || v == null || isNaN(v)) return null;
+              const bom = Math.abs(v) < 0.05 ? null : (v > 0) === bomQuandoSobe;
+              const cor = bom == null ? 'hsl(var(--muted-foreground))' : bom ? COR_OK : COR_RUIM;
+              return <span className="text-xs font-semibold" style={{ color: cor }}>{Math.abs(v) < 0.05 ? '■ ' : v > 0 ? '▲ +' : '▼ −'}{Math.abs(v) < 0.05 ? '0' : Math.abs(v).toFixed(1).replace('.', ',')}{unid} <span className="font-normal text-muted-foreground">vs período anterior</span></span>;
+            };
+            const Kpi = ({ titulo, valor, cor, sub, children }) => (
+              <Card><div className="p-5">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{titulo}</div>
+                <div className="text-3xl font-bold mt-1" style={cor ? { color: cor } : {}}>{loading ? '…' : valor}</div>
+                <div className="text-xs text-muted-foreground mt-1">{sub}</div>
+                <div className="mt-1">{children}</div>
+              </div></Card>
+            );
+            const atingiu = A.aprov != null && A.aprov >= META_APROVACAO;
+            return (<>
+              <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+                <div className="text-sm text-muted-foreground">
+                  {exec.intervalo ? <>Período: <strong className="text-foreground">{exec.intervalo.nome}</strong> · comparação com o período anterior de mesma duração</> : <>Período: <strong className="text-foreground">todo o histórico</strong> (sem comparação)</>}
+                </div>
+                <div className="flex items-center gap-2 no-print">
+                  <select value={mesRelatorio || mesesRelatorio[1] || mesesRelatorio[0] || ''} onChange={(e) => setMesRelatorio(e.target.value)}
+                    className="rounded-md border bg-background px-2 py-1.5 text-sm" title="Mês do relatório">
+                    {mesesRelatorio.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}
+                  </select>
+                  <Button onClick={gerarRelatorioMensal} title="Relatório de uma página para enviar aos gestores (abre para imprimir ou salvar em PDF)">
+                    <Icon name="download" className="h-4 w-4" />Relatório mensal (PDF)
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+                <Kpi titulo="Aprovação de primeira" valor={fmtPct1(A.aprov)} cor={A.aprov == null ? undefined : atingiu ? COR_OK : COR_RUIM}
+                  sub={<>Meta {META_APROVACAO}% · {A.n} lote(s) · conforme + com ressalvas{A.aprov != null && !atingiu ? <> · faltam <strong>{(META_APROVACAO - A.aprov).toFixed(1).replace('.', ',')} p.p.</strong></> : null}</>}>
+                  <Delta v={A.aprov != null && P.aprov != null ? A.aprov - P.aprov : null} unid=" p.p." bomQuandoSobe />
+                </Kpi>
+                <Kpi titulo="Lotes com não conformidade" valor={A.falhas} cor={A.falhas ? COR_RUIM : COR_OK}
+                  sub={A.n ? `${fmtPct1(A.falhas / A.n * 100)} dos lotes do período` : 'Sem lotes no período'}>
+                  <Delta v={temComp ? (A.n ? A.falhas / A.n * 100 : 0) - (P.n ? P.falhas / P.n * 100 : 0) : null} unid=" p.p." bomQuandoSobe={false} />
+                </Kpi>
+                <Kpi titulo="Tempo médio até a correção" valor={A.tempoMedio == null ? '—' : `${A.tempoMedio.toFixed(1).replace('.', ',')} d`}
+                  sub={A.nTempos ? `Da 1ª análise à reanálise aprovada · mediana ${A.tempoMediana.toFixed(1).replace('.', ',')} d · ${A.nTempos} lote(s)` : 'Nenhuma NC corrigida no período'}>
+                  <Delta v={A.tempoMedio != null && P.tempoMedio != null ? A.tempoMedio - P.tempoMedio : null} unid=" d" bomQuandoSobe={false} />
+                </Kpi>
+                <Kpi titulo="NCs em aberto (hoje)" valor={exec.abertos.length} cor={exec.abertos.length ? COR_RUIM : COR_OK}
+                  sub="Estado atual — independe do período">
+                  <div className="flex gap-1.5 flex-wrap">
+                    {[['até 7 d', exec.aging.ate7, 'hsl(var(--muted-foreground))'], ['8–30 d', exec.aging.ate30, '#E8890C'], ['+30 d', exec.aging.mais30, COR_RUIM]].map(([l, v, c]) => (
+                      <span key={l} className="text-[11px] px-2 py-0.5 rounded-full border" style={{ color: c, borderColor: c }}>{l}: <strong>{v}</strong></span>
+                    ))}
+                  </div>
+                </Kpi>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
+                <Card className="xl:col-span-2">
+                  <CardHeader>
+                    <CardTitle className="text-sm">Aprovação de primeira — mês a mês</CardTitle>
+                    <CardDescription>% de lotes aprovados na 1ª análise (conforme + com ressalvas), pelo mês da 1ª análise. Verde = na meta; vermelho = abaixo. "n" = lotes do mês.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {exec.serieMensal.every((m) => m.n === 0)
+                      ? <div className="text-sm text-muted-foreground text-center py-8">Sem lotes nos últimos 12 meses.</div>
+                      : <div dangerouslySetInnerHTML={{ __html: svgLinhaAprovacao(exec.serieMensal) }} />}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">NCs em aberto mais antigas</CardTitle>
+                    <CardDescription>Clique para abrir a análise.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {exec.abertos.length === 0 ? <div className="text-sm text-muted-foreground text-center py-6">Nenhuma NC em aberto.</div> : (
+                      <div className="divide-y rounded-md border max-h-[300px] overflow-y-auto">
+                        {exec.abertos.slice(0, 15).map((l) => (
+                          <button key={l.chave} type="button" onClick={() => l.final.parecer_completo && setViewing(l.final)} className="w-full text-left p-2 text-xs flex items-center justify-between gap-2 hover:bg-muted/40">
+                            <span className="min-w-0"><span className="font-mono font-semibold">OP {l.final.numero_op || '—'}</span> <span className="text-muted-foreground">· {l.final.numero_serie || '—'}</span><div className="text-muted-foreground truncate">{l.equip}</div></span>
+                            <span className="shrink-0 font-semibold" style={{ color: l.idade > 30 ? COR_RUIM : l.idade > 7 ? '#E8890C' : undefined }}>{Math.floor(l.idade)} d</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="text-sm">Onde concentrar a ação</CardTitle>
+                  <CardDescription>Resumo do período — detalhes na aba "Onde atacar".</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Principais causas</div>
+                      {exec.pareto.length === 0 ? <div className="text-muted-foreground">Sem NCs no período.</div> : (() => {
+                        const tot = exec.pareto.reduce((s, i) => s + i.value, 0);
+                        return exec.pareto.slice(0, 3).map((p) => <div key={p.label} className="flex justify-between gap-2 py-0.5"><span className="truncate">{p.label}</span><span className="font-semibold">{p.value} <span className="font-normal text-muted-foreground">({fmtPct1(p.value / tot * 100)})</span></span></div>);
+                      })()}
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Ponto mais crítico</div>
+                      {exec.celTop ? <div><strong>{exec.celTop.setor}</strong> · {exec.celTop.onde}<div className="text-muted-foreground text-xs">{exec.celTop.v} lote(s) com NC</div></div> : <div className="text-muted-foreground">—</div>}
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Equipamentos acima do limite ({100 - META_APROVACAO}% de NC)</div>
+                      {(() => { const l = exec.porEquip.filter((e) => e.f > 0 && e.taxa > 100 - META_APROVACAO).slice(0, 3);
+                        return l.length === 0 ? <div className="text-muted-foreground">Nenhum.</div> : l.map((e) => <div key={e.equip} className="flex justify-between gap-2 py-0.5"><span className="truncate">{e.equip}</span><span className="font-semibold" style={{ color: COR_RUIM }}>{fmtPct1(e.taxa)} <span className="font-normal text-muted-foreground">({e.f}/{e.n})</span></span></div>); })()}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </>);
+          })()}
+
+          {/* ===== Aba: Onde atacar (06/10/2026) ===== */}
+          {dashTab === 'atacar' && (<>
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle className="text-sm">Pareto das causas de não conformidade</CardTitle>
+                <CardDescription>Lotes do período que tiveram NC, por causa (um lote conta uma vez por causa). As barras em vermelho somam ~80% das ocorrências — atacar essas causas resolve a maior parte do problema. Linha = % acumulado.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {exec.pareto.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
+                  : <div dangerouslySetInnerHTML={{ __html: svgPareto(exec.pareto) }} />}
+              </CardContent>
+            </Card>
+
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle className="text-sm">Setor × onde ocorreu</CardTitle>
+                <CardDescription>Quantos lotes tiveram NC em cada combinação de setor responsável e estágio da OP (ou documento). Quanto mais escura a célula, maior a concentração — é ali que a conversa com o gestor deve começar.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {exec.matriz.vazia ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
+                  : <div dangerouslySetInnerHTML={{ __html: htmlMapaCalor({ ...exec.matriz, rotuloCanto: 'Setor' }) }} />}
+              </CardContent>
+            </Card>
+
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle className="text-sm">Taxa de NC por equipamento</CardTitle>
+                <CardDescription>% dos lotes de cada equipamento que tiveram NC no período — em taxa, não em total, para não penalizar quem produz mais. Linha tracejada = limite da meta ({100 - META_APROVACAO}%). Equipamentos com menos de 5 lotes aparecem esmaecidos (amostra pequena).</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {exec.porEquip.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Sem lotes no período.</div> : (() => {
+                  const maxT = Math.max(100 - META_APROVACAO + 5, ...exec.porEquip.map((e) => e.taxa));
+                  return (
+                    <div className="space-y-2">
+                      {exec.porEquip.map((e) => (
+                        <div key={e.equip} className={cn('grid grid-cols-12 items-center gap-2 text-xs', e.n < 5 && 'opacity-50')}>
+                          <div className="col-span-4 truncate" title={e.equip}>{e.equip}</div>
+                          <div className="col-span-6 relative h-4 rounded bg-muted">
+                            <div className="absolute inset-y-0 left-0 rounded" style={{ width: `${e.taxa / maxT * 100}%`, background: e.taxa > 100 - META_APROVACAO ? COR_RUIM : COR_OK, opacity: 0.85 }} />
+                            <div className="absolute inset-y-[-2px] border-l-2 border-dashed" style={{ left: `${(100 - META_APROVACAO) / maxT * 100}%`, borderColor: COR_META }} />
+                          </div>
+                          <div className="col-span-2 text-right"><strong style={{ color: e.taxa > 100 - META_APROVACAO ? COR_RUIM : undefined }}>{fmtPct1(e.taxa)}</strong> <span className="text-muted-foreground">({e.f}/{e.n})</span></div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+          </>)}
 
           {dashTab === 'graficos' && (<>
           {/* ===== Cards de métrica principais ===== */}
@@ -2108,6 +2621,27 @@
           ))}
 
           {/* ===== Análise de tendência de correções (período personalizado) ===== */}
+          {dashTab === 'tendencia' && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle className="text-sm">Causas de NC mês a mês — últimos 12 meses</CardTitle>
+              <CardDescription>Cada linha é uma causa e cada coluna um mês; o número é a quantidade de lotes com aquela NC e a cor é a % dos lotes do mês (normaliza o volume produzido). Faixa que não clareia = reincidência; célula que escurece no fim = causa em alta.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {exec.mapaCausaMes.linhas.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade nos últimos 12 meses.</div> : (<>
+                <div dangerouslySetInnerHTML={{ __html: htmlMapaCalor({ ...exec.mapaCausaMes, rotuloCanto: 'Causa' }) }} />
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {exec.mapaCausaMes.tendencias.filter((t) => t.dir !== 'estável').map((t) => (
+                    <span key={t.causa} className="text-[11px] px-2 py-0.5 rounded-full border" style={{ color: t.dir === 'subindo' ? COR_RUIM : COR_OK, borderColor: t.dir === 'subindo' ? COR_RUIM : COR_OK }}>
+                      {t.dir === 'subindo' ? '▲' : '▼'} {t.causa}: {fmtPct1(t.prev)} → {fmtPct1(t.rec)} dos lotes (3 meses anteriores → últimos 3)
+                    </span>
+                  ))}
+                  {exec.mapaCausaMes.tendencias.every((t) => t.dir === 'estável') && <span className="text-xs text-muted-foreground">Nenhuma causa com variação relevante entre os últimos 3 meses e os 3 anteriores.</span>}
+                </div>
+              </>)}
+            </CardContent>
+          </Card>
+          )}
           {dashTab === 'tendencia' && (
           <Card className="mt-6" id="chart-tendencia">
             <CardHeader>
