@@ -364,7 +364,10 @@
     const CARGO_LABEL = Object.fromEntries(CARGOS.map((c) => [c.id, c.label]));
     // Funcionalidades controláveis do site
     const PERMISSOES_DEF = [
-      { grupo: 'Dashboard', itens: [{ key: 'dashboard_ver', label: 'Ver dashboard' }] },
+      { grupo: 'Dashboard', itens: [
+        { key: 'dashboard_ver', label: 'Ver dashboard' },
+        { key: 'dashboard_operadores', label: 'Ver NCs por operador (gráfico e relatório)' },
+      ] },
       { grupo: 'Análise', itens: [
         { key: 'analise_executar', label: 'Executar nova análise' },
         { key: 'analise_refazer', label: 'Refazer análise' },
@@ -397,7 +400,7 @@
       assistente_gq: ['dashboard_ver', 'analise_executar', 'analise_refazer', 'analise_remover_etiqueta', 'historico_ver', 'historico_baixar', 'historico_correcao', 'historico_importar'],
       analista_gq: ['dashboard_ver', 'analise_executar', 'analise_refazer', 'analise_remover_etiqueta', 'historico_ver', 'historico_baixar', 'historico_justificar', 'historico_correcao', 'historico_importar', 'cadastro_ver', 'cadastro_produtos', 'cadastro_fichas'],
       responsavel_qualidade: TODAS_PERMISSOES.filter((k) => k !== 'config_usuarios'),
-      responsavel_producao: ['dashboard_ver', 'historico_ver', 'historico_baixar'],
+      responsavel_producao: ['dashboard_ver', 'dashboard_operadores', 'historico_ver', 'historico_baixar'],
     };
     function permsPadraoDoCargo(cargo) {
       const set = {};
@@ -1117,6 +1120,7 @@
     const rotuloMes = (ym) => `${MESES_CURTOS[parseInt(ym.slice(5, 7), 10) - 1]}/${ym.slice(2, 4)}`;
     const rotuloMesLongo = (ym) => `${MESES_LONGOS[parseInt(ym.slice(5, 7), 10) - 1]}/${ym.slice(0, 4)}`;
     const COR_OK = '#2F9E44', COR_RUIM = '#E03131', COR_META = '#2F9E44', COR_NEUTRA = '#1E9DBA';
+    const PALETA_TIPOS = ['#E03131', '#1E9DBA', '#F08C00', '#7048E8', '#2F9E44', '#D6336C', '#0C8599', '#5C940D'];
 
     // Linha mensal da aprovação de primeira, com a meta tracejada.
     // pontos: [{ mes:'2026-09', pct: 93.1 | null, n: 42 }]
@@ -1216,7 +1220,11 @@
 
     function DashboardPage() {
       const toast = useToast();
-      const { perfil } = usePerm();
+      const { perfil, isAdmin, can } = usePerm();
+      // NCs por operador: só administrador e gestores (decisão 06/10/2026). Além da
+      // permissão explícita, os cargos de responsável já enxergam por padrão.
+      const podeVerOperador = !!(isAdmin || perfil?.cargo === 'admin' || can('dashboard_operadores')
+        || ['responsavel_qualidade', 'responsavel_producao'].includes(perfil?.cargo));
       const { pedirOuExecutar } = useSolic();
       const [analises, setAnalises] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -1257,8 +1265,6 @@
       const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
       // Aba interna do Dashboard: gráficos | correções | tendência.
       const [dashTab, setDashTab] = useState('executiva');
-      // Mês do relatório mensal (null = último mês fechado).
-      const [mesRelatorio, setMesRelatorio] = useState(null);
       // Melhorias regulatórias (lista consolidada; aba do Dashboard).
       const [melhorias, setMelhorias] = useState([]);
       const [decidindoMelhoria, setDecidindoMelhoria] = useState(null); // id em decisão
@@ -1485,6 +1491,7 @@
         { nome: 'Responsável Legal',   re: /respons[áa]vel\s+legal/i },
         { nome: 'Nº de série',         re: /\bs[ée]rie\b/i },
         { nome: 'Cronologia incoerente', re: /cronologia|hor[áa]rio\s+incoerente|incoerente|sequ[êe]ncia\s+de\s+(est[áa]gios|etapas)/i },
+        { nome: 'Tempo de estágio',    re: /tempo esperado|faixa esperada|tempo do est[áa]gio/i },
         { nome: 'Data',                re: /\bdata\b/i },
         { nome: 'Validade',            re: /validade/i },
         { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
@@ -1830,7 +1837,7 @@
           const ncAps = (ncAnalise?.parecer_completo?.apontamentos || [])
             .filter((ap) => ap.severidade === 'nao_conforme' && !ehErroOperador(ap));
           lotes.push({
-            chave: chaveLote(final), final, raiz, aberto, falhou, ncAps,
+            chave: chaveLote(final), final, raiz, aberto, falhou, ncAps, ncAnalise,
             ini: raiz.created_at, mes: ymDe(raiz.created_at),
             corrigidoEm: falhou && !aberto ? final.created_at : null,
             equip: equipDoLote(raiz.parecer_completo ? raiz : final),
@@ -1956,68 +1963,291 @@
           }),
         };
 
-        return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe };
+        // ---- Registros por APONTAMENTO de NC (06/10/2026) ----
+        // Cada apontamento NC conta 1. Tipo detalhado = documento · campo. Operador
+        // atribuído: etiqueta → quem executou o Estágio 50 (Embalagem, onde a etiqueta
+        // é aplicada); NC de um estágio específico → executor daquele estágio; demais →
+        // executor do Estágio 60 (Conciliação), que regulariza a OP.
+        const docRotulo = (ap) => {
+          const b = classificarDocApontamento(ap);
+          if (b === 'etx') return 'Etiqueta Externa';
+          if (b === 'eac') return 'Etiqueta de acessório';
+          if (b === 'rc') return 'RC';
+          if (/form/i.test(ap.documento_afetado || '')) return 'FORM-GQ-0047';
+          if (b === 'op') return 'OP';
+          return String(ap.documento_afetado || 'Outros').trim() || 'Outros';
+        };
+        const nomeOperador = (c) => {
+          if (!c) return null;
+          if (c.operador_nome) return String(c.operador_nome).trim();
+          const m = String(c.operador || '').trim().match(/^\d+\s+(.+)$/);
+          return m ? m[1].trim() : (String(c.operador || '').trim() || null);
+        };
+        const executorDoEstagio = (analise, n) => {
+          const crono = analise?.parecer_completo?.cronologia || [];
+          const c = crono.find((x) => Number(x.estagio_numero ?? parseInt(String(x.estagio || ''), 10)) === n);
+          return nomeOperador(c);
+        };
+        const ncRegs = [];
+        for (const l of lotes) {
+          if (!l.falhou) continue;
+          for (const ap of l.ncAps) {
+            const b = classificarDocApontamento(ap);
+            let est;
+            if (b === 'etx' || b === 'eac') est = 50;
+            else if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
+            else if (Array.isArray(ap.estagios) && ap.estagios.length && !isNaN(parseInt(String(ap.estagios[0]), 10))) est = parseInt(String(ap.estagios[0]), 10);
+            else est = 60;
+            let operador = executorDoEstagio(l.ncAnalise, est);
+            let estAtrib = est;
+            if (!operador && est !== 60) { operador = executorDoEstagio(l.ncAnalise, 60); estAtrib = 60; }
+            const doc = docRotulo(ap), cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
+            ncRegs.push({
+              lote: l, mes: l.mes, ini: l.ini, equip: l.equip, aberto: l.aberto,
+              setor: setorDoAp(ap), onde: ondeDoAp(ap).lbl,
+              doc, cat, tipo: cat === doc ? doc : `${doc} · ${cat}`,
+              desc: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
+              operador: operador || 'Não identificado', estagio: operador ? estAtrib : null,
+            });
+          }
+        }
+        const ncRegsPer = intervalo ? ncRegs.filter((r) => dentro(r.ini, intervalo)) : ncRegs;
+        // Operador × tipo no período (para o gráfico do Dashboard).
+        const opMap = new Map();
+        for (const r of ncRegsPer) {
+          const o = opMap.get(r.operador) || { operador: r.operador, total: 0, tipos: {} };
+          o.total++; o.tipos[r.tipo] = (o.tipos[r.tipo] || 0) + 1; opMap.set(r.operador, o);
+        }
+        const porOperador = [...opMap.values()].sort((a, b) => b.total - a.total);
+        const tiposOperador = Object.entries(ncRegsPer.reduce((m, r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; return m; }, {}))
+          .sort((a, b) => b[1] - a[1]).map(([t]) => t);
+
+        return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe, ncRegs, porOperador, tiposOperador };
       })();
 
-      // ===== Relatório mensal (1 página) — abre numa janela própria para imprimir/salvar em PDF =====
-      const mesesRelatorio = exec.meses12.slice().reverse();
-      const gerarRelatorioMensal = () => {
-        const mes = mesRelatorio || mesesRelatorio[1] || mesesRelatorio[0]; // padrão: último mês fechado
-        const [yy, mm] = mes.split('-').map(Number);
-        const ini = new Date(yy, mm - 1, 1), fim = new Date(yy, mm, 1), pIni = new Date(yy, mm - 2, 1);
-        const noMes = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= ini && d < fim; });
-        const noAnt = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= pIni && d < ini; });
-        const r = (ls) => { const n = ls.length, f = ls.filter((l) => l.falhou).length; const t = ls.filter((l) => l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5).filter((x) => x >= 0); return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null }; };
-        const A = r(noMes), P = r(noAnt);
-        const causas = {}; for (const l of noMes) if (l.falhou) for (const c of exec.causasDe(l)) causas[c] = (causas[c] || 0) + 1;
-        const paretoMes = Object.entries(causas).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
-        const totC = paretoMes.reduce((s, i) => s + i.value, 0);
-        const top3 = paretoMes.slice(0, 3);
-        const eq = new Map(); for (const l of noMes) { const e = eq.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (l.falhou) e.f++; eq.set(l.equip, e); }
-        const eqs = [...eq.values()].filter((e) => e.f > 0).map((e) => ({ ...e, t: e.f / e.n * 100 })).sort((a, b) => b.t - a.t || b.n - a.n).slice(0, 6);
-        const serie = exec.lotes.length ? (() => {
-          const ms = []; for (let i = 11; i >= 0; i--) { const d = new Date(yy, mm - 1 - i, 1); ms.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
-          return ms.map((m) => { const ls = exec.lotes.filter((l) => l.mes === m); const f = ls.filter((l) => l.falhou).length; return { mes: m, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }; });
-        })() : [];
-        const delta = A.ap != null && P.ap != null ? A.ap - P.ap : null;
-        const fmtD = (x) => x == null ? '' : `${x >= 0 ? '▲ +' : '▼ '}${x.toFixed(1).replace('.', ',')} p.p. vs ${rotuloMesLongo(`${pIni.getFullYear()}-${String(pIni.getMonth() + 1).padStart(2, '0')}`)}`;
-        const resumoTxt = A.n === 0 ? `Nenhum lote analisado em ${rotuloMesLongo(mes)}.`
-          : `Em ${rotuloMesLongo(mes)}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira (meta ${META_APROVACAO}%)${delta != null ? `, ${delta >= 0 ? 'alta' : 'queda'} de ${Math.abs(delta).toFixed(1).replace('.', ',')} p.p. em relação ao mês anterior` : ''}. `
-            + (A.f ? `${A.f} lote(s) tiveram não conformidade${top3.length ? `; as ${top3.length} principais causas — ${top3.map((t) => t.label).join(', ')} — respondem por ${fmtPct1(top3.reduce((s, t) => s + t.value, 0) / (totC || 1) * 100)} das ocorrências` : ''}.` : 'Nenhum lote teve não conformidade.');
-        const card = (titulo, valor, sub, cor) => `<div class="k"><div class="kt">${titulo}</div><div class="kv" style="color:${cor || 'inherit'}">${valor}</div><div class="ks">${sub || ''}</div></div>`;
-        const abertosTab = exec.abertos.slice(0, 10).map((l) => `<tr><td>${escHtml(l.final.numero_op || '—')}</td><td>${escHtml(l.final.numero_serie || '—')}</td><td>${escHtml(l.equip)}</td><td style="text-align:right">${Math.floor(l.idade)} dia(s)</td></tr>`).join('');
-        const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatorio_qualidade_${mes}</title>
-<style>
- @page{size:A4;margin:12mm} body{font-family:Raleway,Segoe UI,Arial,sans-serif;color:#1a2238;font-size:11px;margin:0}
- h1{font-size:17px;margin:0} h2{font-size:12px;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.04em;color:#4a5568}
- .cab{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1E9DBA;padding-bottom:6px}
- .ks,.sub{color:#64748b} .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
- .k{border:1px solid #e2e8f0;border-radius:8px;padding:8px} .kt{font-size:9px;text-transform:uppercase;color:#64748b;font-weight:600} .kv{font-size:20px;font-weight:700;margin:2px 0}
- .res{background:#f1f5f9;border-radius:8px;padding:8px 10px;margin-top:10px;line-height:1.45}
- .duas{display:grid;grid-template-columns:1fr 1fr;gap:14px} table{border-collapse:collapse;width:100%} th,td{padding:3px 6px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:10.5px}
- .rod{margin-top:10px;font-size:9px;color:#94a3b8}
+      // ===== Relatório de qualidade PERSONALIZÁVEL (06/10/2026) =====
+      // A usuária escolhe período, recortes e seções; modelos ficam salvos no banco
+      // (config_app.relatorio_modelos) para todos. O PDF é gerado pelo serviço local
+      // (Chromium) — sem o cabeçalho "about:blank" da impressão do navegador. Se o
+      // serviço estiver fora, cai na janela de impressão.
+      const SECOES_REL = [
+        { id: 'indicadores', label: 'Indicadores e resumo', desc: 'Aprovação de primeira × meta, lotes com NC, tempo até a correção' },
+        { id: 'evolucao', label: 'Evolução em 12 meses', desc: 'Linha da aprovação de primeira mês a mês' },
+        { id: 'pareto', label: 'Pareto dos tipos de erro', desc: 'Tipos de erro (documento · campo) que mais geraram NC' },
+        { id: 'matriz', label: 'Setor × onde ocorreu', desc: 'Concentração por setor e estágio/documento' },
+        { id: 'equipamentos', label: 'Taxa de NC por equipamento', desc: '% dos lotes de cada equipamento com NC' },
+        { id: 'operadores', label: 'NCs por operador', desc: 'Operador × tipo de erro (apontamentos)', restrito: true },
+        { id: 'lista', label: 'Lista detalhada das NCs', desc: 'Cada apontamento com o texto do item não conforme' },
+        { id: 'abertasPeriodo', label: 'NCs do período ainda abertas', desc: 'Lotes do período que seguem sem correção' },
+        { id: 'abertasAnteriores', label: 'NCs abertas de períodos anteriores', desc: 'Pendências antigas, fora do período' },
+      ];
+      const mesesEscolha = (() => { const out = [], d = new Date(); for (let i = 0; i < 24; i++) { const x = new Date(d.getFullYear(), d.getMonth() - i, 1); out.push(`${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`); } return out; })();
+      const cfgRelPadrao = () => ({
+        de: mesesEscolha[1], ate: mesesEscolha[1], equip: '', setor: '', operador: '', orientacao: 'retrato',
+        secoes: { indicadores: true, evolucao: true, pareto: true, matriz: true, equipamentos: true, operadores: false, lista: false, abertasPeriodo: true, abertasAnteriores: false },
+      });
+      const [relOpen, setRelOpen] = useState(false);
+      const [relCfg, setRelCfg] = useState(cfgRelPadrao);
+      const [relModelos, setRelModelos] = useState([]);
+      const [relModeloSel, setRelModeloSel] = useState('');
+      const [relGerando, setRelGerando] = useState(false);
+      const carregarModelosRel = async () => {
+        try {
+          const { data } = await supabase.from('config_app').select('valor').eq('chave', 'relatorio_modelos').limit(1);
+          const v = data && data[0] ? JSON.parse(data[0].valor || '[]') : [];
+          setRelModelos(Array.isArray(v) ? v : []);
+        } catch (e) { setRelModelos([]); }
+      };
+      const gravarModelosRel = async (lista) => {
+        const autor = perfil?.nome_completo || perfil?.email || null;
+        const { error } = await supabase.from('config_app').upsert([{ chave: 'relatorio_modelos', valor: JSON.stringify(lista), updated_at: new Date().toISOString(), updated_by: autor }], { onConflict: 'chave' });
+        if (error) throw error;
+        setRelModelos(lista);
+      };
+      const abrirMontagemRelatorio = () => { carregarModelosRel(); setRelOpen(true); };
+      const aplicarModeloRel = (nome) => {
+        setRelModeloSel(nome);
+        const m = relModelos.find((x) => x.nome === nome);
+        if (!m) return;
+        setRelCfg((c) => ({ ...c, secoes: { ...cfgRelPadrao().secoes, ...(m.secoes || {}) }, orientacao: m.orientacao || 'retrato', equip: m.equip || '', setor: m.setor || '', operador: m.operador || '' }));
+      };
+      const salvarModeloRel = async () => {
+        const nome = (prompt('Nome do modelo (ex.: "Completo", "Só operadores"):', relModeloSel || '') || '').trim();
+        if (!nome) return;
+        const novo = { nome, secoes: relCfg.secoes, orientacao: relCfg.orientacao, equip: relCfg.equip, setor: relCfg.setor, operador: relCfg.operador };
+        try {
+          await gravarModelosRel([...relModelos.filter((m) => m.nome !== nome), novo].sort((a, b) => a.nome.localeCompare(b.nome)));
+          setRelModeloSel(nome);
+          toast.success(`Modelo "${nome}" salvo para todos os usuários.`);
+        } catch (e) { toast.error('Não foi possível salvar o modelo: ' + (e?.message || e)); }
+      };
+      const excluirModeloRel = async () => {
+        if (!relModeloSel || !confirm(`Excluir o modelo "${relModeloSel}"?`)) return;
+        try { await gravarModelosRel(relModelos.filter((m) => m.nome !== relModeloSel)); setRelModeloSel(''); toast.success('Modelo excluído.'); }
+        catch (e) { toast.error('Não foi possível excluir: ' + (e?.message || e)); }
+      };
+
+      const montarRelatorioHtml = (cfg, paraImpressao) => {
+        const ymIdx = (ym) => { const [y, m] = ym.split('-').map(Number); return y * 12 + (m - 1); };
+        const ymDeIdx = (i) => `${Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
+        let i0 = ymIdx(cfg.de), i1 = ymIdx(cfg.ate); if (i1 < i0) [i0, i1] = [i1, i0];
+        const nMes = i1 - i0 + 1;
+        const ini = new Date(Math.floor(i0 / 12), i0 % 12, 1), fim = new Date(Math.floor(i1 / 12), i1 % 12 + 1, 1);
+        const pIni = new Date(Math.floor((i0 - nMes) / 12), ((i0 - nMes) % 12 + 12) % 12, 1);
+        const rotPer = nMes === 1 ? rotuloMesLongo(ymDeIdx(i0)) : `${rotuloMes(ymDeIdx(i0))} a ${rotuloMes(ymDeIdx(i1))}`;
+        const rotAnt = nMes === 1 ? rotuloMesLongo(ymDeIdx(i0 - 1)) : 'período anterior';
+        const noIntervalo = (iso, a, b) => { const d = new Date(iso); return d >= a && d < b; };
+        const filtroNc = !!(cfg.setor || cfg.operador);
+        const regs = exec.ncRegs.filter((r) => (!cfg.equip || r.equip === cfg.equip) && (!cfg.setor || r.setor === cfg.setor) && (!cfg.operador || r.operador === cfg.operador));
+        const lotesComRegs = new Set(regs.map((r) => r.lote.chave));
+        const falhouF = (l) => (filtroNc ? lotesComRegs.has(l.chave) : l.falhou);
+        const lotesBase = exec.lotes.filter((l) => !cfg.equip || l.equip === cfg.equip);
+        const lotesP = lotesBase.filter((l) => noIntervalo(l.ini, ini, fim));
+        const lotesA = lotesBase.filter((l) => noIntervalo(l.ini, pIni, ini));
+        const regsP = regs.filter((r) => noIntervalo(r.ini, ini, fim));
+        const kp = (ls) => {
+          const n = ls.length, f = ls.filter(falhouF).length;
+          const t = ls.filter((l) => falhouF(l) && l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5).filter((x) => x >= 0);
+          return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null, ab: ls.filter((l) => l.aberto && falhouF(l)).length };
+        };
+        const A = kp(lotesP), P = kp(lotesA);
+        const num = (x, d = 1) => x == null ? '—' : x.toFixed(d).replace('.', ',');
+        const tipos = Object.entries(regsP.reduce((m, r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b[1] - a[1]);
+        const totRegs = regsP.length;
+        const sec = []; // { titulo, pergunta, html }
+
+        if (cfg.secoes.indicadores) {
+          const delta = A.ap != null && P.ap != null && P.n ? A.ap - P.ap : null;
+          const cor = A.ap == null ? 'inherit' : A.ap >= META_APROVACAO ? COR_OK : COR_RUIM;
+          const k = (t, v, s, c) => `<div class="k"><div class="kt">${t}</div><div class="kv" style="color:${c || 'inherit'}">${v}</div><div class="ks">${s || ''}</div></div>`;
+          const top3 = tipos.slice(0, 3);
+          let txt = A.n === 0 ? `Nenhum lote analisado em ${rotPer}.` :
+            `Em ${rotPer}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira, ${A.ap >= META_APROVACAO ? 'dentro' : 'abaixo'} da meta de ${META_APROVACAO}%`
+            + (delta != null ? ` (${delta >= 0 ? 'alta' : 'queda'} de ${num(Math.abs(delta))} p.p. em relação a ${rotAnt})` : '') + '. '
+            + (A.f ? `${A.f} lote(s) tiveram não conformidade, somando ${totRegs} apontamento(s)` + (top3.length ? `; os tipos mais frequentes foram ${top3.map(([t, v]) => `${t} (${v})`).join(', ')}` : '') + '.' : 'Nenhum lote teve não conformidade.')
+            + (A.ab ? ` ${A.ab} lote(s) do período ainda estão com NC em aberto.` : '');
+          sec.push({ titulo: 'Como fomos no período', pergunta: 'Resultado frente à meta de aprovação de primeira.', html:
+            `<div class="grid">${k('Aprovação de primeira', fmtPct1(A.ap), `Meta ${META_APROVACAO}%${delta != null ? ` · ${delta >= 0 ? '▲ +' : '▼ −'}${num(Math.abs(delta))} p.p. vs ${rotAnt}` : ''}`, cor)}`
+            + `${k('Lotes analisados', A.n, `${A.f} com NC · ${totRegs} apontamento(s)`)}`
+            + `${k('Tempo médio até a correção', A.tm == null ? '—' : `${num(A.tm)} dias`, 'da 1ª análise à reanálise aprovada')}`
+            + `${k('NCs do período em aberto', A.ab, 'lotes ainda sem correção', A.ab ? COR_RUIM : COR_OK)}</div><div class="res">${escHtml(txt)}</div>` });
+        }
+        if (cfg.secoes.evolucao) {
+          const pts = [];
+          for (let i = i1 - 11; i <= i1; i++) { const ym = ymDeIdx(i); const ls = lotesBase.filter((l) => l.mes === ym); const f = ls.filter(falhouF).length; pts.push({ mes: ym, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }); }
+          sec.push({ titulo: 'Como estamos evoluindo', pergunta: 'Aprovação de primeira nos 12 meses até o fim do período. Verde = na meta; vermelho = abaixo.', html: svgLinhaAprovacao(pts) });
+        }
+        if (cfg.secoes.pareto) {
+          sec.push({ titulo: 'Quais erros mais geraram NC', pergunta: 'Tipos de erro (documento · campo) por número de apontamentos. Em vermelho, os que somam ~80% — onde a ação rende mais.', html:
+            tipos.length ? svgPareto(tipos.map(([label, value]) => ({ label, value })), 10) : '<p class="vazio">Sem não conformidades no período.</p>' });
+        }
+        if (cfg.secoes.matriz) {
+          const setores = [...new Set(regsP.map((r) => r.setor))].sort();
+          const ondes = [...new Set(regsP.map((r) => r.onde))].sort();
+          const cnt = (s, o) => regsP.filter((r) => r.setor === s && r.onde === o).length;
+          const mx = Math.max(1, ...setores.flatMap((s) => ondes.map((o) => cnt(s, o))));
+          sec.push({ titulo: 'Onde as NCs aconteceram', pergunta: 'Apontamentos por setor responsável e estágio da OP (ou documento). Quanto mais escura a célula, maior a concentração.', html:
+            regsP.length ? htmlMapaCalor({ linhas: setores, colunas: ondes, celulas: setores.map((s) => ondes.map((o) => { const v = cnt(s, o); return { v, i: v / mx }; })), rotuloCanto: 'Setor' }) : '<p class="vazio">Sem não conformidades no período.</p>' });
+        }
+        if (cfg.secoes.equipamentos) {
+          const m = new Map(); for (const l of lotesP) { const e = m.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (falhouF(l)) e.f++; m.set(l.equip, e); }
+          const eqs = [...m.values()].map((e) => ({ ...e, t: e.f / e.n * 100 })).sort((a, b) => b.t - a.t || b.n - a.n);
+          sec.push({ titulo: 'Quais equipamentos concentram NC', pergunta: `Taxa de lotes com NC por equipamento. Acima de ${100 - META_APROVACAO}% = fora da meta.`, html:
+            eqs.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Com NC</th><th class="n">Taxa de NC</th></tr></thead><tbody>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n">${e.f}</td><td class="n" style="font-weight:600;color:${e.t > 100 - META_APROVACAO ? COR_RUIM : COR_OK}">${fmtPct1(e.t)}</td></tr>`).join('')}</tbody></table>` : '<p class="vazio">Sem lotes no período.</p>' });
+        }
+        if (cfg.secoes.operadores && podeVerOperador) {
+          const cols = tipos.slice(0, 8).map(([t]) => t);
+          const temOutros = tipos.length > 8;
+          const ops = Object.values(regsP.reduce((m, r) => { const o = m[r.operador] || (m[r.operador] = { op: r.operador, total: 0, t: {} }); o.total++; o.t[r.tipo] = (o.t[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b.total - a.total);
+          const cel = (o, c) => o.t[c] || '';
+          const outros = (o) => o.total - cols.reduce((s, c) => s + (o.t[c] || 0), 0);
+          sec.push({ titulo: 'NCs por operador', pergunta: 'Cada apontamento conta 1. Atribuição: etiquetas → quem executou o Estágio 50 (Embalagem); NC de um estágio → quem executou aquele estágio; demais → Estágio 60 (Conciliação).', html:
+            ops.length ? `<table class="op"><thead><tr><th>Operador</th><th class="n">NCs</th>${cols.map((c) => `<th class="n tipo">${escHtml(c)}</th>`).join('')}${temOutros ? '<th class="n tipo">Outros</th>' : ''}</tr></thead><tbody>`
+              + ops.map((o) => `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.total}</strong></td>${cols.map((c) => `<td class="n">${cel(o, c)}</td>`).join('')}${temOutros ? `<td class="n">${outros(o) || ''}</td>` : ''}</tr>`).join('')
+              + `<tr class="tot"><td>Total</td><td class="n">${totRegs}</td>${cols.map((c) => `<td class="n">${regsP.filter((r) => r.tipo === c).length}</td>`).join('')}${temOutros ? `<td class="n">${regsP.filter((r) => !cols.includes(r.tipo)).length}</td>` : ''}</tr></tbody></table>` : '<p class="vazio">Sem não conformidades no período.</p>' });
+        }
+        if (cfg.secoes.lista) {
+          const ord = regsP.slice().sort((a, b) => new Date(a.ini) - new Date(b.ini));
+          sec.push({ titulo: 'Lista detalhada das NCs', pergunta: 'Cada apontamento com o item da análise que ficou não conforme.', html:
+            ord.length ? `<table class="lista"><thead><tr><th>Data</th><th>OP</th><th>Série</th><th>Equipamento</th><th>Tipo</th><th>Item não conforme</th>${podeVerOperador ? '<th>Operador</th>' : ''}<th>Situação</th></tr></thead><tbody>`
+              + ord.map((r) => `<tr><td>${new Date(r.ini).toLocaleDateString('pt-BR')}</td><td>${escHtml(r.lote.final.numero_op || '—')}</td><td>${escHtml(r.lote.final.numero_serie || '—')}</td><td>${escHtml(r.equip)}</td><td>${escHtml(r.tipo)}</td><td class="desc">${escHtml(r.desc.length > 220 ? r.desc.slice(0, 219) + '…' : r.desc)}</td>${podeVerOperador ? `<td>${escHtml(r.operador)}</td>` : ''}<td style="color:${r.aberto ? COR_RUIM : COR_OK};font-weight:600">${r.aberto ? 'Aberta' : 'Corrigida'}</td></tr>`).join('')
+              + '</tbody></table>' : '<p class="vazio">Sem não conformidades no período.</p>' });
+        }
+        const tabelaAbertos = (ls) => `<table><thead><tr><th>OP</th><th>Série</th><th>Equipamento</th><th>1ª análise</th><th class="n">Em aberto</th><th>Tipos de erro</th></tr></thead><tbody>`
+          + ls.map((l) => { const ts = [...new Set(regs.filter((r) => r.lote.chave === l.chave).map((r) => r.tipo))]; return `<tr><td>${escHtml(l.final.numero_op || '—')}</td><td>${escHtml(l.final.numero_serie || '—')}</td><td>${escHtml(l.equip)}</td><td>${new Date(l.ini).toLocaleDateString('pt-BR')}</td><td class="n" style="font-weight:600;color:${(Date.now() - new Date(l.ini)) / 864e5 > 30 ? COR_RUIM : 'inherit'}">${Math.floor((Date.now() - new Date(l.ini)) / 864e5)} dia(s)</td><td>${escHtml(ts.join('; ') || '—')}</td></tr>`; }).join('') + '</tbody></table>';
+        if (cfg.secoes.abertasPeriodo) {
+          const ls = lotesP.filter((l) => l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
+          sec.push({ titulo: 'O que ficou pendente do período', pergunta: `Lotes analisados em ${rotPer} que ainda estão com NC em aberto hoje.`, html: ls.length ? tabelaAbertos(ls) : '<p class="vazio">Nenhum lote do período com NC em aberto.</p>' });
+        }
+        if (cfg.secoes.abertasAnteriores) {
+          const ls = lotesBase.filter((l) => new Date(l.ini) < ini && l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
+          sec.push({ titulo: 'Pendências de períodos anteriores', pergunta: `Lotes analisados antes de ${rotPer} que continuam com NC em aberto.`, html: ls.length ? tabelaAbertos(ls) : '<p class="vazio">Nenhuma pendência anterior.</p>' });
+        }
+
+        const recortes = [cfg.equip && `Equipamento: ${cfg.equip}`, cfg.setor && `Setor: ${cfg.setor}`, cfg.operador && `Operador: ${cfg.operador}`].filter(Boolean);
+        const paisagem = cfg.orientacao === 'paisagem';
+        const nomeArq = `Relatorio_qualidade_${ymDeIdx(i0)}${nMes > 1 ? '_a_' + ymDeIdx(i1) : ''}`;
+        const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nomeArq}</title><style>
+ @page{size:A4 ${paisagem ? 'landscape' : 'portrait'};margin:12mm}
+ *{box-sizing:border-box} body{font-family:'Segoe UI',Raleway,Arial,sans-serif;color:#1a2238;font-size:11px;margin:0}
+ .cab{border-bottom:3px solid #1E9DBA;padding-bottom:8px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+ .cab h1{font-size:18px;margin:0} .cab .sub{color:#64748b;font-size:10.5px;margin-top:2px} .cab .per{font-size:15px;font-weight:700;text-align:right}
+ .rec{font-size:10px;color:#475569;margin:4px 0 2px} .ind{font-size:10px;color:#64748b;margin-bottom:6px}
+ section{margin-top:14px;break-inside:avoid-page} section.longa{break-inside:auto}
+ h2{font-size:13px;margin:0 0 2px;color:#1a2238;display:flex;gap:8px;align-items:baseline}
+ h2 .n{display:inline-block;background:#1E9DBA;color:#fff;border-radius:50%;width:20px;height:20px;line-height:20px;text-align:center;font-size:11px}
+ .q{color:#64748b;font-size:10px;margin:0 0 6px 28px}
+ .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px} .k{border:1px solid #e2e8f0;border-radius:8px;padding:8px}
+ .kt{font-size:9px;text-transform:uppercase;color:#64748b;font-weight:600;letter-spacing:.03em} .kv{font-size:21px;font-weight:700;margin:2px 0} .ks{font-size:9.5px;color:#64748b}
+ .res{background:#f1f5f9;border-left:3px solid #1E9DBA;border-radius:4px;padding:8px 10px;margin-top:8px;line-height:1.5}
+ table{border-collapse:collapse;width:100%} thead{display:table-header-group} tr{break-inside:avoid}
+ th{background:#f1f5f9;font-size:9.5px;text-transform:uppercase;letter-spacing:.02em;color:#475569;text-align:left;padding:5px 6px;border-bottom:1px solid #cbd5e1}
+ td{padding:4px 6px;border-bottom:1px solid #e2e8f0;font-size:10.5px;vertical-align:top} .n{text-align:right}
+ table.op th.tipo{text-transform:none;font-size:9px;max-width:90px;white-space:normal} tr.tot td{font-weight:700;background:#f8fafc;border-top:1px solid #cbd5e1}
+ table.lista td.desc{font-size:9.5px;color:#334155} .vazio{color:#64748b;font-style:italic;margin:4px 0 0 28px}
+ svg{display:block;margin:0 auto} .rod{margin-top:16px;padding-top:6px;border-top:1px solid #e2e8f0;font-size:8.5px;color:#94a3b8}
 </style></head><body>
-<div class="cab"><div><h1>Relatório mensal de qualidade — Conciliação da produção</h1><div class="sub">Confiance Medical · Garantia da Qualidade</div></div><div style="font-size:14px;font-weight:700">${rotuloMesLongo(mes)}</div></div>
-<div class="grid">
- ${card('Aprovação de primeira', fmtPct1(A.ap), `Meta ${META_APROVACAO}% · ${fmtD(delta)}`, A.ap == null ? '' : A.ap >= META_APROVACAO ? COR_OK : COR_RUIM)}
- ${card('Lotes analisados', A.n, `${A.f} com não conformidade`)}
- ${card('Tempo médio até correção', A.tm == null ? '—' : `${A.tm.toFixed(1).replace('.', ',')} dias`, 'da 1ª análise à reanálise aprovada')}
- ${card('NCs em aberto hoje', exec.abertos.length, `${exec.aging.mais30} há mais de 30 dias`, exec.abertos.length ? COR_RUIM : COR_OK)}
-</div>
-<div class="res">${escHtml(resumoTxt)}</div>
-<h2>Aprovação de primeira — últimos 12 meses</h2>${svgLinhaAprovacao(serie)}
-<h2>Principais causas de não conformidade no mês (Pareto)</h2>${paretoMes.length ? svgPareto(paretoMes, 8) : '<div class="sub">Sem não conformidades no mês.</div>'}
-<div class="duas">
- <div><h2>Equipamentos com maior taxa de NC</h2>${eqs.length ? `<table><tr><th>Equipamento</th><th style="text-align:right">Lotes com NC</th><th style="text-align:right">Taxa</th></tr>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td style="text-align:right">${e.f} de ${e.n}</td><td style="text-align:right;color:${e.t > 100 - META_APROVACAO ? COR_RUIM : COR_OK};font-weight:600">${fmtPct1(e.t)}</td></tr>`).join('')}</table>` : '<div class="sub">Nenhum equipamento com NC no mês.</div>'}</div>
- <div><h2>NCs em aberto mais antigas</h2>${abertosTab ? `<table><tr><th>OP</th><th>Série</th><th>Equipamento</th><th style="text-align:right">Em aberto</th></tr>${abertosTab}</table>` : '<div class="sub">Nenhuma NC em aberto.</div>'}</div>
-</div>
-<div class="rod">Unidade de contagem: lote (OP + nº de série), no mês da 1ª análise. Aprovado de primeira = conforme ou conforme com ressalvas sem correção de documento por não conformidade. Gerado em ${new Date().toLocaleString('pt-BR')} pela Plataforma de Conciliação.</div>
-<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>
+<div class="cab"><div><h1>Relatório de qualidade — Conciliação da produção</h1><div class="sub">Confiance Medical · Garantia da Qualidade</div></div><div class="per">${escHtml(rotPer)}</div></div>
+${recortes.length ? `<div class="rec"><strong>Recorte:</strong> ${escHtml(recortes.join(' · '))}</div>` : ''}
+<div class="ind">${sec.map((s, i) => `${i + 1}. ${escHtml(s.titulo)}`).join(' &nbsp;·&nbsp; ')}</div>
+${sec.map((s, i) => `<section class="${/<table class="(lista|op)"|<table>/.test(s.html) ? 'longa' : ''}"><h2><span class="n">${i + 1}</span>${escHtml(s.titulo)}</h2><p class="q">${escHtml(s.pergunta)}</p>${s.html}</section>`).join('\n')}
+<div class="rod">Unidade: lote (OP + nº de série), no mês da 1ª análise; aprovado de primeira = conforme ou conforme com ressalvas sem correção por não conformidade. Apontamentos de NC contam 1 cada. Gerado em ${new Date().toLocaleString('pt-BR')} por ${escHtml(perfil?.nome_completo || perfil?.email || '—')} na Plataforma de Conciliação.</div>
+${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>' : ''}
 </body></html>`;
-        const w = window.open('', '_blank');
-        if (!w) { toast.error('O navegador bloqueou a janela do relatório. Libere pop-ups para este endereço e tente de novo.'); return; }
-        w.document.open(); w.document.write(html); w.document.close();
-        registrarLog(perfil, 'relatorio_mensal', 'dashboard', mes, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório mensal de qualidade de ${rotuloMesLongo(mes)}`);
+        return { html, nomeArq, paisagem, nSecoes: sec.length, rotPer };
+      };
+
+      const gerarRelatorio = async () => {
+        const cfg = relCfg;
+        if (!Object.entries(cfg.secoes).some(([k, v]) => v && (k !== 'operadores' || podeVerOperador))) { toast.error('Marque ao menos uma seção.'); return; }
+        setRelGerando(true);
+        const { html, nomeArq, paisagem, rotPer } = montarRelatorioHtml(cfg, false);
+        let ok = false;
+        try {
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const resp = await fetch(`${base}/converter-pdf`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', 'X-Source-Format': 'html', 'X-Filename': `${nomeArq}.html`, 'X-Pdf-Landscape': paisagem ? '1' : '0' },
+            body: new Blob([html], { type: 'text/html' }),
+          });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = `${nomeArq}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            ok = true;
+            toast.success('Relatório gerado.');
+          }
+        } catch (e) { /* serviço fora — usa a impressão do navegador */ }
+        if (!ok) {
+          const w = window.open('', '_blank');
+          if (!w) { toast.error('O serviço de PDF não respondeu e o navegador bloqueou a janela. Libere pop-ups e tente de novo.'); setRelGerando(false); return; }
+          w.document.open(); w.document.write(montarRelatorioHtml(cfg, true).html); w.document.close();
+          toast.info?.('Serviço de PDF indisponível — abrindo para imprimir. Desmarque "Cabeçalhos e rodapés" na impressão.');
+        }
+        registrarLog(perfil, 'relatorio_mensal', 'dashboard', nomeArq, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório de qualidade de ${rotPer}`);
+        setRelGerando(false);
+        setRelOpen(false);
       };
 
       // Tratativa de reincidência via Slack removida daqui (22/07/2026): a aba é só
@@ -2235,6 +2465,72 @@
             ))}
           </div>
 
+          {/* ===== Montagem do relatório de qualidade (06/10/2026) ===== */}
+          {relOpen && (() => {
+            const set = (patch) => setRelCfg((c) => ({ ...c, ...patch }));
+            const setSec = (id, v) => setRelCfg((c) => ({ ...c, secoes: { ...c.secoes, [id]: v } }));
+            const equips = [...new Set(exec.lotes.map((l) => l.equip))].sort();
+            const operadores = [...new Set(exec.ncRegs.map((r) => r.operador))].sort();
+            const sel = 'rounded-md border border-input bg-background px-2 py-1.5 text-sm w-full';
+            const visiveis = SECOES_REL.filter((x) => !x.restrito || podeVerOperador);
+            return (
+              <Modal open onClose={() => !relGerando && setRelOpen(false)} title="Montar relatório de qualidade" description="Escolha o período, o recorte e as seções. O PDF sai só com o que estiver marcado." size="xl">
+                <div className="space-y-4">
+                  <div className="flex items-end gap-2 flex-wrap rounded-md border p-3 bg-muted/20">
+                    <div className="flex-1 min-w-[200px]">
+                      <Label className="text-xs">Modelo salvo</Label>
+                      <select value={relModeloSel} onChange={(e) => aplicarModeloRel(e.target.value)} className={sel}>
+                        <option value="">— sem modelo —</option>
+                        {relModelos.map((m) => <option key={m.nome} value={m.nome}>{m.nome}</option>)}
+                      </select>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={salvarModeloRel} title="Salva as seções, o recorte e a orientação (o período não é salvo)"><Icon name="check" className="h-3.5 w-3.5" />Salvar como modelo</Button>
+                    {relModeloSel && <Button variant="ghost" size="sm" onClick={excluirModeloRel}><Icon name="trash" className="h-3.5 w-3.5" />Excluir</Button>}
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div><Label className="text-xs">De</Label>
+                      <select value={relCfg.de} onChange={(e) => set({ de: e.target.value })} className={sel}>{mesesEscolha.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}</select></div>
+                    <div><Label className="text-xs">Até</Label>
+                      <select value={relCfg.ate} onChange={(e) => set({ ate: e.target.value })} className={sel}>{mesesEscolha.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}</select></div>
+                    <div><Label className="text-xs">Equipamento</Label>
+                      <select value={relCfg.equip} onChange={(e) => set({ equip: e.target.value })} className={sel}><option value="">Todos</option>{equips.map((e) => <option key={e} value={e}>{e}</option>)}</select></div>
+                    <div><Label className="text-xs">Setor</Label>
+                      <select value={relCfg.setor} onChange={(e) => set({ setor: e.target.value })} className={sel}><option value="">Todos</option><option value="Almoxarifado">Almoxarifado</option><option value="PCP">PCP</option></select></div>
+                    {podeVerOperador && <div><Label className="text-xs">Operador</Label>
+                      <select value={relCfg.operador} onChange={(e) => set({ operador: e.target.value })} className={sel}><option value="">Todos</option>{operadores.map((o) => <option key={o} value={o}>{o}</option>)}</select></div>}
+                    <div><Label className="text-xs">Orientação</Label>
+                      <select value={relCfg.orientacao} onChange={(e) => set({ orientacao: e.target.value })} className={sel}><option value="retrato">Retrato</option><option value="paisagem">Paisagem (melhor para tabelas largas)</option></select></div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <Label className="text-xs">Seções do relatório</Label>
+                      <div className="flex gap-2 text-xs">
+                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: Object.fromEntries(visiveis.map((x) => [x.id, true])) }))}>marcar todas</button>
+                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: {} }))}>limpar</button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                      {visiveis.map((x) => (
+                        <label key={x.id} className={cn('flex items-start gap-2 rounded-md border p-2 cursor-pointer text-sm', relCfg.secoes[x.id] && 'border-accent bg-accent/5')}>
+                          <input type="checkbox" className="mt-0.5 h-4 w-4" checked={!!relCfg.secoes[x.id]} onChange={(e) => setSec(x.id, e.target.checked)} />
+                          <span><span className="font-medium">{x.label}</span>{x.restrito && <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted">admin/gestor</span>}<div className="text-xs text-muted-foreground">{x.desc}</div></span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-2">Setor e operador filtram as não conformidades: com esse recorte, um lote só conta como "com NC" se tiver NC daquele setor/operador. O recorte por equipamento filtra os lotes.</div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2 border-t">
+                    <Button variant="outline" onClick={() => setRelOpen(false)} disabled={relGerando}>Cancelar</Button>
+                    <Button onClick={gerarRelatorio} disabled={relGerando}>{relGerando ? <><Icon name="loader" className="h-4 w-4 animate-spin" />Gerando…</> : <><Icon name="download" className="h-4 w-4" />Gerar PDF</>}</Button>
+                  </div>
+                </div>
+              </Modal>
+            );
+          })()}
+
           {/* ===== Aba: Visão executiva (06/10/2026) ===== */}
           {dashTab === 'executiva' && (() => {
             const A = exec.atual, P = exec.anterior;
@@ -2260,12 +2556,8 @@
                   {exec.intervalo ? <>Período: <strong className="text-foreground">{exec.intervalo.nome}</strong> · comparação com o período anterior de mesma duração</> : <>Período: <strong className="text-foreground">todo o histórico</strong> (sem comparação)</>}
                 </div>
                 <div className="flex items-center gap-2 no-print">
-                  <select value={mesRelatorio || mesesRelatorio[1] || mesesRelatorio[0] || ''} onChange={(e) => setMesRelatorio(e.target.value)}
-                    className="rounded-md border bg-background px-2 py-1.5 text-sm" title="Mês do relatório">
-                    {mesesRelatorio.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}
-                  </select>
-                  <Button onClick={gerarRelatorioMensal} title="Relatório de uma página para enviar aos gestores (abre para imprimir ou salvar em PDF)">
-                    <Icon name="download" className="h-4 w-4" />Relatório mensal (PDF)
+                  <Button onClick={abrirMontagemRelatorio} title="Montar o relatório para os gestores: escolha período, recortes e seções">
+                    <Icon name="download" className="h-4 w-4" />Relatório de qualidade (PDF)
                   </Button>
                 </div>
               </div>
@@ -2403,6 +2695,44 @@
                 })()}
               </CardContent>
             </Card>
+            {podeVerOperador && (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="text-sm">NCs por operador</CardTitle>
+                  <CardDescription>Cada apontamento de NC conta 1, atribuído a quem executou o estágio: etiquetas → Estágio 50 (Embalagem); NC de um estágio específico → quem executou aquele estágio; demais → Estágio 60 (Conciliação). Visível só para administrador e gestores.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {exec.porOperador.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma NC no período.</div> : (() => {
+                    const top = exec.tiposOperador.slice(0, 8);
+                    const corDe = (t) => { const i = top.indexOf(t); return i < 0 ? '#94A3B8' : PALETA_TIPOS[i % PALETA_TIPOS.length]; };
+                    const maxT = Math.max(...exec.porOperador.map((o) => o.total));
+                    return (<>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 mb-4 text-[11px]">
+                        {[...top, ...(exec.tiposOperador.length > 8 ? ['Outros'] : [])].map((t) => (
+                          <span key={t} className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: t === 'Outros' ? '#94A3B8' : corDe(t) }} />{t}</span>
+                        ))}
+                      </div>
+                      <div className="space-y-2">
+                        {exec.porOperador.map((o) => {
+                          const partes = top.map((t) => ({ t, v: o.tipos[t] || 0 })).filter((p) => p.v);
+                          const outros = o.total - partes.reduce((s, p) => s + p.v, 0);
+                          if (outros > 0) partes.push({ t: 'Outros', v: outros });
+                          return (
+                            <div key={o.operador} className="grid grid-cols-12 items-center gap-2 text-xs">
+                              <div className="col-span-3 truncate" title={o.operador}>{o.operador}</div>
+                              <div className="col-span-8 flex h-5 rounded overflow-hidden bg-muted" style={{ width: `${o.total / maxT * 100}%`, minWidth: '4px' }}>
+                                {partes.map((p) => <div key={p.t} title={`${o.operador} — ${p.t}: ${p.v}`} style={{ width: `${p.v / o.total * 100}%`, background: p.t === 'Outros' ? '#94A3B8' : corDe(p.t) }} />)}
+                              </div>
+                              <div className="col-span-1 text-right font-semibold">{o.total}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>);
+                  })()}
+                </CardContent>
+              </Card>
+            )}
           </>)}
 
           {dashTab === 'graficos' && (<>

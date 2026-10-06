@@ -128,7 +128,8 @@ app.post('/converter-pdf', async (req, res) => {
     } else if (fmt === 'pdf') {
       pdf = await otimizarPdf(input);
     } else if (fmt === 'html' || fmt === 'htm') {
-      pdf = await htmlParaPdf(input.toString('utf8'));
+      // X-Pdf-Landscape: 1 → A4 paisagem (relatório de qualidade com tabelas largas).
+      pdf = await htmlParaPdf(input.toString('utf8'), { landscape: req.get('X-Pdf-Landscape') === '1' });
     } else {
       return res.status(400).json({ error: `Formato nao suportado: ${fmt}` });
     }
@@ -816,12 +817,12 @@ async function getBrowser() {
   _browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   return _browser;
 }
-async function htmlParaPdf(html) {
+async function htmlParaPdf(html, opts = {}) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
     await page.setContent(html, { waitUntil: 'networkidle0' });
-    return await page.pdf({ format: 'A4', printBackground: true, margin: { top: '24px', bottom: '24px', left: '18px', right: '18px' } });
+    return await page.pdf({ format: 'A4', landscape: !!opts.landscape, printBackground: true, margin: { top: '24px', bottom: '24px', left: '18px', right: '18px' } });
   } finally {
     await page.close();
   }
