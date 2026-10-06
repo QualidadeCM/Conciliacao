@@ -1799,6 +1799,10 @@
         // Cadeia completa de cada lote (da original até a atual).
         const porLote = new Map();
         for (const a of analises) {
+          // A análise vigente é a que NÃO foi substituída por uma reanálise — não a de
+          // data mais recente. Correções manuais (M) podem ter data retroativa e ficavam
+          // "atrás" da NC original, fazendo um lote corrigido aparecer como NC aberta.
+          if (idsSubstituidas.has(a.id)) continue;
           const k = chaveLote(a);
           const atual = porLote.get(k);
           if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(k, a);
@@ -1853,7 +1857,8 @@
 
         const resumo = (ls) => {
           const n = ls.length, f = ls.filter((l) => l.falhou).length;
-          const tempos = ls.filter((l) => l.corrigidoEm).map((l) => diasEntre(l.ini, l.corrigidoEm)).sort((a, b) => a - b);
+          // Correções manuais com data retroativa geram tempo negativo — ficam de fora da média.
+          const tempos = ls.filter((l) => l.corrigidoEm).map((l) => diasEntre(l.ini, l.corrigidoEm)).filter((t) => t >= 0).sort((a, b) => a - b);
           const media = tempos.length ? tempos.reduce((s, t) => s + t, 0) / tempos.length : null;
           const mediana = tempos.length ? tempos[Math.floor(tempos.length / 2)] : null;
           return { n, falhas: f, aprov: n ? (n - f) / n * 100 : null, tempoMedio: media, tempoMediana: mediana, nTempos: tempos.length };
@@ -1962,7 +1967,7 @@
         const ini = new Date(yy, mm - 1, 1), fim = new Date(yy, mm, 1), pIni = new Date(yy, mm - 2, 1);
         const noMes = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= ini && d < fim; });
         const noAnt = exec.lotes.filter((l) => { const d = new Date(l.ini); return d >= pIni && d < ini; });
-        const r = (ls) => { const n = ls.length, f = ls.filter((l) => l.falhou).length; const t = ls.filter((l) => l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5); return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null }; };
+        const r = (ls) => { const n = ls.length, f = ls.filter((l) => l.falhou).length; const t = ls.filter((l) => l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5).filter((x) => x >= 0); return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null }; };
         const A = r(noMes), P = r(noAnt);
         const causas = {}; for (const l of noMes) if (l.falhou) for (const c of exec.causasDe(l)) causas[c] = (causas[c] || 0) + 1;
         const paretoMes = Object.entries(causas).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
