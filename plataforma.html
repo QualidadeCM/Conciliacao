@@ -437,8 +437,8 @@
         if (!tabela) return;
         const canal = supabase
           .channel('rt_' + tabela + '_' + Math.random().toString(36).slice(2))
-          .on('postgres_changes', { event: '*', schema: 'public', table: tabela }, () => {
-            try { cb.current && cb.current(); } catch (e) { /* ignora */ }
+          .on('postgres_changes', { event: '*', schema: 'public', table: tabela }, (payload) => {
+            try { cb.current && cb.current(payload); } catch (e) { /* ignora */ }
           })
           .subscribe();
         return () => { try { supabase.removeChannel(canal); } catch (e) { /* ignora */ } };
@@ -1002,6 +1002,76 @@
     // Busca TODAS as linhas de uma tabela, paginando de 1000 em 1000. O Supabase
     // (PostgREST) corta cada consulta em 1000 linhas; sem paginar, telas que leem
     // o histórico inteiro (Dashboard, Histórico, backup) enxergam só um pedaço.
+    /* ====================================================================
+       DESEMPENHO (10/10/2026) — listas de análises com PARECER LEVE
+       O parecer_completo de cada análise é grande (camadas, medições, textos
+       extraídos…). Dashboard e Histórico só precisam de apontamentos,
+       cronologia, produto e status — baixar o resto em toda abertura de tela
+       custava dezenas de MB. As listas trazem só esses trechos (via JSON path
+       do PostgREST) e o parecer COMPLETO é buscado sob demanda ao abrir uma
+       análise ou antes de qualquer ação que regrave o parecer.
+       ==================================================================== */
+    const SELECT_PARECER_LEVE = 'pc_apontamentos:parecer_completo->apontamentos,pc_cronologia:parecer_completo->cronologia,pc_produto:parecer_completo->produto,pc_resultado:parecer_completo->>resultado_geral,pc_resumo:parecer_completo->>parecer_resumo';
+    function parecerLeve(row) {
+      if (!row) return row;
+      const { pc_apontamentos, pc_cronologia, pc_produto, pc_resultado, pc_resumo, ...resto } = row;
+      const tem = pc_apontamentos != null || pc_produto != null || pc_resultado != null || pc_cronologia != null;
+      return { ...resto, parecer_completo: tem ? { apontamentos: pc_apontamentos || [], cronologia: pc_cronologia || [], produto: pc_produto || {}, resultado_geral: pc_resultado || null, parecer_resumo: pc_resumo || '', _parcial: true } : null };
+    }
+    async function carregarParecerCompleto(id) {
+      const { data, error } = await supabase.from('analises').select('parecer_completo').eq('id', id).limit(1);
+      if (error) throw error;
+      return (data && data[0] && data[0].parecer_completo) || null;
+    }
+    // Garante o parecer completo antes de abrir/editar (nunca regravar um parecer leve!).
+    async function comParecerCompleto(a) {
+      if (!a || !a.parecer_completo || !a.parecer_completo._parcial) return a;
+      const pc = await carregarParecerCompleto(a.id);
+      return { ...a, parecer_completo: pc };
+    }
+    // Colunas de `analises` exceto o parecer (descobertas uma vez por sessão).
+    let _colunasAnalisesCache = null;
+    async function colunasAnalisesLeves() {
+      if (_colunasAnalisesCache) return _colunasAnalisesCache;
+      const { data } = await supabase.from('analises').select('*').limit(1);
+      const cols = data && data[0] ? Object.keys(data[0]).filter((k) => k !== 'parecer_completo') : null;
+      _colunasAnalisesCache = cols ? `${cols.join(',')},${SELECT_PARECER_LEVE}` : '*';
+      return _colunasAnalisesCache;
+    }
+    // Atualização INCREMENTAL de uma lista de análises a partir do realtime:
+    // junta os ids alterados por ~1,5 s e busca só essas linhas (em vez de
+    // recarregar o histórico inteiro a cada análise salva por qualquer pessoa).
+    function useAnalisesIncrementais(setLista, obterColunas, ativo = true) {
+      const pend = useRef({ ids: new Set(), del: new Set(), t: null });
+      const aplicar = async () => {
+        const { ids, del } = pend.current;
+        pend.current = { ids: new Set(), del: new Set(), t: null };
+        let novos = [];
+        if (ids.size) {
+          try {
+            const cols = await obterColunas();
+            const { data } = await supabase.from('analises').select(cols).in('id', [...ids]);
+            novos = (data || []).map((r) => (cols === '*' ? r : parecerLeve(r)));
+          } catch (e) { /* próxima alteração tenta de novo */ }
+        }
+        setLista((prev) => {
+          const porId = new Map(prev.map((a) => [a.id, a]));
+          for (const id of del) porId.delete(id);
+          for (const r of novos) porId.set(r.id, r);
+          return [...porId.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        });
+      };
+      useRealtime('analises', (payload) => {
+        if (!ativo) return;
+        const ev = payload?.eventType;
+        if (ev === 'DELETE') { if (payload?.old?.id) pend.current.del.add(payload.old.id); }
+        else if (payload?.new?.id) pend.current.ids.add(payload.new.id);
+        else return;
+        if (pend.current.t) clearTimeout(pend.current.t);
+        pend.current.t = setTimeout(aplicar, 1500);
+      });
+    }
+
     async function buscarTudoSupabase(tabela, colunas = '*', ordem = { campo: 'created_at', asc: false }) {
       const PAG = 1000;
       let de = 0, out = [];
@@ -1750,6 +1820,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
 
     /* @@MOTOR_RELATORIO_FIM */
 
+    const DASH_COLS = `id, status, modelo, numero_op, numero_serie, created_at, analise_origem_id, doc_substituido, motivo_reanalise, tipo_reanalise, ${SELECT_PARECER_LEVE}`;
     function DashboardPage() {
       const toast = useToast();
       const { perfil, isAdmin, can } = usePerm();
@@ -1761,10 +1832,22 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       const [analises, setAnalises] = useState([]);
       const [loading, setLoading] = useState(true);
       const [viewing, setViewing] = useState(null);
+      // A lista traz o parecer LEVE; ao abrir uma análise, busca o completo.
+      useEffect(() => {
+        if (!viewing || !viewing.parecer_completo || !viewing.parecer_completo._parcial) return;
+        let vivo = true;
+        const id = viewing.id;
+        carregarParecerCompleto(id).then((pc) => {
+          if (!vivo || !pc) return;
+          setViewing((v) => (v && v.id === id ? { ...v, parecer_completo: pc } : v));
+        }).catch(() => {});
+        return () => { vivo = false; };
+      }, [viewing?.id, viewing?.parecer_completo?._parcial]);
       const [reloadKey, setReloadKey] = useState(0);
       const [catalogoProdutos, setCatalogoProdutos] = useState([]);
       // Atualização em tempo real: recarrega quando qualquer análise muda
-      useRealtime('analises', () => setReloadKey((k) => k + 1));
+      // Realtime: atualiza só as análises alteradas (antes recarregava tudo, para todos).
+      useAnalisesIncrementais(setAnalises, async () => DASH_COLS);
       useRealtime('melhorias_regulatorias', () => setReloadKey((k) => k + 1));
       // Filtros temporais — padrão: ano corrente
       const today = new Date();
@@ -1823,11 +1906,11 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             let de = 0, out = [];
             for (;;) {
               const { data, error } = await supabase.from('analises')
-                .select('id, status, modelo, numero_op, numero_serie, created_at, parecer_completo, analise_origem_id, doc_substituido, motivo_reanalise, tipo_reanalise')
+                .select(DASH_COLS)
                 .order('created_at', { ascending: false })
                 .range(de, de + PAG - 1);
               if (error) throw error;
-              out = out.concat(data || []);
+              out = out.concat((data || []).map(parecerLeve));
               if (!data || data.length < PAG) break;
               de += PAG;
             }
@@ -2170,7 +2253,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
 
       // === Análise de tendência (período personalizado trendDe..trendAte) =========
       // Baseada em TODAS as correções (re-análises reais), independente do filtro do topo.
-      const tendencia = (() => {
+      const tendencia = useMemo(() => {
         const de = trendDe, ate = trendAte;
         const corr = analises
           .filter((a) => a.analise_origem_id && a.tipo_reanalise !== 'atualizacao_ficha' && a.tipo_reanalise !== 'atualizacao_cadastro')
@@ -2281,7 +2364,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         };
 
         return { barItems, topErros, topEquip, total, media, direcao, reincLinhas, reincResumo };
-      })();
+      }, [analises, catalogoProdutos, trendDe, trendAte, reincThr]);
 
       // Os níveis (pontual/possível/reincidente/em alta) só valem para janela de até ~30
       // dias (foi para isso que os limiares foram calibrados). Em períodos maiores, a
@@ -2299,7 +2382,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       // contam como aprovados (decisão da Qualidade, meta 95%). Mesmo critério
       // da fatia "Precisaram de correção" do donut.
       // ====================================================================
-      const exec = (() => {
+      const exec = useMemo(() => {
         const ymDe = (iso) => String(iso || '').slice(0, 7);
         const diasEntre = (a, b) => (new Date(b) - new Date(a)) / 864e5;
         // Cadeia completa de cada lote (da original até a atual).
@@ -2613,7 +2696,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         };
 
         return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe, ncRegs, porOperador, tiposOperador, atacar, tempo };
-      })();
+        // Calculado só quando os dados ou o período mudam (antes: a cada clique).
+      }, [analises, catalogoProdutos, temposAtivos, filtroPeriodo, filtroAno, filtroSubperiodo]);
+      const atacarAtual = useMemo(() => exec.atacar(setorAtacar), [exec, setorAtacar]);
 
       // ===== Relatório de qualidade (10/10/2026) =====
       // Um único botão no topo do Dashboard. Seções agrupadas pelas abas, setor
@@ -2683,7 +2768,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         } catch (e) { toast.error('Não foi possível excluir: ' + (e?.message || e)); }
       };
       // Base de qualidade (mesma do serviço) — usada no relatório e na aba Tendência.
-      const baseQualidade = useMemo(() => calcularBaseQualidade({ analises, produtos: catalogoProdutos, temposAtivos }), [analises, catalogoProdutos, temposAtivos]);
+      // Calculada só quando é usada (montagem do relatório ou aba Tendência).
+      const precisaBase = relOpen || dashTab === 'tendencia';
+      const baseQualidade = useMemo(() => (precisaBase ? calcularBaseQualidade({ analises, produtos: catalogoProdutos, temposAtivos }) : { lotes: [], ncRegs: [], tempoRegs: [], execsTempo: [] }), [analises, catalogoProdutos, temposAtivos, precisaBase]);
 
       const gerarRelatorio = async () => {
         const cfg = relCfg;
@@ -2815,6 +2902,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         }, 50);
       };
 
+      if (viewing && viewing.parecer_completo?._parcial) {
+        return <div className="flex items-center justify-center py-24 text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Abrindo a análise…</div>;
+      }
       if (viewing) {
         return (
           <ParecerView
@@ -3132,7 +3222,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           })()}
 
           {/* ===== Aba: Onde atacar (06/10/2026) ===== */}
-          {dashTab === 'atacar' && (() => { const at = exec.atacar(setorAtacar); return (<>
+          {dashTab === 'atacar' && (() => { const at = atacarAtual; return (<>
             <div className="flex items-center gap-2 mb-4 flex-wrap">
               <span className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Setor:</span>
               {[['todos', 'Todos'], ['Almoxarifado', 'Almoxarifado'], ['PCP', 'PCP']].map(([k, lbl]) => (
@@ -14479,14 +14569,39 @@ ${parecer.parecer_tecnico ? `
       const [loading, setLoading] = useState(true);
       const [filter, setFilter] = useState('');
       const [viewing, setViewing] = useState(null);
+      // A lista traz o parecer LEVE; ao abrir uma análise, busca o completo.
+      useEffect(() => {
+        if (!viewing || !viewing.parecer_completo || !viewing.parecer_completo._parcial) return;
+        let vivo = true;
+        const id = viewing.id;
+        carregarParecerCompleto(id).then((pc) => {
+          if (!vivo || !pc) return;
+          setViewing((v) => (v && v.id === id ? { ...v, parecer_completo: pc } : v));
+        }).catch(() => {});
+        return () => { vivo = false; };
+      }, [viewing?.id, viewing?.parecer_completo?._parcial]);
       const [reloadKey, setReloadKey] = useState(0);
       // Download em lote dos pacotes pendentes (conformes) na pasta da rede.
       const [batchList, setBatchList] = useState([]);
       const [batchIdx, setBatchIdx] = useState(0);
       const [batchAtivo, setBatchAtivo] = useState(false);
+      useEffect(() => {
+        if (!batchAtivo || !batchList[batchIdx]) { setBatchFull(null); return; }
+        const item = batchList[batchIdx];
+        let vivo = true;
+        setBatchFull(null);
+        (async () => {
+          try {
+            const pc = item.parecer_completo?._parcial ? await carregarParecerCompleto(item.id) : item.parecer_completo;
+            if (vivo) setBatchFull({ id: item.id, pc });
+          } catch (e) { if (vivo) setBatchFull({ id: item.id, pc: item.parecer_completo }); }
+        })();
+        return () => { vivo = false; };
+      }, [batchAtivo, batchIdx, batchList]);
       const [batchFalhas, setBatchFalhas] = useState(0);
       // Atualização em tempo real do histórico quando alguém cria/edita/exclui análise
-      useRealtime('analises', () => { if (!batchAtivo) setReloadKey((k) => k + 1); });
+      // Realtime incremental: só as análises alteradas são rebuscadas.
+      useAnalisesIncrementais(setAnalises, colunasAnalisesLeves);
       const [importOpen, setImportOpen] = useState(false);
       const [novaManualOpen, setNovaManualOpen] = useState(false);
       const [auditOpen, setAuditOpen] = useState(false);
@@ -14494,6 +14609,8 @@ ${parecer.parecer_tecnico ? `
       const [pacoteProblemaOpen, setPacoteProblemaOpen] = useState(false);
       const [editandoManual, setEditandoManual] = useState(null);
       const [corrigindo, setCorrigindo] = useState(null);
+      // Download em lote: o ParecerView precisa do parecer COMPLETO do item atual.
+      const [batchFull, setBatchFull] = useState(null);
       // Filtros temporais (decisão 26/06/2026) — espelha o Dashboard
       const _hoje = new Date();
       const [filtroPeriodo, setFiltroPeriodo] = useState('tudo'); // 'tudo' | 'ano' | 'mes'
@@ -14520,8 +14637,10 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         const load = async () => {
           setLoading(true);
-          const data = await buscarTudoSupabase('analises', '*'); // paginado: passa de 1000
-          setAnalises(data || []);
+          // Paginado (passa de 1000) e com parecer LEVE — o completo vem ao abrir.
+          const cols = await colunasAnalisesLeves();
+          const data = await buscarTudoSupabase('analises', cols);
+          setAnalises((data || []).map((r) => (cols === '*' ? r : parecerLeve(r))));
           // NFs de venda já vinculadas (para a coluna "NF de venda" e o filtro).
           // Paginado: o Supabase corta em 1000 linhas por consulta.
           try {
@@ -15016,6 +15135,9 @@ ${parecer.parecer_tecnico ? `
         }
       };
 
+      if (viewing && viewing.parecer_completo?._parcial) {
+        return <div className="flex items-center justify-center py-24 text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Abrindo a análise…</div>;
+      }
       if (viewing) {
         // Navegação entre análises percorrendo a MESMA lista já filtrada e
         // ordenada da tela — os filtros ativos continuam valendo. Só entram as
@@ -15045,7 +15167,7 @@ ${parecer.parecer_tecnico ? `
             parecer={viewing.parecer_completo}
             analiseId={viewing.id}
             dataAnalise={viewing.created_at}
-            onBack={() => { setViewing(null); setReloadKey((k) => k + 1); }}
+            onBack={() => setViewing(null)}
             backLabel="Voltar ao Histórico"
             backIcon="arrowLeft"
             allowDelete
@@ -15073,11 +15195,11 @@ ${parecer.parecer_tecnico ? `
       return (
         <div>
           {/* Download em lote: dirige o ParecerView (oculto) por item, salvando na pasta da rede. */}
-          {batchAtivo && batchList[batchIdx] && (
+          {batchAtivo && batchList[batchIdx] && batchFull && batchFull.id === batchList[batchIdx].id && (
             <div style={{ position: 'fixed', width: 1, height: 1, overflow: 'hidden', left: -9999, top: -9999 }} aria-hidden="true">
               <ParecerView
                 key={batchList[batchIdx].id}
-                parecer={batchList[batchIdx].parecer_completo}
+                parecer={batchFull.pc}
                 analiseId={batchList[batchIdx].id}
                 dataAnalise={batchList[batchIdx].created_at}
                 onBack={() => {}}
@@ -15439,12 +15561,12 @@ ${parecer.parecer_tecnico ? `
                                 </Button>
                               )}
                               {a.origem_analise === 'manual' && (
-                                <Button variant="ghost" size="icon" onClick={() => setEditandoManual(a)} title="Editar esta análise manual">
+                                <Button variant="ghost" size="icon" onClick={async () => setEditandoManual(await comParecerCompleto(a))} title="Editar esta análise manual">
                                   <Icon name="edit" className="h-3.5 w-3.5" />
                                 </Button>
                               )}
                               {a.origem_analise === 'manual' && a.status === 'nao_conforme' && (
-                                <Button variant="ghost" size="icon" onClick={() => setCorrigindo(a)} title="Marcar como corrigida (cria re-análise manual conforme)">
+                                <Button variant="ghost" size="icon" onClick={async () => setCorrigindo(await comParecerCompleto(a))} title="Marcar como corrigida (cria re-análise manual conforme)">
                                   <Icon name="check" className="h-3.5 w-3.5" />
                                 </Button>
                               )}
