@@ -1112,7 +1112,7 @@
        ao relatório mensal impresso (janela própria) — um único desenho.
        Texto e eixos usam currentColor, então funcionam em modo claro e escuro.
        ==================================================================== */
-    const META_APROVACAO = 95; // % de lotes aprovados de primeira (conforme + ressalva)
+    const META_APROVACAO = 90; // padrão; a meta vigente vem de config_app.meta_aprovacao (Configurações)
     const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const fmtPct1 = (x) => (x == null || isNaN(x)) ? '—' : `${x.toFixed(1).replace('.', ',')}%`;
     const MESES_CURTOS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
@@ -1263,8 +1263,18 @@
       const [viewOpChart, setViewOpChart] = useState('estagio'); // 'estagio'|'inspecao'
       // Limiares de reincidência (carregados de config_app; defaults calibrados).
       const [reincThr, setReincThr] = useState({ piso: 3, incidencia: 0.03, fator: 3 });
+      // Meta de aprovação de primeira (Configurações). Padrão 90%.
+      const [metaAprov, setMetaAprov] = useState(META_APROVACAO);
+      // Checagens de tempo de estágio ATIVAS (equipamento × estágio) — denominador
+      // da taxa de ressalvas de tempo por operador.
+      const [temposAtivos, setTemposAtivos] = useState([]);
       // Aba interna do Dashboard: gráficos | correções | tendência.
       const [dashTab, setDashTab] = useState('executiva');
+      // "Onde atacar": recorte por setor (todos | Almoxarifado | PCP).
+      const [setorAtacar, setSetorAtacar] = useState('todos');
+      // Gráficos de tempo de estágio: filtros locais.
+      const [tempoEst, setTempoEst] = useState('todos');
+      const [tempoEquip, setTempoEquip] = useState('todos');
       // Melhorias regulatórias (lista consolidada; aba do Dashboard).
       const [melhorias, setMelhorias] = useState([]);
       const [decidindoMelhoria, setDecidindoMelhoria] = useState(null); // id em decisão
@@ -1294,13 +1304,15 @@
           const [aData, pRes, cRes, mRes] = await Promise.all([
             carregarAnalises(),
             supabase.from('produtos').select('id, modelo, codigo_sapiens, equipamento'),
-            supabase.from('config_app').select('chave, valor').in('chave', ['reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto']),
+            supabase.from('config_app').select('chave, valor').in('chave', ['reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'meta_aprovacao']),
             supabase.from('melhorias_regulatorias').select('*').order('codigo', { ascending: true }),
           ]);
+          try { const { data: tAt } = await supabase.from('tempos_estagio').select('equipamento, estagio_numero, ativo').eq('ativo', true); setTemposAtivos(tAt || []); } catch (e) { setTemposAtivos([]); }
           setAnalises(aData);
           setMelhorias(mRes.data || []);
           setCatalogoProdutos(pRes.data || []);
           const cm = Object.fromEntries((cRes.data || []).map((r) => [r.chave, r.valor]));
+          { const mv = parseFloat(cm.meta_aprovacao); if (!isNaN(mv) && mv > 0 && mv <= 100) setMetaAprov(mv); }
           setReincThr({
             piso: parseInt(cm.reinc_piso, 10) || 3,
             incidencia: (parseFloat(cm.reinc_incidencia_pct) || 3) / 100,
@@ -2022,7 +2034,98 @@
         const tiposOperador = Object.entries(ncRegsPer.reduce((m, r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; return m; }, {}))
           .sort((a, b) => b[1] - a[1]).map(([t]) => t);
 
-        return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe, ncRegs, porOperador, tiposOperador };
+        // ---- "Onde atacar" por SETOR (09/10/2026) ----
+        // Mesmos gráficos da aba, recalculados só com as NCs do setor escolhido.
+        // Um lote "tem NC do setor" se tiver ao menos um apontamento daquele setor.
+        const atacar = (setor) => {
+          const okAp = (ap) => setor === 'todos' || setorDoAp(ap) === setor;
+          const causas = {}, cel = new Map(), cols = new Map(), eq = new Map();
+          for (const l of lotesPer) {
+            const aps = l.falhou ? l.ncAps.filter(okAp) : [];
+            const e = eq.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (aps.length) e.f++; eq.set(l.equip, e);
+            if (!aps.length) continue;
+            for (const c of new Set(aps.map((ap) => categoriaDoTexto(ap.descricao, ap.documento_afetado)))) causas[c] = (causas[c] || 0) + 1;
+            const vistos = new Set();
+            for (const ap of aps) {
+              const sAp = setorDoAp(ap), o = ondeDoAp(ap), k = `${sAp}|${o.k}`;
+              if (vistos.has(k)) continue; vistos.add(k);
+              cols.set(o.k, o.lbl); cel.set(k, (cel.get(k) || 0) + 1);
+            }
+          }
+          const colsK = [...cols.keys()].sort();
+          const linhas = setor === 'todos'
+            ? ['Almoxarifado', 'PCP', ...new Set([...cel.keys()].map((k) => k.split('|')[0]).filter((x) => x !== 'Almoxarifado' && x !== 'PCP'))]
+            : [setor];
+          const mx = Math.max(1, ...cel.values());
+          let top = null;
+          for (const [k, v] of cel) if (!top || v > top.v) { const [sx, ck] = k.split('|'); top = { setor: sx, onde: cols.get(ck), v }; }
+          const regs = (intervalo ? ncRegs.filter((r) => dentro(r.ini, intervalo)) : ncRegs).filter((r) => setor === 'todos' || r.setor === setor);
+          const om = new Map();
+          for (const r of regs) { const o = om.get(r.operador) || { operador: r.operador, total: 0, tipos: {} }; o.total++; o.tipos[r.tipo] = (o.tipos[r.tipo] || 0) + 1; om.set(r.operador, o); }
+          return {
+            pareto: Object.entries(causas).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value })),
+            matriz: { linhas, colunas: colsK.map((k) => cols.get(k)), vazia: cel.size === 0,
+              celulas: linhas.map((sx) => colsK.map((k) => { const v = cel.get(`${sx}|${k}`) || 0; return { v, i: v / mx, tip: v ? `${sx} · ${cols.get(k)}: ${v} lote(s) com NC` : '' }; })) },
+            celTop: top,
+            porEquip: [...eq.values()].map((e) => ({ ...e, taxa: e.f / e.n * 100 })).sort((a, b) => (b.taxa - a.taxa) || (b.n - a.n)),
+            porOperador: [...om.values()].sort((a, b) => b.total - a.total),
+            tiposOperador: Object.entries(regs.reduce((m, r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b[1] - a[1]).map(([t]) => t),
+          };
+        };
+
+        // ---- Tempo de estágio por operador (09/10/2026) ----
+        // Ressalvas de tempo da análise VIGENTE de cada lote do período. O excesso é
+        // calculado sobre o TETO da faixa registrada no próprio apontamento (mudar a
+        // configuração depois não altera o histórico). Denominador = execuções do
+        // estágio pelo operador nos lotes do período, só onde a checagem está ativa.
+        const normEq = (x) => String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+        const ativos = new Set((temposAtivos || []).map((t) => `${normEq(t.equipamento)}|${Number(t.estagio_numero)}`));
+        const reTempo = /Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)[\s\S]*?faixa esperada\s+([\d.,]+)\s*[–-]\s*([\d.,]+)\s*min/i;
+        const reMediaTol = /m[ée]dia\s+([\d.,]+)\s*min[\s\S]*?toler[âa]ncia\s+([\d.,]+)\s*%/i;
+        const nf = (x) => parseFloat(String(x).replace(',', '.'));
+        const tempoRegs = [], execMap = new Map(); // `${op}|${est}|${equip}` -> n
+        let semFaixa = 0;
+        for (const l of lotesPer) {
+          const an = l.final;
+          const crono = an?.parecer_completo?.cronologia || [];
+          const vistos = new Set();
+          for (const c of crono) {
+            const est = Number(c.estagio_numero ?? parseInt(String(c.estagio || ''), 10));
+            if (isNaN(est) || vistos.has(est)) continue;
+            vistos.add(est); // 1 execução por lote e estágio (operador da 1ª operação, mesma regra da atribuição)
+            if (ativos.size && !ativos.has(`${normEq(l.equip)}|${est}`)) continue;
+            const op = nomeOperador(c) || 'Não identificado';
+            const k = `${op}|${est}|${l.equip}`; execMap.set(k, (execMap.get(k) || 0) + 1);
+          }
+          for (const ap of (an?.parecer_completo?.apontamentos || [])) {
+            if (ap.severidade !== 'ressalva' || !/tempo esperado/i.test(ap.descricao || '')) continue;
+            const m = String(ap.descricao).match(reTempo);
+            let est, nomeEst, total, dir, teto;
+            if (m) { est = +m[1]; nomeEst = m[2]; total = nf(m[3]); dir = m[4].toLowerCase(); teto = nf(m[6]); }
+            else {
+              const m2 = String(ap.descricao).match(/Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)/i);
+              const mt = String(ap.descricao).match(reMediaTol);
+              if (!m2) { semFaixa++; continue; }
+              est = +m2[1]; nomeEst = m2[2]; total = nf(m2[3]); dir = m2[4].toLowerCase();
+              teto = mt ? nf(mt[1]) * (1 + nf(mt[2]) / 100) : null;
+              if (teto == null) semFaixa++;
+            }
+            const operador = executorDoEstagio(an, est) || 'Não identificado';
+            tempoRegs.push({ operador, estagio: est, nomeEst, equip: l.equip, total, dir, teto,
+              excesso: dir === 'acima' && teto ? (total - teto) / teto * 100 : null,
+              op: an.numero_op, serie: an.numero_serie });
+          }
+        }
+        const tempo = {
+          regs: tempoRegs,
+          execs: [...execMap.entries()].map(([k, n]) => { const [operador, est, equip] = k.split('|'); return { operador, estagio: Number(est), equip, n }; }),
+          estagios: [...new Set(tempoRegs.map((r) => r.estagio))].sort((a, b) => a - b),
+          nomesEst: Object.fromEntries(tempoRegs.map((r) => [r.estagio, r.nomeEst])),
+          equips: [...new Set(tempoRegs.map((r) => r.equip))].sort(),
+          semFaixa,
+        };
+
+        return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe, ncRegs, porOperador, tiposOperador, atacar, tempo };
       })();
 
       // ===== Relatório de qualidade PERSONALIZÁVEL (06/10/2026) =====
@@ -2118,16 +2221,16 @@
 
         if (cfg.secoes.indicadores) {
           const delta = A.ap != null && P.ap != null && P.n ? A.ap - P.ap : null;
-          const cor = A.ap == null ? 'inherit' : A.ap >= META_APROVACAO ? COR_OK : COR_RUIM;
+          const cor = A.ap == null ? 'inherit' : A.ap >= metaAprov ? COR_OK : COR_RUIM;
           const k = (t, v, s, c) => `<div class="k"><div class="kt">${t}</div><div class="kv" style="color:${c || 'inherit'}">${v}</div><div class="ks">${s || ''}</div></div>`;
           const top3 = tipos.slice(0, 3);
           let txt = A.n === 0 ? `Nenhum lote analisado em ${rotPer}.` :
-            `Em ${rotPer}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira, ${A.ap >= META_APROVACAO ? 'dentro' : 'abaixo'} da meta de ${META_APROVACAO}%`
+            `Em ${rotPer}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira, ${A.ap >= metaAprov ? 'dentro' : 'abaixo'} da meta de ${metaAprov}%`
             + (delta != null ? ` (${delta >= 0 ? 'alta' : 'queda'} de ${num(Math.abs(delta))} p.p. em relação a ${rotAnt})` : '') + '. '
             + (A.f ? `${A.f} lote(s) tiveram não conformidade, somando ${totRegs} apontamento(s)` + (top3.length ? `; os tipos mais frequentes foram ${top3.map(([t, v]) => `${t} (${v})`).join(', ')}` : '') + '.' : 'Nenhum lote teve não conformidade.')
             + (A.ab ? ` ${A.ab} lote(s) do período ainda estão com NC em aberto.` : '');
           sec.push({ titulo: 'Como fomos no período', pergunta: 'Resultado frente à meta de aprovação de primeira.', html:
-            `<div class="grid">${k('Aprovação de primeira', fmtPct1(A.ap), `Meta ${META_APROVACAO}%${delta != null ? ` · ${delta >= 0 ? '▲ +' : '▼ −'}${num(Math.abs(delta))} p.p. vs ${rotAnt}` : ''}`, cor)}`
+            `<div class="grid">${k('Aprovação de primeira', fmtPct1(A.ap), `Meta ${metaAprov}%${delta != null ? ` · ${delta >= 0 ? '▲ +' : '▼ −'}${num(Math.abs(delta))} p.p. vs ${rotAnt}` : ''}`, cor)}`
             + `${k('Lotes analisados', A.n, `${A.f} com NC · ${totRegs} apontamento(s)`)}`
             + `${k('Tempo médio até a correção', A.tm == null ? '—' : `${num(A.tm)} dias`, 'da 1ª análise à reanálise aprovada')}`
             + `${k('NCs do período em aberto', A.ab, 'lotes ainda sem correção', A.ab ? COR_RUIM : COR_OK)}</div><div class="res">${escHtml(txt)}</div>` });
@@ -2135,7 +2238,7 @@
         if (cfg.secoes.evolucao) {
           const pts = [];
           for (let i = i1 - 11; i <= i1; i++) { const ym = ymDeIdx(i); const ls = lotesBase.filter((l) => l.mes === ym); const f = ls.filter(falhouF).length; pts.push({ mes: ym, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }); }
-          sec.push({ titulo: 'Como estamos evoluindo', pergunta: 'Aprovação de primeira nos 12 meses até o fim do período. Verde = na meta; vermelho = abaixo.', html: svgLinhaAprovacao(pts) });
+          sec.push({ titulo: 'Como estamos evoluindo', pergunta: 'Aprovação de primeira nos 12 meses até o fim do período. Verde = na meta; vermelho = abaixo.', html: svgLinhaAprovacao(pts, metaAprov) });
         }
         if (cfg.secoes.pareto) {
           sec.push({ titulo: 'Quais erros mais geraram NC', pergunta: 'Tipos de erro (documento · campo) por número de apontamentos. Em vermelho, os que somam ~80% — onde a ação rende mais.', html:
@@ -2152,8 +2255,8 @@
         if (cfg.secoes.equipamentos) {
           const m = new Map(); for (const l of lotesP) { const e = m.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (falhouF(l)) e.f++; m.set(l.equip, e); }
           const eqs = [...m.values()].map((e) => ({ ...e, t: e.f / e.n * 100 })).sort((a, b) => b.t - a.t || b.n - a.n);
-          sec.push({ titulo: 'Quais equipamentos concentram NC', pergunta: `Taxa de lotes com NC por equipamento. Acima de ${100 - META_APROVACAO}% = fora da meta.`, html:
-            eqs.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Com NC</th><th class="n">Taxa de NC</th></tr></thead><tbody>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n">${e.f}</td><td class="n" style="font-weight:600;color:${e.t > 100 - META_APROVACAO ? COR_RUIM : COR_OK}">${fmtPct1(e.t)}</td></tr>`).join('')}</tbody></table>` : '<p class="vazio">Sem lotes no período.</p>' });
+          sec.push({ titulo: 'Quais equipamentos concentram NC', pergunta: `Taxa de lotes com NC por equipamento. Acima de ${100 - metaAprov}% = fora da meta.`, html:
+            eqs.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Com NC</th><th class="n">Taxa de NC</th></tr></thead><tbody>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n">${e.f}</td><td class="n" style="font-weight:600;color:${e.t > 100 - metaAprov ? COR_RUIM : COR_OK}">${fmtPct1(e.t)}</td></tr>`).join('')}</tbody></table>` : '<p class="vazio">Sem lotes no período.</p>' });
         }
         if (cfg.secoes.operadores && podeVerOperador) {
           const cols = tipos.slice(0, 8).map(([t]) => t);
@@ -2549,7 +2652,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                 <div className="mt-1">{children}</div>
               </div></Card>
             );
-            const atingiu = A.aprov != null && A.aprov >= META_APROVACAO;
+            const atingiu = A.aprov != null && A.aprov >= metaAprov;
             return (<>
               <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
                 <div className="text-sm text-muted-foreground">
@@ -2564,7 +2667,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
                 <Kpi titulo="Aprovação de primeira" valor={fmtPct1(A.aprov)} cor={A.aprov == null ? undefined : atingiu ? COR_OK : COR_RUIM}
-                  sub={<>Meta {META_APROVACAO}% · {A.n} lote(s) · conforme + com ressalvas{A.aprov != null && !atingiu ? <> · faltam <strong>{(META_APROVACAO - A.aprov).toFixed(1).replace('.', ',')} p.p.</strong></> : null}</>}>
+                  sub={<>Meta {metaAprov}% · {A.n} lote(s) · conforme + com ressalvas{A.aprov != null && !atingiu ? <> · faltam <strong>{(metaAprov - A.aprov).toFixed(1).replace('.', ',')} p.p.</strong></> : null}</>}>
                   <Delta v={A.aprov != null && P.aprov != null ? A.aprov - P.aprov : null} unid=" p.p." bomQuandoSobe />
                 </Kpi>
                 <Kpi titulo="Lotes com não conformidade" valor={A.falhas} cor={A.falhas ? COR_RUIM : COR_OK}
@@ -2594,7 +2697,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                   <CardContent>
                     {exec.serieMensal.every((m) => m.n === 0)
                       ? <div className="text-sm text-muted-foreground text-center py-8">Sem lotes nos últimos 12 meses.</div>
-                      : <div dangerouslySetInnerHTML={{ __html: svgLinhaAprovacao(exec.serieMensal) }} />}
+                      : <div dangerouslySetInnerHTML={{ __html: svgLinhaAprovacao(exec.serieMensal, metaAprov) }} />}
                   </CardContent>
                 </Card>
                 <Card>
@@ -2636,8 +2739,8 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                       {exec.celTop ? <div><strong>{exec.celTop.setor}</strong> · {exec.celTop.onde}<div className="text-muted-foreground text-xs">{exec.celTop.v} lote(s) com NC</div></div> : <div className="text-muted-foreground">—</div>}
                     </div>
                     <div>
-                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Equipamentos acima do limite ({100 - META_APROVACAO}% de NC)</div>
-                      {(() => { const l = exec.porEquip.filter((e) => e.f > 0 && e.taxa > 100 - META_APROVACAO).slice(0, 3);
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Equipamentos acima do limite ({100 - metaAprov}% de NC)</div>
+                      {(() => { const l = exec.porEquip.filter((e) => e.f > 0 && e.taxa > 100 - metaAprov).slice(0, 3);
                         return l.length === 0 ? <div className="text-muted-foreground">Nenhum.</div> : l.map((e) => <div key={e.equip} className="flex justify-between gap-2 py-0.5"><span className="truncate">{e.equip}</span><span className="font-semibold" style={{ color: COR_RUIM }}>{fmtPct1(e.taxa)} <span className="font-normal text-muted-foreground">({e.f}/{e.n})</span></span></div>); })()}
                     </div>
                   </div>
@@ -2647,15 +2750,23 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
           })()}
 
           {/* ===== Aba: Onde atacar (06/10/2026) ===== */}
-          {dashTab === 'atacar' && (<>
+          {dashTab === 'atacar' && (() => { const at = exec.atacar(setorAtacar); return (<>
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Setor:</span>
+              {[['todos', 'Todos'], ['Almoxarifado', 'Almoxarifado'], ['PCP', 'PCP']].map(([k, lbl]) => (
+                <button key={k} onClick={() => setSetorAtacar(k)}
+                  className={cn('text-xs px-3 py-1 rounded-full border transition-colors', setorAtacar === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}>{lbl}</button>
+              ))}
+              <span className="text-xs text-muted-foreground">{setorAtacar === 'todos' ? 'Todas as NCs do período.' : `Só NCs atribuídas ao ${setorAtacar}: etiquetas (externa e de acessório), lote/código de acessório entre RC e etiqueta e tempo dos Estágios 5 e 50 → Almoxarifado; OP, RC, identificação do produto e demais estágios → PCP.`}</span>
+            </div>
             <Card className="mb-6">
               <CardHeader>
                 <CardTitle className="text-sm">Pareto das causas de não conformidade</CardTitle>
                 <CardDescription>Lotes do período que tiveram NC, por causa (um lote conta uma vez por causa). As barras em vermelho somam ~80% das ocorrências — atacar essas causas resolve a maior parte do problema. Linha = % acumulado.</CardDescription>
               </CardHeader>
               <CardContent>
-                {exec.pareto.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
-                  : <div dangerouslySetInnerHTML={{ __html: svgPareto(exec.pareto) }} />}
+                {at.pareto.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
+                  : <div dangerouslySetInnerHTML={{ __html: svgPareto(at.pareto) }} />}
               </CardContent>
             </Card>
 
@@ -2665,29 +2776,29 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                 <CardDescription>Quantos lotes tiveram NC em cada combinação de setor responsável e estágio da OP (ou documento). Quanto mais escura a célula, maior a concentração — é ali que a conversa com o gestor deve começar.</CardDescription>
               </CardHeader>
               <CardContent>
-                {exec.matriz.vazia ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
-                  : <div dangerouslySetInnerHTML={{ __html: htmlMapaCalor({ ...exec.matriz, rotuloCanto: 'Setor' }) }} />}
+                {at.matriz.vazia ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
+                  : <div dangerouslySetInnerHTML={{ __html: htmlMapaCalor({ ...at.matriz, rotuloCanto: 'Setor' }) }} />}
               </CardContent>
             </Card>
 
             <Card className="mb-6">
               <CardHeader>
                 <CardTitle className="text-sm">Taxa de NC por equipamento</CardTitle>
-                <CardDescription>% dos lotes de cada equipamento que tiveram NC no período — em taxa, não em total, para não penalizar quem produz mais. Linha tracejada = limite da meta ({100 - META_APROVACAO}%). Equipamentos com menos de 5 lotes aparecem esmaecidos (amostra pequena).</CardDescription>
+                <CardDescription>% dos lotes de cada equipamento que tiveram NC no período — em taxa, não em total, para não penalizar quem produz mais. Linha tracejada = limite da meta ({100 - metaAprov}%). Equipamentos com menos de 5 lotes aparecem esmaecidos (amostra pequena).</CardDescription>
               </CardHeader>
               <CardContent>
-                {exec.porEquip.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Sem lotes no período.</div> : (() => {
-                  const maxT = Math.max(100 - META_APROVACAO + 5, ...exec.porEquip.map((e) => e.taxa));
+                {at.porEquip.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Sem lotes no período.</div> : (() => {
+                  const maxT = Math.max(100 - metaAprov + 5, ...at.porEquip.map((e) => e.taxa));
                   return (
                     <div className="space-y-2">
-                      {exec.porEquip.map((e) => (
+                      {at.porEquip.map((e) => (
                         <div key={e.equip} className={cn('grid grid-cols-12 items-center gap-2 text-xs', e.n < 5 && 'opacity-50')}>
                           <div className="col-span-4 truncate" title={e.equip}>{e.equip}</div>
                           <div className="col-span-6 relative h-4 rounded bg-muted">
-                            <div className="absolute inset-y-0 left-0 rounded" style={{ width: `${e.taxa / maxT * 100}%`, background: e.taxa > 100 - META_APROVACAO ? COR_RUIM : COR_OK, opacity: 0.85 }} />
-                            <div className="absolute inset-y-[-2px] border-l-2 border-dashed" style={{ left: `${(100 - META_APROVACAO) / maxT * 100}%`, borderColor: COR_META }} />
+                            <div className="absolute inset-y-0 left-0 rounded" style={{ width: `${e.taxa / maxT * 100}%`, background: e.taxa > 100 - metaAprov ? COR_RUIM : COR_OK, opacity: 0.85 }} />
+                            <div className="absolute inset-y-[-2px] border-l-2 border-dashed" style={{ left: `${(100 - metaAprov) / maxT * 100}%`, borderColor: COR_META }} />
                           </div>
-                          <div className="col-span-2 text-right"><strong style={{ color: e.taxa > 100 - META_APROVACAO ? COR_RUIM : undefined }}>{fmtPct1(e.taxa)}</strong> <span className="text-muted-foreground">({e.f}/{e.n})</span></div>
+                          <div className="col-span-2 text-right"><strong style={{ color: e.taxa > 100 - metaAprov ? COR_RUIM : undefined }}>{fmtPct1(e.taxa)}</strong> <span className="text-muted-foreground">({e.f}/{e.n})</span></div>
                         </div>
                       ))}
                     </div>
@@ -2702,18 +2813,18 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                   <CardDescription>Cada apontamento de NC conta 1, atribuído a quem executou o estágio: etiquetas → Estágio 50 (Embalagem); NC de um estágio específico → quem executou aquele estágio; demais → Estágio 60 (Conciliação). Visível só para administrador e gestores.</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {exec.porOperador.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma NC no período.</div> : (() => {
-                    const top = exec.tiposOperador.slice(0, 8);
+                  {at.porOperador.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma NC no período.</div> : (() => {
+                    const top = at.tiposOperador.slice(0, 8);
                     const corDe = (t) => { const i = top.indexOf(t); return i < 0 ? '#94A3B8' : PALETA_TIPOS[i % PALETA_TIPOS.length]; };
-                    const maxT = Math.max(...exec.porOperador.map((o) => o.total));
+                    const maxT = Math.max(...at.porOperador.map((o) => o.total));
                     return (<>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 mb-4 text-[11px]">
-                        {[...top, ...(exec.tiposOperador.length > 8 ? ['Outros'] : [])].map((t) => (
+                        {[...top, ...(at.tiposOperador.length > 8 ? ['Outros'] : [])].map((t) => (
                           <span key={t} className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: t === 'Outros' ? '#94A3B8' : corDe(t) }} />{t}</span>
                         ))}
                       </div>
                       <div className="space-y-2">
-                        {exec.porOperador.map((o) => {
+                        {at.porOperador.map((o) => {
                           const partes = top.map((t) => ({ t, v: o.tipos[t] || 0 })).filter((p) => p.v);
                           const outros = o.total - partes.reduce((s, p) => s + p.v, 0);
                           if (outros > 0) partes.push({ t: 'Outros', v: outros });
@@ -2733,7 +2844,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                 </CardContent>
               </Card>
             )}
-          </>)}
+          </>); })()}
 
           {dashTab === 'graficos' && (<>
           {/* ===== Cards de métrica principais ===== */}
@@ -2888,6 +2999,114 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
               </CardContent>
             </Card>
           </div>
+
+          {/* ===== Tempo de estágio por operador (09/10/2026) — só admin/gestor ===== */}
+          {podeVerOperador && (() => {
+            const T = exec.tempo;
+            const regs = T.regs.filter((r) => (tempoEst === 'todos' || r.estagio === Number(tempoEst)) && (tempoEquip === 'todos' || r.equip === tempoEquip));
+            const execs = T.execs.filter((e) => (tempoEst === 'todos' ? T.estagios.includes(e.estagio) : e.estagio === Number(tempoEst)) && (tempoEquip === 'todos' || e.equip === tempoEquip));
+            const ops = new Map();
+            const garante = (nome) => { if (!ops.has(nome)) ops.set(nome, { operador: nome, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0] }); return ops.get(nome); };
+            for (const e of execs) garante(e.operador).exec += e.n;
+            const FAIXAS = [['0–50%', '#FCC419'], ['50–100%', '#FD7E14'], ['100–150%', '#F76707'], ['150–200%', '#E03131'], ['200–500%', '#A61E4D'], ['> 500% (provável erro de apontamento)', '#868E96']];
+            const binDe = (x) => x < 50 ? 0 : x < 100 ? 1 : x < 150 ? 2 : x < 200 ? 3 : x <= 500 ? 4 : 5;
+            for (const r of regs) {
+              const o = garante(r.operador);
+              if (r.dir === 'abaixo') { o.abaixo++; continue; }
+              o.acima++;
+              if (r.excesso != null) { o.exc.push(r.excesso); o.bins[binDe(r.excesso)]++; }
+            }
+            const lista = [...ops.values()].filter((o) => o.acima + o.abaixo > 0).sort((a, b) => (b.acima + b.abaixo) - (a.acima + a.abaixo));
+            const mediana = (xs) => { if (!xs.length) return null; const v = xs.slice().sort((a, b) => a - b); const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+            const maxA = Math.max(1, ...lista.map((o) => o.acima + o.abaixo));
+            const sel = 'rounded-md border bg-background px-2 py-1 text-xs';
+            const filtros = (
+              <div className="flex items-center gap-2 flex-wrap no-print">
+                <select value={tempoEst} onChange={(e) => setTempoEst(e.target.value)} className={sel} title="Estágio">
+                  <option value="todos">Todos os estágios</option>
+                  {T.estagios.map((n) => <option key={n} value={n}>Estágio {n}{T.nomesEst[n] ? ` — ${T.nomesEst[n]}` : ''}</option>)}
+                </select>
+                <select value={tempoEquip} onChange={(e) => setTempoEquip(e.target.value)} className={sel} title="Equipamento">
+                  <option value="todos">Todos os equipamentos</option>
+                  {T.equips.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </div>
+            );
+            return (
+              <div className="grid grid-cols-1 gap-4 mb-6">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div>
+                        <CardTitle className="text-sm">Ressalvas de tempo de estágio por operador</CardTitle>
+                        <CardDescription>Apontamentos de tempo fora da faixa no período do filtro do topo, atribuídos a quem executou o estágio. "% fora" = apontamentos ÷ execuções daquele estágio pelo operador (só onde a checagem de tempo está ativa) — compara quem executa muito com quem executa pouco.</CardDescription>
+                      </div>
+                      {filtros}
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {lista.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma ressalva de tempo no período{tempoEst !== 'todos' || tempoEquip !== 'todos' ? ' com esse filtro' : ''}.</div> : (
+                      <div className="space-y-1.5">
+                        <div className="grid grid-cols-12 gap-2 text-[10px] uppercase text-muted-foreground font-semibold pb-1 border-b">
+                          <div className="col-span-3">Operador</div><div className="col-span-5">Apontamentos (acima · abaixo)</div><div className="col-span-1 text-right">Acima</div><div className="col-span-1 text-right">Abaixo</div><div className="col-span-1 text-right">Execuções</div><div className="col-span-1 text-right">% fora</div>
+                        </div>
+                        {lista.map((o) => {
+                          const pct = o.exec ? (o.acima + o.abaixo) / o.exec * 100 : null;
+                          return (
+                            <div key={o.operador} className="grid grid-cols-12 gap-2 items-center text-xs">
+                              <div className="col-span-3 truncate" title={o.operador}>{o.operador}</div>
+                              <div className="col-span-5 flex h-4 rounded overflow-hidden bg-muted" style={{ width: `${(o.acima + o.abaixo) / maxA * 100}%`, minWidth: '4px' }}>
+                                <div style={{ width: `${o.acima / (o.acima + o.abaixo) * 100}%`, background: '#E03131' }} title={`${o.acima} acima do tempo`} />
+                                <div style={{ width: `${o.abaixo / (o.acima + o.abaixo) * 100}%`, background: '#1E9DBA' }} title={`${o.abaixo} abaixo do tempo`} />
+                              </div>
+                              <div className="col-span-1 text-right font-semibold">{o.acima}</div>
+                              <div className="col-span-1 text-right">{o.abaixo || ''}</div>
+                              <div className="col-span-1 text-right text-muted-foreground">{o.exec || '—'}</div>
+                              <div className="col-span-1 text-right font-semibold" style={{ color: pct != null && pct >= 50 ? COR_RUIM : undefined }}>{pct == null ? '—' : fmtPct1(pct)}</div>
+                            </div>
+                          );
+                        })}
+                        <div className="text-[11px] text-muted-foreground pt-2"><span className="inline-block h-2 w-2 rounded-sm mr-1" style={{ background: '#E03131' }} />acima do tempo (possível fim esquecido) · <span className="inline-block h-2 w-2 rounded-sm mx-1" style={{ background: '#1E9DBA' }} />abaixo do tempo (possível início/fim batido errado){T.semFaixa ? ` · ${T.semFaixa} apontamento(s) antigo(s) sem faixa registrada ficaram fora do cálculo de excesso` : ''}.</div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">Quanto passou do tempo — por operador</CardTitle>
+                    <CardDescription>Cada apontamento "acima do tempo" classificado pelo excesso sobre o TETO da faixa aceita (ex.: teto 14 min, levou 21 min = 50% acima). Quem concentra em 0–100% está de fato demorando; 1 ou 2 casos em "&gt; 500%" costumam ser fim esquecido ou pausa não registrada. Mediana = excesso típico do operador.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {lista.filter((o) => o.exc.length).length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhum apontamento acima do tempo no período.</div> : (() => {
+                      const comExc = lista.filter((o) => o.exc.length).sort((a, b) => b.exc.length - a.exc.length);
+                      const maxE = Math.max(...comExc.map((o) => o.exc.length));
+                      return (<>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 mb-3 text-[11px]">
+                          {FAIXAS.map(([l, c]) => <span key={l} className="inline-flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c }} />{l}</span>)}
+                        </div>
+                        <div className="space-y-2">
+                          {comExc.map((o) => {
+                            const med = mediana(o.exc);
+                            return (
+                              <div key={o.operador} className="grid grid-cols-12 items-center gap-2 text-xs">
+                                <div className="col-span-3 truncate" title={o.operador}>{o.operador}</div>
+                                <div className="col-span-6 flex h-5 rounded overflow-hidden bg-muted" style={{ width: `${o.exc.length / maxE * 100}%`, minWidth: '4px' }}>
+                                  {o.bins.map((v, i) => v ? <div key={i} title={`${FAIXAS[i][0]}: ${v}`} style={{ width: `${v / o.exc.length * 100}%`, background: FAIXAS[i][1] }} className="text-[10px] text-white font-semibold flex items-center justify-center">{v}</div> : null)}
+                                </div>
+                                <div className="col-span-1 text-right font-semibold">{o.exc.length}</div>
+                                <div className="col-span-2 text-right text-muted-foreground">mediana <strong className="text-foreground">{med == null ? '—' : `${Math.round(med)}%`}</strong></div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>);
+                    })()}
+                  </CardContent>
+                </Card>
+              </div>
+            );
+          })()}
           </>)}
 
           {/* ===== Histórico de correções ===== */}
@@ -6393,7 +6612,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
               `O Estágio ${n} (${nomeE}) levou ${total} min, ${dir} do tempo esperado (${faixaTxt}). ${causa}`,
               'Verificar o apontamento de início/fim do estágio na OP com o operador que o executou e regularizar antes da liberação.',
               'ISO 13485 §7.5.1 (controle da produção)',
-              { estagios: [n], setorResponsavel: 'Almoxarifado', estagioResponsavel: n });
+              { estagios: [n], setorResponsavel: (n === 5 || n === 50) ? 'Almoxarifado' : 'PCP', estagioResponsavel: n });
           } else {
             add(C1, oQue, 'conforme', `Tempo total ${total} min — dentro do esperado (${faixaTxt}).`);
           }
@@ -18025,6 +18244,9 @@ ${parecer.parecer_tecnico ? `
       const [reincPct, setReincPct] = useState('3');
       const [reincFator, setReincFator] = useState('3');
       const [salvandoReinc, setSalvandoReinc] = useState(false);
+      // Meta de aprovação de primeira (Dashboard / relatório). Padrão 90% (decisão 09/10/2026).
+      const [metaAprov, setMetaAprov] = useState('90');
+      const [salvandoMeta, setSalvandoMeta] = useState(false);
       // NFs de venda (rastreabilidade série × nota) — pasta de rede e agendamento
       const [nfPasta, setNfPasta] = useState('');
       const [nfDia, setNfDia] = useState('1');
@@ -18038,7 +18260,7 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo', 'meta_aprovacao']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
@@ -18050,6 +18272,7 @@ ${parecer.parecer_tecnico ? `
               if (map.nf_dia_mes != null && map.nf_dia_mes !== '') setNfDia(String(map.nf_dia_mes));
               if (map.nf_hora != null && map.nf_hora !== '') setNfHora(String(map.nf_hora));
               if (map.nf_ano_minimo != null && map.nf_ano_minimo !== '') setNfAnoMin(String(map.nf_ano_minimo));
+              if (map.meta_aprovacao != null && map.meta_aprovacao !== '') setMetaAprov(String(map.meta_aprovacao));
             }
           } catch (e) { /* segue com o cache local */ }
         })();
@@ -18113,6 +18336,21 @@ ${parecer.parecer_tecnico ? `
         } finally { setSalvandoNf(false); }
       };
 
+      const salvarMeta = async () => {
+        const v = parseFloat(String(metaAprov).replace(',', '.'));
+        if (isNaN(v) || v <= 0 || v > 100) { toast.error('Informe uma meta entre 1 e 100.'); return; }
+        setSalvandoMeta(true);
+        try {
+          const autor = perfil?.nome_completo || perfil?.email || null;
+          const { error } = await supabase.from('config_app').upsert([{ chave: 'meta_aprovacao', valor: String(v), updated_at: new Date().toISOString(), updated_by: autor }], { onConflict: 'chave' });
+          if (error) throw error;
+          setMetaAprov(String(v));
+          registrarLog(perfil, 'editar_config', 'config', 'meta_aprovacao', `${autor || 'Usuário'} alterou a meta de aprovação de primeira para ${v}%`);
+          toast.success(`Meta de aprovação de primeira: ${v}%.`);
+        } catch (e) { toast.error('Erro ao salvar a meta: ' + (e?.message || e)); }
+        finally { setSalvandoMeta(false); }
+      };
+
       const salvarReinc = async () => {
         setSalvandoReinc(true);
         try {
@@ -18163,6 +18401,20 @@ ${parecer.parecer_tecnico ? `
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">Serviço de conversão/salvamento: <code>{CONVERSAO_PDF_LOCAL || '(não configurado)'}</code></p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Icon name="check" className="h-5 w-5 text-accent" />Meta de aprovação de primeira</CardTitle>
+                <CardDescription>% de lotes aprovados na 1ª análise (conforme + conforme com ressalvas). Usada no Dashboard e no relatório de qualidade.</CardDescription>
+              </CardHeader>
+              <CardContent className="flex items-end gap-3 flex-wrap">
+                <div className="w-40">
+                  <Label>Meta (%)</Label>
+                  <Input type="number" min="1" max="100" step="0.5" value={metaAprov} onChange={(e) => setMetaAprov(e.target.value)} disabled={!podeEditar} />
+                </div>
+                <Button onClick={salvarMeta} disabled={salvandoMeta || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar meta</Button>
               </CardContent>
             </Card>
 
