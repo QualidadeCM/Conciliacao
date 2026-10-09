@@ -1375,6 +1375,7 @@
       if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
       if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
       let est = ap.estagio_responsavel;
+      if (est == null) { const ir = inspetorResponsavel(ap, null); if (ir && ir.estagio != null) est = ir.estagio; }
       if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
       if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
       if (/form/i.test(ap.documento_afetado || '')) return { k: 'z4', lbl: 'FORM-GQ-0047' };
@@ -1419,6 +1420,30 @@
       const x = (i) => 3 + i * (W - 6) / Math.max(1, n - 1), y = (v) => H - 3 - v / mx * (H - 6);
       const d = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
       return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" fill="none" stroke="${COR_NEUTRA}" stroke-width="1.6"/>${vals.map((v, i) => i === n - 1 ? `<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${COR_RUIM}"/>` : '').join('')}</svg>`;
+    }
+
+    // ---- Responsável por NC de CRONOLOGIA INCOERENTE (11/10/2026) ----
+    // A inspeção do estágio N foi registrada DEPOIS do início do estágio seguinte:
+    // quem errou foi o INSPETOR (o horário a corrigir é o da inspeção), não o
+    // operador do estágio seguinte. Novas análises gravam o inspetor no próprio
+    // apontamento; nas antigas, ele é lido do texto da inspeção na cronologia.
+    function inspetorResponsavel(ap, analise) {
+      if (!ap) return null;
+      if (ap.inspetor_responsavel) return { nome: String(ap.inspetor_responsavel).trim(), estagio: ap.estagio_inspecao ?? null, inspecao: ap.inspecao_num ?? null };
+      const d = String(ap.descricao || '');
+      if (!/cronologia incoerente/i.test(d)) return null;
+      const m = d.match(/Inspe[çc][ãa]o\s+#\s*(\d+)\s+do\s+Est[áa]gio\s+(\d+)/i);
+      if (!m) return null;
+      const num = m[1], est = +m[2];
+      let nome = null;
+      for (const c of (analise?.parecer_completo?.cronologia || [])) {
+        for (const seg of String(c.inspecao || '').split('|')) {
+          const mm = seg.trim().match(new RegExp('^' + num + '\\b[\\s\\S]*\\(([^()]+)\\)\\s*$'));
+          if (mm) { nome = mm[1].trim(); break; }
+        }
+        if (nome) break;
+      }
+      return nome && nome !== '?' ? { nome, estagio: est, inspecao: num } : { nome: null, estagio: est, inspecao: num };
     }
 
     // ---- Ressalvas de tempo de estágio (11/10/2026) ----
@@ -1535,6 +1560,8 @@
           else est = 60;
           let operador = executor(ncAnalise, est), estAtrib = est;
           if (!operador && est !== 60) { operador = executor(ncAnalise, 60); estAtrib = 60; }
+          const insp = inspetorResponsavel(ap, ncAnalise); // cronologia → inspetor
+          if (insp) { operador = insp.nome || 'Inspetor não identificado'; estAtrib = insp.estagio; }
           const doc = rotuloDocApontamento(ap), cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
           ncRegs.push({ lote, mes: lote.mes, ini: lote.ini, equip: lote.equip, aberto, setor: setorDoApontamento(ap), onde: ondeDoApontamento(ap).lbl,
             doc, cat, tipo: cat === doc ? doc : `${doc} · ${cat}`, desc: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
@@ -2241,7 +2268,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         'Modelo': 'Revisar o modelo/template da etiqueta e o cadastro do produto.',
         'Nome do produto': 'Corrigir o nome do produto no modelo da etiqueta e no cadastro.',
         'CNPJ': 'Corrigir o CNPJ no cadastro do fabricante e nas etiquetas.',
-        'Cronologia incoerente': 'Investigar o registro de datas/horas no Sapiens; revisar o sequenciamento de estágios e treinar a produção.',
+        'Cronologia incoerente': 'Corrigir o horário da INSPEÇÃO registrada após o início do estágio seguinte e orientar os inspetores a registrar a inspeção no momento em que ela é concluída.',
         'Data': 'Revisar o registro de datas no processo e a legibilidade nos documentos.',
         'Acessório': 'Revisar a BOM/ficha mestre e a conferência de acessórios; verificar lotes correlatos.',
         'Componente/RC': 'Investigar com a produção o desvio de componente e revisar a RC.',
@@ -2585,6 +2612,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
           if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
           let est = ap.estagio_responsavel;
+          if (est == null) { const ir = inspetorResponsavel(ap, null); if (ir && ir.estagio != null) est = ir.estagio; }
           if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
           if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
           if (/form/i.test(ap.documento_afetado || '')) return { k: 'z4', lbl: 'FORM-GQ-0047' };
@@ -2684,6 +2712,8 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             let operador = executorDoEstagio(l.ncAnalise, est);
             let estAtrib = est;
             if (!operador && est !== 60) { operador = executorDoEstagio(l.ncAnalise, 60); estAtrib = 60; }
+            const insp = inspetorResponsavel(ap, l.ncAnalise); // cronologia → inspetor
+            if (insp) { operador = insp.nome || 'Inspetor não identificado'; estAtrib = insp.estagio; }
             const doc = docRotulo(ap), cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
             ncRegs.push({
               lote: l, mes: l.mes, ini: l.ini, equip: l.equip, aberto: l.aberto,
@@ -6503,6 +6533,10 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         // quando o documento afetado é a OP (que por padrão iria ao PCP).
         if (extra && extra.setorResponsavel) ap.setor_responsavel = String(extra.setorResponsavel);
         if (extra && extra.estagioResponsavel != null) ap.estagio_responsavel = Number(extra.estagioResponsavel);
+        // Cronologia incoerente: o responsável é o inspetor da inspeção fora de ordem.
+        if (extra && extra.inspetorResponsavel) ap.inspetor_responsavel = String(extra.inspetorResponsavel);
+        if (extra && extra.estagioInspecao != null) ap.estagio_inspecao = Number(extra.estagioInspecao);
+        if (extra && extra.inspecaoNum != null) ap.inspecao_num = String(extra.inspecaoNum);
         apontamentos.push(ap);
       };
       // Rótulo amigável de um estágio a partir do número (usa a lista de estágios variáveis).
@@ -7254,6 +7288,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 inspEst: insp.estagio,
                 inspNum: insp.numero,
                 inspData: insp.data && insp.hora ? `${insp.data} ${insp.hora}` : insp.data_hora_iso,
+                inspetor: insp.inspetor || '',
                 opEst: oper.estagio_numero,
                 opNome: oper.operacao_desc || `Op ${oper.operacao_numero}`,
                 opInicio: oper.inicio,
@@ -7273,21 +7308,25 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           }
           const detalhes = [...porInsp.values()].map(({ insp, posteriores }) => {
             const primeira = posteriores.sort((a, b) => parseDateTime(a.opInicio) - parseDateTime(b.opInicio))[0];
-            return `Inspeção #${insp.inspNum} do Estágio ${insp.inspEst} (concluída em ${insp.inspData}) é POSTERIOR ao início da operação "${primeira.opNome}" do Estágio ${primeira.opEst} (iniciada em ${primeira.opInicio})`;
+            return `Inspeção #${insp.inspNum} do Estágio ${insp.inspEst}${insp.inspetor ? ` (inspetor: ${insp.inspetor})` : ''}, registrada em ${insp.inspData}, é POSTERIOR ao início da operação "${primeira.opNome}" do Estágio ${primeira.opEst} (iniciada em ${primeira.opInicio})`;
           });
           add(C1, 'Cronologia coerente entre inspeções e operações', 'nao_conforme',
             `${detalhes.length} incoerência(s) cronológica(s) detectada(s): ${detalhes.join('; ')}.`);
           const cronEst = new Set(), cronInsp = new Set();
+          // Estágio da INSPEÇÃO primeiro — é onde está o horário a corrigir.
+          for (const inc of incoerencias) if (inc.inspEst != null) cronEst.add(nomeEstagio(inc.inspEst));
           for (const inc of incoerencias) {
             if (inc.opEst != null) cronEst.add(nomeEstagio(inc.opEst));
-            if (inc.inspEst != null) cronEst.add(nomeEstagio(inc.inspEst));
             if (inc.inspNum != null) cronInsp.add(`#${inc.inspNum} · Est. ${inc.inspEst}`);
           }
+          // Responsável: o INSPETOR da inspeção registrada fora de ordem (decisão
+          // 11/10/2026). O horário a corrigir é o da inspeção, não o do estágio seguinte.
+          const primeiraInc = [...porInsp.values()][0].insp;
           apontar('nao_conforme', 1, 'OP',
-            `Cronologia incoerente: ${detalhes.join('; ')}. Um estágio posterior não pode começar antes da inspeção do estágio anterior ser concluída.`,
-            'Investigar o registro de datas/horas no Sapiens. Pode indicar retrabalho não documentado, correção de data pós-fato ou erro operacional na sequência de estágios. Emitir RNC quando aplicável.',
+            `Cronologia incoerente: ${detalhes.join('; ')}. A inspeção precisa estar registrada antes do início do estágio seguinte — o horário a corrigir é o da INSPEÇÃO.`,
+            `Corrigir no Sapiens o horário da inspeção #${primeiraInc.inspNum} (Estágio ${primeiraInc.inspEst})${primeiraInc.inspetor ? ` com o inspetor ${primeiraInc.inspetor}` : ''}; o horário do estágio seguinte está correto. Se a inspeção de fato ocorreu depois, investigar (retrabalho não documentado) e emitir RNC quando aplicável.`,
             'ISO 13485 §7.5.1 (controle de produção) + §7.5.9 (rastreabilidade)',
-            { estagios: [...cronEst], inspecoes: [...cronInsp] });
+            { estagios: [...cronEst], inspecoes: [...cronInsp], inspetorResponsavel: primeiraInc.inspetor || '', estagioInspecao: primeiraInc.inspEst, inspecaoNum: primeiraInc.inspNum });
         } else {
           add(C1, 'Cronologia coerente entre inspeções e operações', 'conforme',
             `Todas as ${insps.length} inspeções foram concluídas antes do início dos estágios seguintes.`);
@@ -11335,6 +11374,7 @@ ${parecer.parecer_tecnico ? `
               cat,
               setor,           // PCP | Almoxarifado → define o canal
               estagioResp: (ap.estagio_responsavel != null ? ap.estagio_responsavel : null), // estágio executor (menção)
+              inspetorNome: (inspetorResponsavel(ap, { parecer_completo: parecer }) || {}).nome || '', // cronologia → inspetor
               tipo: 'correcao',                     // 'correcao' | 'duvida' (verificar ficha)
               perguntas: perguntasDuvidaPadrao(cat), // sugeridas p/ o card de dúvida (editáveis)
               // NC pontual e ressalva vêm desmarcadas por padrão; NC não-pontual, marcada.
@@ -11359,6 +11399,13 @@ ${parecer.parecer_tecnico ? `
           } catch (e) { /* best-effort */ }
           const mencaoEtiqueta = acharMencao(50, 'Almoxarifado');
           const mencaoOP = acharMencao(60, 'PCP');
+          // Cronologia incoerente: a menção é do INSPETOR da inspeção fora de ordem
+          // (por item), não do executor do estágio seguinte nem da Conciliação.
+          for (const it of itens) {
+            if (!it.inspetorNome) continue;
+            const { slackId } = resolverOperador(operadoresRef, '', it.inspetorNome);
+            it.mencaoInspetor = { nome: it.inspetorNome, slackId, incluir: !!slackId, encontrado: true };
+          }
           // Estágio 5 (Separação de Componentes) — usado nos apontamentos de tempo
           // do estágio 5, cujo executor é do Almoxarifado (não o mesmo do 50).
           const mencaoEstagio5 = acharMencao(5, 'Almoxarifado');
@@ -11398,6 +11445,7 @@ ${parecer.parecer_tecnico ? `
           // (Almoxarifado → Estágio 50; PCP → Estágio 60). Se o apontamento fixa um
           // estágio executor específico (ex.: tempo do Estágio 5), usa esse.
           const mencaoDoItemObj = (it) => {
+            if (it.mencaoInspetor) return it.mencaoInspetor;
             if (it.estagioResp === 5) return slackModal.mencaoEstagio5;
             if (it.estagioResp === 50) return slackModal.mencaoEtiqueta;
             return it.setor === 'Almoxarifado' ? slackModal.mencaoEtiqueta : it.setor === 'PCP' ? slackModal.mencaoOP : null;
@@ -12093,7 +12141,19 @@ ${parecer.parecer_tecnico ? `
                       <span className="font-semibold">{it.codigo}</span>
                       <span className="text-muted-foreground">· {it.doc}</span>
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: 'hsl(var(--accent) / 0.15)', color: 'hsl(var(--accent))' }}>resp.: {it.responsavel}</span>
-                      {(() => {
+                      {it.mencaoInspetor && (() => {
+                        const m = it.mencaoInspetor;
+                        if (!m.slackId) return <span className="text-[10px] text-muted-foreground" title="Inspetor sem Slack ID cadastrado (Configurações → Operadores)">sem Slack: {m.nome} (inspetor)</span>;
+                        return (
+                          <button type="button" onClick={() => setItemSlack(idx, 'mencaoInspetor', { ...m, incluir: !m.incluir })}
+                            className="text-[10px] px-1.5 py-0.5 rounded-full border leading-none"
+                            title="Inspetor que registrou a inspeção fora de ordem — clique para marcar/desmarcar a menção"
+                            style={m.incluir ? { backgroundColor: 'hsl(var(--secondary) / 0.15)', color: 'hsl(var(--secondary))', borderColor: 'transparent' } : { borderColor: 'hsl(var(--input))', color: 'hsl(var(--muted-foreground))' }}>
+                            @{m.nome} (inspetor)
+                          </button>
+                        );
+                      })()}
+                      {!it.mencaoInspetor && (() => {
                         const chave = it.estagioResp === 5 ? 'mencaoEstagio5'
                           : it.estagioResp === 50 ? 'mencaoEtiqueta'
                           : it.setor === 'Almoxarifado' ? 'mencaoEtiqueta' : it.setor === 'PCP' ? 'mencaoOP' : null;
@@ -13529,6 +13589,9 @@ ${parecer.parecer_tecnico ? `
               const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
               const c = crono.find((x) => x.estagio_numero === estOper);
               if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
+              // Cronologia incoerente: quem corrige é o INSPETOR da inspeção fora de ordem.
+              const insp = inspetorResponsavel(ap, a);
+              if (insp && insp.nome) { operador = insp.nome; operadorId = ''; slackId = acharSlack('', insp.nome); }
               const tempo = parseApontTempo(ap.descricao);
               // Chave: no tempo, separa por estágio + direção + faixa (não mistura rígido/não-rígido).
               const key = tempo
@@ -15152,14 +15215,15 @@ ${parecer.parecer_tecnico ? `
             for (const ap of aps) {
               const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
               const c = crono.find((x) => x.estagio_numero === estOper);
+              const insp = inspetorResponsavel(ap, a); // cronologia → inspetor
               ws.addRow({
                 ...base,
                 sev: ap.severidade === 'ressalva' ? 'Ressalva' : 'Não conforme',
                 doc: ap.documento_afetado || '',
                 erro: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
                 setor: ap.setor_responsavel || '',
-                estagio: ap.estagio_responsavel != null ? ap.estagio_responsavel : (c ? estOper : ''),
-                operador: c ? (c.operador_nome || '') : '',
+                estagio: insp ? `${insp.estagio} (inspeção #${insp.inspecao})` : ap.estagio_responsavel != null ? ap.estagio_responsavel : (c ? estOper : ''),
+                operador: insp ? (insp.nome ? `${insp.nome} (inspetor)` : 'inspetor não identificado') : c ? (c.operador_nome || '') : '',
                 acao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim(),
               });
               linhas++;
