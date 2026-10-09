@@ -787,6 +787,115 @@ async function checarAgendamentoNfs() {
 setInterval(() => { checarAgendamentoNfs(); }, 60 * 60 * 1000);
 setTimeout(() => { checarAgendamentoNfs(); }, 60 * 1000);
 
+// ============================================================================
+// RELATÓRIOS DE QUALIDADE MENSAIS AUTOMÁTICOS (10/10/2026)
+// O cálculo e o layout NÃO são duplicados aqui: o serviço lê o bloco
+// "@@MOTOR_RELATORIO" do próprio plataforma.html (o mesmo código que gera o
+// relatório no navegador) e executa. Assim o PDF automático é idêntico ao
+// gerado pela tela. Para cada modelo marcado como "automático", gera o PDF do
+// mês anterior e grava em <pasta>/<ano>/.
+// ============================================================================
+function carregarMotorRelatorio() {
+  if (!PLATAFORMA_HTML) throw new Error('Defina PLATAFORMA_HTML no .env (caminho do plataforma.html).');
+  const src = fs.readFileSync(PLATAFORMA_HTML, 'utf8');
+  const ini = src.indexOf('@@MOTOR_RELATORIO_INICIO');
+  const fim = src.indexOf('/* @@MOTOR_RELATORIO_FIM');
+  if (ini < 0 || fim < 0) throw new Error('Bloco do motor de relatório não encontrado no plataforma.html (atualize com git pull).');
+  const codigo = src.slice(src.indexOf('*/', ini) + 2, fim);
+  // eslint-disable-next-line no-new-func
+  return new Function(codigo + '\nreturn { calcularBaseQualidade, gerarRelatorioQualidade, mesclarModelosRelatorio };')();
+}
+
+async function buscarTodasLinhas(tabela, colunas, ordemCampo) {
+  const admin = supaAdmin();
+  const PAG = 1000; let de = 0; const out = [];
+  for (;;) {
+    let q = admin.from(tabela).select(colunas);
+    if (ordemCampo) q = q.order(ordemCampo, { ascending: true });
+    const { data, error } = await q.range(de, de + PAG - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < PAG) break;
+    de += PAG;
+  }
+  return out;
+}
+
+const mesAnteriorYM = (d = new Date()) => { const x = new Date(d.getFullYear(), d.getMonth() - 1, 1); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`; };
+const relatorioStatus = { rodando: false, iniciado_em: null, resultado: null, erro: null };
+
+async function gerarRelatoriosMensais({ mes, origem }) {
+  const motor = carregarMotorRelatorio();
+  const cfg = await lerConfig(['relatorio_auto_pasta', 'relatorio_modelos', 'meta_aprovacao']);
+  const pasta = String(cfg.relatorio_auto_pasta || '').trim();
+  if (!pasta) throw new Error('Pasta dos relatórios automáticos não configurada (Configurações → Relatórios automáticos).');
+  let salvos = []; try { salvos = JSON.parse(cfg.relatorio_modelos || '[]'); } catch (e) { salvos = []; }
+  const modelos = motor.mesclarModelosRelatorio(salvos).filter((m) => m.automatico);
+  if (!modelos.length) throw new Error('Nenhum modelo marcado como "gerar automaticamente".');
+  const alvo = /^\d{4}-\d{2}$/.test(String(mes || '')) ? mes : mesAnteriorYM();
+  const admin = supaAdmin();
+  const analises = await buscarTodasLinhas('analises', 'id, status, modelo, numero_op, numero_serie, created_at, parecer_completo, analise_origem_id, doc_substituido, motivo_reanalise, tipo_reanalise', 'created_at');
+  const { data: produtos } = await admin.from('produtos').select('id, modelo, codigo_sapiens, equipamento');
+  let temposAtivos = [];
+  try { const { data } = await admin.from('tempos_estagio').select('equipamento, estagio_numero, ativo').eq('ativo', true); temposAtivos = data || []; } catch (e) { /* tabela opcional */ }
+  const base = motor.calcularBaseQualidade({ analises, produtos: produtos || [], temposAtivos });
+  const dir = path.join(pasta, alvo.slice(0, 4));
+  fs.mkdirSync(dir, { recursive: true });
+  const meta = parseFloat(String(cfg.meta_aprovacao || '').replace(',', '.')) || 90;
+  const arquivos = [];
+  for (const m of modelos) {
+    const r = motor.gerarRelatorioQualidade(base, { ...m, de: alvo, ate: alvo, titulo: m.nome }, { meta, podeVerOperador: true, autor: 'Geração automática mensal', agora: new Date() });
+    const pdf = await htmlParaPdf(r.html, { landscape: r.paisagem });
+    const arq = path.join(dir, `${r.nomeArq}.pdf`);
+    fs.writeFileSync(arq, pdf);
+    arquivos.push(arq);
+    console.log(`[RELATORIO] ${m.nome} -> ${arq}`);
+  }
+  const resultado = { mes: alvo, em: new Date().toISOString(), origem: origem || 'manual', arquivos };
+  await gravarConfig('relatorio_auto_ultimo', JSON.stringify(resultado));
+  return resultado;
+}
+
+async function dispararRelatorios(opts) {
+  if (relatorioStatus.rodando) return false;
+  Object.assign(relatorioStatus, { rodando: true, iniciado_em: new Date().toISOString(), resultado: null, erro: null });
+  try { relatorioStatus.resultado = await gerarRelatoriosMensais(opts || {}); }
+  catch (err) { relatorioStatus.erro = err.message || String(err); console.error('[ERRO relatorios mensais]', relatorioStatus.erro); }
+  finally { relatorioStatus.rodando = false; }
+  return true;
+}
+
+app.post('/relatorios-mensais/gerar', async (req, res) => {
+  let body = {};
+  try { body = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') || '{}' : JSON.stringify(req.body || {})); } catch (e) { body = {}; }
+  if (relatorioStatus.rodando) return res.status(409).json({ error: 'Já existe uma geração em andamento.', status: relatorioStatus });
+  await dispararRelatorios({ mes: body.mes, origem: 'manual' });
+  if (relatorioStatus.erro) return res.status(500).json({ error: relatorioStatus.erro });
+  return res.json({ ok: true, ...relatorioStatus.resultado });
+});
+app.get('/relatorios-mensais/status', (req, res) => res.json(relatorioStatus));
+
+// Agenda: dia/hora configuráveis (padrão dia 1, 07h — depois da varredura de NFs).
+async function checarAgendamentoRelatorios() {
+  try {
+    const cfg = await lerConfig(['relatorio_auto_pasta', 'relatorio_auto_dia', 'relatorio_auto_hora', 'relatorio_auto_ultimo']);
+    if (!String(cfg.relatorio_auto_pasta || '').trim()) return;
+    const dia = parseInt(cfg.relatorio_auto_dia || '1', 10) || 1;
+    const hora = parseInt(cfg.relatorio_auto_hora || '7', 10);
+    const agora = new Date();
+    if (agora.getDate() < dia || agora.getHours() < (isNaN(hora) ? 7 : hora)) return;
+    const alvo = mesAnteriorYM(agora);
+    let ultimo = null; try { ultimo = JSON.parse(cfg.relatorio_auto_ultimo || 'null'); } catch (e) { ultimo = null; }
+    if (ultimo && ultimo.mes === alvo) return; // já gerado para este mês
+    console.log(`[RELATORIO] geração automática do mês ${alvo} iniciando...`);
+    await dispararRelatorios({ mes: alvo, origem: 'automatica' });
+  } catch (err) {
+    console.error('[ERRO agendamento relatorios]', err.message);
+  }
+}
+setInterval(() => { checarAgendamentoRelatorios(); }, 60 * 60 * 1000);
+setTimeout(() => { checarAgendamentoRelatorios(); }, 2 * 60 * 1000);
+
 // ---- Ghostscript: regenera o PDF SEM restricoes (assinavel no Adobe) ------
 async function otimizarPdf(inputBytes) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cpdf-'));
@@ -830,5 +939,5 @@ async function htmlParaPdf(html, opts = {}) {
 
 app.listen(PORT, () => {
   console.log(`Conversor PDF local ouvindo em http://0.0.0.0:${PORT}`);
-  console.log(`  Endpoints: POST /converter-pdf | POST /salvar-pacote | POST /convidar-usuario | POST /notificar-slack | POST /pcp-status | POST /varrer-nfs | GET /varrer-nfs/status`);
+  console.log(`  Endpoints: POST /converter-pdf | POST /salvar-pacote | POST /convidar-usuario | POST /notificar-slack | POST /pcp-status | POST /varrer-nfs | GET /varrer-nfs/status | POST /relatorios-mensais/gerar | GET /relatorios-mensais/status`);
 });

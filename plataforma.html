@@ -1106,6 +1106,9 @@
       );
     }
 
+    /* @@MOTOR_RELATORIO_INICIO — JS puro (sem JSX): o serviço (server.js) lê e executa
+       este trecho para gerar os relatórios mensais automáticos. Não usar React,
+       window ou document aqui dentro. */
     /* ====================================================================
        VISÃO EXECUTIVA / ONDE ATACAR — construtores de gráfico (06/10/2026)
        Geram SVG/HTML em STRING para servir tanto à tela (via innerHTML) quanto
@@ -1158,7 +1161,7 @@
 
     // Pareto: barras em ordem decrescente + linha de % acumulado. As barras até
     // cruzar 80% do total ficam em vermelho — é ali que a ação rende mais.
-    function svgPareto(itens, maxBarras = 12) {
+    function svgPareto(itens, maxBarras = 12, nLotes = 0) {
       let lista = itens.slice(0, maxBarras);
       const resto = itens.slice(maxBarras).reduce((s, i) => s + i.value, 0);
       if (resto > 0) lista = [...lista, { label: 'Outras causas', value: resto }];
@@ -1184,7 +1187,8 @@
         const cx = L + i * bw + bw / 2;
         const cor = vital ? COR_RUIM : '#94A3B8';
         s += `<rect x="${(L + i * bw + bw * 0.15).toFixed(1)}" y="${yV(it.value).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${(H - B - yV(it.value)).toFixed(1)}" rx="3" fill="${cor}" fill-opacity="${vital ? 0.85 : 0.6}"><title>${escHtml(it.label)}: ${it.value} lote(s) — ${fmtPct1(it.value / total * 100)} do total · acumulado ${fmtPct1(pc)}</title></rect>`;
-        s += `<text x="${cx}" y="${yV(it.value) - 4}" font-size="10" text-anchor="middle" fill="currentColor" font-weight="600">${it.value}</text>`;
+        s += `<text x="${cx}" y="${yV(it.value) - (nLotes ? 15 : 4)}" font-size="10" text-anchor="middle" fill="currentColor" font-weight="600">${it.value}</text>`;
+        if (nLotes) s += `<text x="${cx}" y="${yV(it.value) - 4}" font-size="8.5" text-anchor="middle" fill="currentColor" fill-opacity="0.6">${fmtPct1(it.value / nLotes * 100)}</text>`;
         const lbl = it.label.length > 24 ? it.label.slice(0, 23) + '…' : it.label;
         s += `<text transform="translate(${cx},${H - B + 10}) rotate(-38)" font-size="10" text-anchor="end" fill="currentColor" fill-opacity="0.75">${escHtml(lbl)}</text>`;
         pts.push([cx, yP(pc), pc]);
@@ -1217,6 +1221,534 @@
       });
       return h + '</tbody></table></div>';
     }
+
+    // ---- Classificação dos apontamentos (única fonte: Dashboard, relatório e serviço) ----
+    const CATEGORIAS_ERRO = [
+      { nome: 'Registro ANVISA',     re: /anvisa/i },
+      { nome: 'Modelo',              re: /\bmodelo\b/i },
+      { nome: 'Nome do produto',     re: /\bnome do produto|fam[íi]lia\b/i },
+      { nome: 'CNPJ',                re: /\bcnpj\b/i },
+      { nome: 'Fabricante',          re: /\bfabricante\b/i },
+      { nome: 'Endereço',            re: /\bendere[çc]o\b/i },
+      { nome: 'Telefone',            re: /\btelefone\b/i },
+      { nome: 'Responsável Técnico', re: /respons[áa]vel\s+t[ée]cnico|\brt\b/i },
+      { nome: 'CREA',                re: /\bcrea\b/i },
+      { nome: 'Responsável Legal',   re: /respons[áa]vel\s+legal/i },
+      { nome: 'Nº de série',         re: /\bs[ée]rie\b/i },
+      { nome: 'Cronologia incoerente', re: /cronologia|hor[áa]rio\s+incoerente|incoerente|sequ[êe]ncia\s+de\s+(est[áa]gios|etapas)/i },
+      { nome: 'Tempo de estágio',    re: /tempo esperado|faixa esperada|tempo do est[áa]gio/i },
+      { nome: 'Data',                re: /\bdata\b/i },
+      { nome: 'Validade',            re: /validade/i },
+      { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
+      { nome: 'Acessório',           re: /acess[óo]rio/i },
+      { nome: 'Componente/RC',       re: /\bcomponente|rela[çc][ãa]o de componentes|\brc\b/i },
+      { nome: 'Reprovação em inspeção', re: /reprova/i },
+      { nome: 'Cópia/revisão do FORM', re: /c[óo]pia controlada|revis[ãa]o do form/i },
+      { nome: 'Derivação/identificação do produto', re: /deriva[çc][ãa]o|identificar o produto|produto a partir dos documentos|cat[áa]logo de produtos/i },
+      { nome: 'Documento ausente/ilegível', re: /ausente|n[ãa]o anexad|n[ãa]o p[ôo]de ser parse|n[ãa]o parse[áa]vel|n[ãa]o extra[íi]d/i },
+      { nome: 'Inspeção/Medição',   re: /inspe[çc][ãa]o|medi[çc]/i },
+    ];
+    // Aptidão de operador/inspetor não é tratada como NC — fora das contagens de erro.
+    const ehErroOperador = (ap) => /aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test((ap?.descricao || '') + ' ' + (ap?.documento_afetado || ''));
+    const classificarDocApontamento = (ap) => {
+      const d = String(ap?.documento_afetado || '').toLowerCase();
+      if (d.includes('etiqueta') && d.includes('acess')) return 'eac';
+      if (d.includes('etiqueta')) return 'etx';
+      if (/\brc\b|rela[çc][ãa]o de componentes/.test(d)) return 'rc';
+      if (/\bop\b|ordem de produ/.test(d)) return 'op';
+      return 'outros';
+    };
+    const categoriaDoTexto = (descricao, documento) => {
+      const txt = (descricao || '') + ' ' + (documento || '');
+      for (const cat of CATEGORIAS_ERRO) { if (cat.re.test(txt)) return cat.nome; }
+      const doc = String(documento || '').trim();
+      return doc || 'Outros';
+    };
+    // Setor dono da NC (decisão 09/10/2026): etiquetas e lote/código de acessório
+    // (RC × etiqueta) → Almoxarifado; tempo dos Estágios 5/50 vem marcado no próprio
+    // apontamento; o resto (OP, RC, identificação) → PCP.
+    const setorDoApontamento = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+    const ondeDoApontamento = (ap) => {
+      const doc = classificarDocApontamento(ap);
+      if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
+      if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
+      if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
+      let est = ap.estagio_responsavel;
+      if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
+      if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
+      if (/form/i.test(ap.documento_afetado || '')) return { k: 'z4', lbl: 'FORM-GQ-0047' };
+      if (doc === 'op') return { k: 'e999', lbl: 'OP (geral)' };
+      return { k: 'z9', lbl: 'Outros' };
+    };
+    const rotuloDocApontamento = (ap) => {
+      const b = classificarDocApontamento(ap);
+      if (b === 'etx') return 'Etiqueta Externa';
+      if (b === 'eac') return 'Etiqueta de acessório';
+      if (b === 'rc') return 'RC';
+      if (/form/i.test(ap.documento_afetado || '')) return 'FORM-GQ-0047';
+      if (b === 'op') return 'OP';
+      return String(ap.documento_afetado || 'Outros').trim() || 'Outros';
+    };
+    const ROTULO_SLOT = { op: 'OP', rc: 'RC', form_gq_0047: 'FORM-GQ-0047', etiqueta_externa: 'Etiqueta Externa', etiqueta_acessorio: 'Etiqueta de acessório', op_reprocesso: 'OP de Reprocesso', rnc: 'RNC' };
+    const SETOR_DO_SLOT = { etiqueta_externa: 'Almoxarifado', etiqueta_acessorio: 'Almoxarifado' };
+
+    // Rosca (SVG) para o relatório: segs [{ label, value, hex }].
+    function svgRosca(segs, centro) {
+      const tot = segs.reduce((s, x) => s + x.value, 0) || 1;
+      const R = 60, r = 38, cx = 75, cy = 75;
+      let a0 = -Math.PI / 2, s = `<svg viewBox="0 0 330 150" width="100%" style="max-width:420px" xmlns="http://www.w3.org/2000/svg">`;
+      for (const g of segs) {
+        if (!g.value) continue;
+        const a1 = a0 + g.value / tot * Math.PI * 2 - 1e-6;
+        const p = (ang, rad) => `${(cx + rad * Math.cos(ang)).toFixed(2)},${(cy + rad * Math.sin(ang)).toFixed(2)}`;
+        const big = a1 - a0 > Math.PI ? 1 : 0;
+        s += `<path d="M${p(a0, R)} A${R},${R} 0 ${big} 1 ${p(a1, R)} L${p(a1, r)} A${r},${r} 0 ${big} 0 ${p(a0, r)} Z" fill="${g.hex}"/>`;
+        a0 = a1;
+      }
+      s += `<text x="${cx}" y="${cy + 2}" text-anchor="middle" font-size="18" font-weight="700" fill="currentColor">${centro}</text><text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="8.5" fill="currentColor" fill-opacity="0.6">lotes</text>`;
+      segs.forEach((g, i) => {
+        const y = 40 + i * 24;
+        s += `<rect x="160" y="${y - 9}" width="11" height="11" rx="2" fill="${g.hex}"/><text x="177" y="${y}" font-size="10.5" fill="currentColor">${escHtml(g.label)} — <tspan font-weight="700">${g.value}</tspan> (${fmtPct1(g.value / tot * 100)})</text>`;
+      });
+      return s + '</svg>';
+    }
+    // Mini-linha (sparkline) de % por mês.
+    function svgMiniLinha(vals) {
+      const W = 96, H = 24, n = vals.length, mx = Math.max(1, ...vals);
+      const x = (i) => 3 + i * (W - 6) / Math.max(1, n - 1), y = (v) => H - 3 - v / mx * (H - 6);
+      const d = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+      return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" fill="none" stroke="${COR_NEUTRA}" stroke-width="1.6"/>${vals.map((v, i) => i === n - 1 ? `<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${COR_RUIM}"/>` : '').join('')}</svg>`;
+    }
+
+    /* ====================================================================
+       BASE DE QUALIDADE — calcula, a partir do histórico completo de análises,
+       o estado de cada LOTE (OP + série) e os registros por apontamento.
+       Usada pelo relatório no navegador e pelo serviço (geração automática).
+       ==================================================================== */
+    function calcularBaseQualidade({ analises, produtos = [], temposAtivos = [] }) {
+      const byId = new Map(analises.map((a) => [a.id, a]));
+      const idsSubst = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
+      const ajuste = (t) => t === 'atualizacao_ficha' || t === 'atualizacao_cadastro';
+      const statusDe = (x) => String(x?.parecer_completo?.resultado_geral || x?.status || '').toLowerCase();
+      const chaveLote = (a) => `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
+      const equipByModelo = new Map(), equipBySap = new Map();
+      for (const p of produtos) {
+        if (p.modelo && p.equipamento) equipByModelo.set(String(p.modelo).toLowerCase(), p.equipamento);
+        if (p.codigo_sapiens && p.equipamento) equipBySap.set(String(p.codigo_sapiens).toLowerCase(), p.equipamento);
+      }
+      const equipDe = (a) => {
+        const prod = a?.parecer_completo?.produto || {};
+        let e = (prod.equipamento || prod.familia || '').trim();
+        if (!e) e = (equipBySap.get(String(prod.codigo_sapiens || '').toLowerCase()) || equipByModelo.get(String(prod.modelo || a?.modelo || '').toLowerCase()) || '').trim();
+        return e || 'Sem equipamento';
+      };
+      const nomeOperador = (c) => {
+        if (!c) return null;
+        if (c.operador_nome) return String(c.operador_nome).trim();
+        const m = String(c.operador || '').trim().match(/^\d+\s+(.+)$/);
+        return m ? m[1].trim() : (String(c.operador || '').trim() || null);
+      };
+      const estDaCrono = (c) => Number(c.estagio_numero ?? parseInt(String(c.estagio || ''), 10));
+      const executor = (an, n) => nomeOperador((an?.parecer_completo?.cronologia || []).find((c) => estDaCrono(c) === n));
+      const normEq = (x) => String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+      const ativos = new Set((temposAtivos || []).map((t) => `${normEq(t.equipamento)}|${Number(t.estagio_numero)}`));
+      const ymDe = (iso) => String(iso || '').slice(0, 7);
+
+      const porLote = new Map();
+      for (const a of analises) {
+        if (idsSubst.has(a.id)) continue; // vigente = não substituída (não a de data mais nova)
+        const k = chaveLote(a), at = porLote.get(k);
+        if (!at || new Date(a.created_at) > new Date(at.created_at)) porLote.set(k, a);
+      }
+      const lotes = [], ncRegs = [], tempoRegs = [], execsTempo = [];
+      const reTempo = /Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)[\s\S]*?faixa esperada\s+([\d.,]+)\s*[–-]\s*([\d.,]+)\s*min/i;
+      const reTempoCurto = /Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)/i;
+      const reMediaTol = /m[ée]dia\s+([\d.,]+)\s*min[\s\S]*?toler[âa]ncia\s+([\d.,]+)\s*%/i;
+      const nf = (x) => parseFloat(String(x).replace(',', '.'));
+      for (const final of porLote.values()) {
+        const cadeia = []; let c = final, g = 20;
+        while (c && g-- > 0) { cadeia.push(c); c = c.analise_origem_id ? byId.get(c.analise_origem_id) : null; }
+        cadeia.reverse();
+        const raiz = cadeia[0];
+        const passosReais = cadeia.filter((x) => x.analise_origem_id && !ajuste(x.tipo_reanalise));
+        const correcaoReal = passosReais.length > 0;
+        const teveNc = cadeia.some((x) => statusDe(x) === 'nao_conforme');
+        const aberto = final.status === 'nao_conforme';
+        const falhou = aberto || (correcaoReal && teveNc);
+        const ncAnalise = falhou ? (cadeia.find((x) => statusDe(x) === 'nao_conforme') || final) : null;
+        const ncAps = (ncAnalise?.parecer_completo?.apontamentos || []).filter((ap) => ap.severidade === 'nao_conforme' && !ehErroOperador(ap));
+        const categoria = falhou ? 'corrigida' : (final.status === 'ressalva' ? 'ressalva' : 'conforme');
+        const lote = {
+          chave: chaveLote(final), final, raiz, aberto, falhou, categoria, ncAps, ncAnalise,
+          ini: raiz.created_at, mes: ymDe(raiz.created_at),
+          corrigidoEm: falhou && !aberto ? final.created_at : null,
+          equip: equipDe(raiz.parecer_completo ? raiz : final),
+          correcoes: passosReais.map((p) => ({ data: p.created_at, slots: String(p.doc_substituido || '').split(',').map((x) => x.trim().replace(/\s*\(removida\)\s*$/i, '').toLowerCase()).filter(Boolean) })),
+          operadores: new Set((final.parecer_completo?.cronologia || []).map(nomeOperador).filter(Boolean)),
+        };
+        lotes.push(lote);
+        for (const ap of ncAps) {
+          const b = classificarDocApontamento(ap);
+          let est;
+          if (b === 'etx' || b === 'eac') est = 50;
+          else if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
+          else if (Array.isArray(ap.estagios) && ap.estagios.length && !isNaN(parseInt(String(ap.estagios[0]), 10))) est = parseInt(String(ap.estagios[0]), 10);
+          else est = 60;
+          let operador = executor(ncAnalise, est), estAtrib = est;
+          if (!operador && est !== 60) { operador = executor(ncAnalise, 60); estAtrib = 60; }
+          const doc = rotuloDocApontamento(ap), cat = categoriaDoTexto(ap.descricao, ap.documento_afetado);
+          ncRegs.push({ lote, mes: lote.mes, ini: lote.ini, equip: lote.equip, aberto, setor: setorDoApontamento(ap), onde: ondeDoApontamento(ap).lbl,
+            doc, cat, tipo: cat === doc ? doc : `${doc} · ${cat}`, desc: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
+            operador: operador || 'Não identificado', estagio: operador ? estAtrib : null });
+        }
+        // Tempo de estágio: execuções (denominador) e ressalvas da análise vigente.
+        const vistos = new Set();
+        for (const cr of (final.parecer_completo?.cronologia || [])) {
+          const est = estDaCrono(cr);
+          if (isNaN(est) || vistos.has(est)) continue;
+          vistos.add(est);
+          if (ativos.size && !ativos.has(`${normEq(lote.equip)}|${est}`)) continue;
+          execsTempo.push({ lote, mes: lote.mes, operador: nomeOperador(cr) || 'Não identificado', estagio: est, equip: lote.equip });
+        }
+        for (const ap of (final.parecer_completo?.apontamentos || [])) {
+          if (ap.severidade !== 'ressalva' || !/tempo esperado/i.test(ap.descricao || '')) continue;
+          const d = String(ap.descricao);
+          const m = d.match(reTempo);
+          let est, nomeEst, total, dir, teto = null;
+          if (m) { est = +m[1]; nomeEst = m[2]; total = nf(m[3]); dir = m[4].toLowerCase(); teto = nf(m[6]); }
+          else { const m2 = d.match(reTempoCurto); if (!m2) continue; est = +m2[1]; nomeEst = m2[2]; total = nf(m2[3]); dir = m2[4].toLowerCase(); const mt = d.match(reMediaTol); if (mt) teto = nf(mt[1]) * (1 + nf(mt[2]) / 100); }
+          tempoRegs.push({ lote, mes: lote.mes, operador: executor(final, est) || 'Não identificado', estagio: est, nomeEst, equip: lote.equip, total, dir, teto,
+            setor: ap.setor_responsavel || ((est === 5 || est === 50) ? 'Almoxarifado' : 'PCP'),
+            excesso: dir === 'acima' && teto ? (total - teto) / teto * 100 : null });
+        }
+      }
+      return { lotes, ncRegs, tempoRegs, execsTempo };
+    }
+
+    // Situação de cada tipo de erro nos 6 meses até `ateIdx` (índice ano*12+mês).
+    // Sempre em % dos lotes conciliados do mês — volume não mascara a frequência.
+    function situacaoCausas({ lotes, regs, ateIdx, filtroLote = () => true }) {
+      const ym = (i) => `${Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
+      const meses = []; for (let i = ateIdx - 5; i <= ateIdx; i++) meses.push(ym(i));
+      const nMes = Object.fromEntries(meses.map((m) => [m, lotes.filter((l) => l.mes === m && filtroLote(l)).length]));
+      const porTipo = new Map();
+      for (const r of regs) {
+        if (!meses.includes(r.mes) || !filtroLote(r.lote)) continue;
+        const t = porTipo.get(r.tipo) || new Map(); const s = t.get(r.mes) || new Set(); s.add(r.lote.chave); t.set(r.mes, s); porTipo.set(r.tipo, t);
+      }
+      const linhas = [...porTipo.entries()].map(([tipo, mm]) => {
+        const cont = meses.map((m) => (mm.get(m) || new Set()).size);
+        const pct = meses.map((m, i) => nMes[m] ? cont[i] / nMes[m] * 100 : 0);
+        const somaN = (a, b) => meses.slice(a, b).reduce((s, m) => s + nMes[m], 0);
+        const somaC = (a, b) => cont.slice(a, b).reduce((s, v) => s + v, 0);
+        const rec = somaN(3, 6) ? somaC(3, 6) / somaN(3, 6) * 100 : 0, ant = somaN(0, 3) ? somaC(0, 3) / somaN(0, 3) * 100 : 0;
+        const mesesCom = cont.filter((v) => v > 0).length;
+        let sit = 'pontual';
+        if (cont[5] > 0 && cont.slice(0, 5).every((v) => v === 0)) sit = 'nova';
+        else if (cont[5] === 0 && cont.slice(2, 5).some((v) => v > 0)) sit = 'resolvida';
+        else if (rec > ant * 1.2 && rec - ant >= 1) sit = 'subindo';
+        else if (rec < ant * 0.8 && ant - rec >= 1) sit = 'caindo';
+        else if (mesesCom >= 3) sit = 'recorrente';
+        return { tipo, cont, pct, rec, ant, mesesCom, sit, recorrente: mesesCom >= 3, totalAtual: cont[5] };
+      });
+      const ordem = { subindo: 0, nova: 1, recorrente: 2, caindo: 3, pontual: 4, resolvida: 5 };
+      linhas.sort((a, b) => (ordem[a.sit] - ordem[b.sit]) || (b.pct[5] - a.pct[5]) || (b.mesesCom - a.mesesCom));
+      return { meses, nMes, linhas };
+    }
+    const SITUACAO_INFO = {
+      subindo: { lbl: 'Subindo', cor: '#E03131' }, nova: { lbl: 'Nova', cor: '#F76707' }, recorrente: { lbl: 'Recorrente', cor: '#A61E4D' },
+      caindo: { lbl: 'Caindo', cor: '#2F9E44' }, resolvida: { lbl: 'Zerou este mês', cor: '#2F9E44' }, pontual: { lbl: 'Pontual', cor: '#868E96' },
+    };
+
+    // Seções do relatório, agrupadas pelas abas do Dashboard.
+    const SECOES_RELATORIO = [
+      { aba: 'Visão executiva', itens: [
+        { id: 'exec_indicadores', label: 'Indicadores e resumo', desc: 'Aprovação de primeira × meta, volume conciliado, lotes com NC, tempo até a correção' },
+        { id: 'exec_evolucao', label: 'Evolução em 12 meses', desc: 'Aprovação de primeira mês a mês, com o nº de lotes de cada mês' },
+        { id: 'exec_abertas', label: 'NCs do período ainda abertas', desc: 'Lotes do período que seguem sem correção' },
+        { id: 'exec_anteriores', label: 'Pendências de períodos anteriores', desc: 'NCs abertas de lotes de antes do período' },
+      ] },
+      { aba: 'Onde atacar', itens: [
+        { id: 'atacar_pareto', label: 'Pareto dos tipos de erro', desc: 'Apontamentos por tipo (documento · campo), % dos lotes e variação' },
+        { id: 'atacar_matriz', label: 'Setor × onde ocorreu', desc: 'Concentração por setor e estágio/documento' },
+        { id: 'atacar_equip', label: 'Taxa de NC por equipamento', desc: '% dos lotes de cada equipamento com NC' },
+        { id: 'atacar_operadores', label: 'NCs por operador', desc: 'Operador × tipo de erro, com NCs por lote em que atuou', restrito: true },
+        { id: 'atacar_lista', label: 'Lista detalhada das NCs', desc: 'Cada apontamento com o texto do item não conforme' },
+      ] },
+      { aba: 'Gráficos', itens: [
+        { id: 'graf_rosca', label: 'Conciliações realizadas', desc: 'Conformes, com ressalvas e que precisaram de correção' },
+        { id: 'graf_docs', label: 'Correções por tipo de documento', desc: 'Documentos substituídos, por 100 lotes conciliados' },
+        { id: 'graf_erros', label: 'Erros que motivaram correção', desc: 'Categorias de erro em % dos lotes, com variação' },
+        { id: 'graf_erros_equip', label: 'Erros por equipamento', desc: 'Apontamentos de NC por lote de cada equipamento' },
+        { id: 'graf_tempo_op', label: 'Ressalvas de tempo por operador', desc: 'Acima/abaixo do tempo e % das execuções', restrito: true },
+        { id: 'graf_tempo_excesso', label: 'Quanto passou do tempo', desc: 'Faixas de excesso sobre o teto e mediana', restrito: true },
+      ] },
+      { aba: 'Tendência e reincidência', itens: [
+        { id: 'tend_situacao', label: 'Situação de cada tipo de erro', desc: 'Subindo, nova, recorrente, caindo ou zerou — 6 meses' },
+        { id: 'tend_mapa', label: 'Tipos de erro mês a mês', desc: 'Mapa de calor de 12 meses (% dos lotes)' },
+      ] },
+    ];
+    const TODAS_SECOES_REL = SECOES_RELATORIO.flatMap((g) => g.itens.map((i) => i.id));
+    const secoesDe = (ids) => Object.fromEntries(TODAS_SECOES_REL.map((id) => [id, ids.includes(id)]));
+    const MODELOS_RELATORIO_PADRAO = [
+      { nome: 'Mensal — Gestor PCP', padrao: true, automatico: true, setor: 'PCP', equip: '', operador: '', orientacao: 'paisagem', achados: true,
+        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'tend_situacao', 'tend_mapa']) },
+      { nome: 'Mensal — Gestor Almoxarifado', padrao: true, automatico: true, setor: 'Almoxarifado', equip: '', operador: '', orientacao: 'paisagem', achados: true,
+        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'graf_tempo_op', 'graf_tempo_excesso', 'tend_situacao', 'tend_mapa']) },
+      { nome: 'Mensal — Qualidade (completo)', padrao: true, automatico: true, setor: '', equip: '', operador: '', orientacao: 'paisagem', achados: true,
+        secoes: secoesDe(TODAS_SECOES_REL) },
+    ];
+    // Modelos efetivos = padrão + salvos (um salvo com o mesmo nome substitui o padrão).
+    const mesclarModelosRelatorio = (salvos) => {
+      const m = new Map(MODELOS_RELATORIO_PADRAO.map((x) => [x.nome, x]));
+      for (const s of (salvos || [])) if (s && s.nome) m.set(s.nome, { ...s, padrao: false });
+      return [...m.values()];
+    };
+
+    /* ====================================================================
+       RELATÓRIO DE QUALIDADE — monta o HTML (A4) a partir da base.
+       cfg: { de:'AAAA-MM', ate, setor, equip, operador, orientacao, achados, secoes, titulo }
+       ctx: { meta, podeVerOperador, autor, agora: Date, paraImpressao }
+       Toda comparação entre períodos usa TAXA sobre os lotes conciliados — o número
+       absoluto aparece junto, mas não decide se melhorou ou piorou.
+       ==================================================================== */
+    function gerarRelatorioQualidade(base, cfg, ctx = {}) {
+      const meta = ctx.meta || META_APROVACAO;
+      const podeOp = !!ctx.podeVerOperador;
+      const agora = ctx.agora || new Date();
+      const sec = cfg.secoes || {};
+      const ymIdx = (ym) => { const [y, m] = ym.split('-').map(Number); return y * 12 + (m - 1); };
+      const ymDeIdx = (i) => `${Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
+      let i0 = ymIdx(cfg.de), i1 = ymIdx(cfg.ate); if (i1 < i0) [i0, i1] = [i1, i0];
+      const nMes = i1 - i0 + 1;
+      const mesesPer = []; for (let i = i0; i <= i1; i++) mesesPer.push(ymDeIdx(i));
+      const mesesAnt = []; for (let i = i0 - nMes; i < i0; i++) mesesAnt.push(ymDeIdx(i));
+      const rotPer = nMes === 1 ? rotuloMesLongo(mesesPer[0]) : `${rotuloMes(mesesPer[0])} a ${rotuloMes(mesesPer[nMes - 1])}`;
+      const rotAnt = nMes === 1 ? rotuloMesLongo(mesesAnt[0]) : 'o período anterior';
+      const setor = cfg.setor || '', filtroNc = !!(cfg.setor || cfg.operador);
+      const okLote = (l) => !cfg.equip || l.equip === cfg.equip;
+      const regs = base.ncRegs.filter((r) => okLote(r.lote) && (!cfg.setor || r.setor === cfg.setor) && (!cfg.operador || r.operador === cfg.operador));
+      const comRegs = new Set(regs.map((r) => r.lote.chave));
+      const falhouF = (l) => (filtroNc ? comRegs.has(l.chave) : l.falhou);
+      const lotesBase = base.lotes.filter(okLote);
+      const lotesP = lotesBase.filter((l) => mesesPer.includes(l.mes)), lotesA = lotesBase.filter((l) => mesesAnt.includes(l.mes));
+      const regsP = regs.filter((r) => mesesPer.includes(r.mes)), regsA = regs.filter((r) => mesesAnt.includes(r.mes));
+      const num = (x, d = 1) => x == null || isNaN(x) ? '—' : x.toFixed(d).replace('.', ',');
+      const pp = (x) => x == null || isNaN(x) ? '' : `${x >= 0 ? '▲ +' : '▼ −'}${num(Math.abs(x))} p.p.`;
+      const corDelta = (x, bomSobe) => x == null || Math.abs(x) < 0.05 ? '#64748b' : ((x > 0) === bomSobe ? COR_OK : COR_RUIM);
+      const kp = (ls) => {
+        const n = ls.length, f = ls.filter(falhouF).length;
+        const t = ls.filter((l) => falhouF(l) && l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5).filter((x) => x >= 0);
+        return { n, f, ap: n ? (n - f) / n * 100 : null, taxa: n ? f / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null, ab: ls.filter((l) => l.aberto && falhouF(l)).length };
+      };
+      const A = kp(lotesP), P = kp(lotesA);
+      const volDelta = P.n ? (A.n - P.n) / P.n * 100 : null;
+      // Tipos de erro: apontamentos, lotes afetados e % dos lotes (atual × anterior).
+      const agrTipos = (rs, nL) => { const m = new Map(); for (const r of rs) { const o = m.get(r.tipo) || { tipo: r.tipo, ap: 0, lotes: new Set() }; o.ap++; o.lotes.add(r.lote.chave); m.set(r.tipo, o); } return [...m.values()].map((o) => ({ ...o, nl: o.lotes.size, pct: nL ? o.lotes.size / nL * 100 : 0 })); };
+      const tiposA = agrTipos(regsP, A.n).sort((a, b) => b.ap - a.ap);
+      const tiposAntMap = new Map(agrTipos(regsA, P.n).map((t) => [t.tipo, t]));
+      const secoes = []; // { aba, titulo, pergunta, html, longa }
+      const add = (aba, titulo, pergunta, html, longa) => secoes.push({ aba, titulo, pergunta, html, longa });
+      const vazio = (t) => `<p class="vazio">${t}</p>`;
+      const rotSetor = setor ? ` do ${setor}` : '';
+
+      // ---------------- Visão executiva ----------------
+      if (sec.exec_indicadores) {
+        const k = (t, v, s, c) => `<div class="k"><div class="kt">${t}</div><div class="kv" style="color:${c || 'inherit'}">${v}</div><div class="ks">${s || ''}</div></div>`;
+        const dAp = A.ap != null && P.ap != null && P.n ? A.ap - P.ap : null;
+        const dTx = A.taxa != null && P.taxa != null && P.n ? A.taxa - P.taxa : null;
+        add('Visão executiva', 'Como fomos no período', `Resultado frente à meta de ${meta}% de aprovação de primeira${setor ? ` — considerando só as NCs do ${setor}` : ''}. Comparações em taxa sobre os lotes conciliados.`,
+          `<div class="grid">${k(setor ? `Lotes sem NC${rotSetor}` : 'Aprovação de primeira', fmtPct1(A.ap), `Meta ${meta}%${dAp != null ? ` · <span style="color:${corDelta(dAp, true)}">${pp(dAp)}</span> vs ${rotAnt}` : ''}`, A.ap == null ? '' : A.ap >= meta ? COR_OK : COR_RUIM)}`
+          + k('Lotes conciliados', A.n, P.n ? `${rotAnt}: ${P.n} (${volDelta >= 0 ? '+' : '−'}${num(Math.abs(volDelta), 0)}%)` : '')
+          + k(`Lotes com NC${rotSetor}`, `${A.f} <span style="font-size:13px;font-weight:600">(${fmtPct1(A.taxa)})</span>`, `${regsP.length} apontamento(s)${dTx != null ? ` · <span style="color:${corDelta(dTx, false)}">${pp(dTx)}</span>` : ''}`, A.f ? COR_RUIM : COR_OK)
+          + k('Tempo médio até a correção', A.tm == null ? '—' : `${num(A.tm)} d`, P.tm != null ? `${rotAnt}: ${num(P.tm)} d` : 'da 1ª análise à reanálise aprovada')
+          + `</div>`);
+      }
+      if (sec.exec_evolucao) {
+        const pts = []; for (let i = i1 - 11; i <= i1; i++) { const ym = ymDeIdx(i); const ls = lotesBase.filter((l) => l.mes === ym); const f = ls.filter(falhouF).length; pts.push({ mes: ym, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }); }
+        add('Visão executiva', 'Como estamos evoluindo', `${setor ? `Lotes sem NC${rotSetor}` : 'Aprovação de primeira'} nos 12 meses até o fim do período. Verde = na meta; vermelho = abaixo. "n" = lotes conciliados no mês.`, svgLinhaAprovacao(pts, meta));
+      }
+      const tabAbertos = (ls) => `<table><thead><tr><th>OP</th><th>Série</th><th>Equipamento</th><th>1ª análise</th><th class="n">Em aberto</th><th>Tipos de erro</th></tr></thead><tbody>`
+        + ls.map((l) => { const ts = [...new Set(regs.filter((r) => r.lote.chave === l.chave).map((r) => r.tipo))]; const d = Math.floor((agora - new Date(l.ini)) / 864e5); return `<tr><td>${escHtml(l.final.numero_op || '—')}</td><td>${escHtml(l.final.numero_serie || '—')}</td><td>${escHtml(l.equip)}</td><td>${new Date(l.ini).toLocaleDateString('pt-BR')}</td><td class="n" style="font-weight:600;color:${d > 30 ? COR_RUIM : 'inherit'}">${d} dia(s)</td><td>${escHtml(ts.join('; ') || '—')}</td></tr>`; }).join('') + '</tbody></table>';
+      if (sec.exec_abertas) {
+        const ls = lotesP.filter((l) => l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
+        add('Visão executiva', 'O que ficou pendente do período', `Lotes conciliados em ${rotPer} que ainda estão com NC${rotSetor} em aberto.`, ls.length ? tabAbertos(ls) : vazio('Nenhum lote do período com NC em aberto.'), true);
+      }
+      if (sec.exec_anteriores) {
+        const ls = lotesBase.filter((l) => l.mes < mesesPer[0] && l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
+        add('Visão executiva', 'Pendências de períodos anteriores', `Lotes de antes de ${rotPer} que continuam com NC${rotSetor} em aberto.`, ls.length ? tabAbertos(ls) : vazio('Nenhuma pendência anterior.'), true);
+      }
+
+      // ---------------- Onde atacar ----------------
+      if (sec.atacar_pareto) {
+        const linhas = tiposA.slice(0, 12).map((t) => { const an = tiposAntMap.get(t.tipo); const d = an || P.n ? t.pct - (an ? an.pct : 0) : null; return `<tr><td>${escHtml(t.tipo)}</td><td class="n"><strong>${t.ap}</strong></td><td class="n">${t.nl}</td><td class="n">${fmtPct1(t.pct)}</td><td class="n" style="color:${corDelta(d, false)}">${P.n ? pp(d) : '—'}</td></tr>`; }).join('');
+        add('Onde atacar', 'Quais erros mais geraram NC', `Apontamentos por tipo (documento · campo). A % é sobre os ${A.n} lotes conciliados — é ela que mostra se o erro ficou mais ou menos frequente, independente do volume. Em vermelho, os tipos que somam ~80% dos apontamentos.`,
+          tiposA.length ? svgPareto(tiposA.map((t) => ({ label: t.tipo, value: t.ap })), 10) + `<table style="margin-top:8px"><thead><tr><th>Tipo de erro</th><th class="n">Apontamentos</th><th class="n">Lotes</th><th class="n">% dos lotes</th><th class="n">vs ${escHtml(rotAnt)}</th></tr></thead><tbody>${linhas}</tbody></table>` : vazio('Sem não conformidades no período.'), true);
+      }
+      if (sec.atacar_matriz) {
+        const setores = [...new Set(regsP.map((r) => r.setor))].sort(), ondes = [...new Set(regsP.map((r) => r.onde))].sort();
+        const cnt = (s, o) => regsP.filter((r) => r.setor === s && r.onde === o).length;
+        const mx = Math.max(1, ...setores.flatMap((s) => ondes.map((o) => cnt(s, o))));
+        add('Onde atacar', 'Onde as NCs aconteceram', `Apontamentos por setor responsável e estágio da OP (ou documento), nos ${A.n} lotes conciliados. Quanto mais escura a célula, maior a concentração.`,
+          regsP.length ? htmlMapaCalor({ linhas: setores, colunas: ondes, celulas: setores.map((s) => ondes.map((o) => { const v = cnt(s, o); return { v, i: v / mx }; })), rotuloCanto: 'Setor' }) : vazio('Sem não conformidades no período.'));
+      }
+      if (sec.atacar_equip) {
+        const mA = new Map(), mP = new Map();
+        for (const l of lotesP) { const e = mA.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (falhouF(l)) e.f++; mA.set(l.equip, e); }
+        for (const l of lotesA) { const e = mP.get(l.equip) || { n: 0, f: 0 }; e.n++; if (falhouF(l)) e.f++; mP.set(l.equip, e); }
+        const eqs = [...mA.values()].map((e) => ({ ...e, t: e.f / e.n * 100, ta: mP.get(e.equip) ? mP.get(e.equip).f / mP.get(e.equip).n * 100 : null })).sort((a, b) => b.t - a.t || b.n - a.n);
+        add('Onde atacar', 'Quais equipamentos concentram NC', `Taxa de lotes com NC${rotSetor} por equipamento. Acima de ${100 - meta}% = fora da meta. Equipamentos com menos de 5 lotes têm amostra pequena.`,
+          eqs.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Com NC</th><th class="n">Taxa de NC</th><th class="n">vs ${escHtml(rotAnt)}</th></tr></thead><tbody>${eqs.map((e) => { const d = e.ta == null ? null : e.t - e.ta; return `<tr${e.n < 5 ? ' style="opacity:.6"' : ''}><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n">${e.f}</td><td class="n" style="font-weight:600;color:${e.t > 100 - meta ? COR_RUIM : COR_OK}">${fmtPct1(e.t)}</td><td class="n" style="color:${corDelta(d, false)}">${d == null ? '—' : pp(d)}</td></tr>`; }).join('')}</tbody></table>` : vazio('Sem lotes no período.'));
+      }
+      if (sec.atacar_operadores && podeOp) {
+        const cols = tiposA.slice(0, 8).map((t) => t.tipo), temOutros = tiposA.length > 8;
+        const atuou = new Map(); for (const l of lotesP) for (const o of l.operadores) atuou.set(o, (atuou.get(o) || 0) + 1);
+        const ops = Object.values(regsP.reduce((m, r) => { const o = m[r.operador] || (m[r.operador] = { op: r.operador, total: 0, t: {} }); o.total++; o.t[r.tipo] = (o.t[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b.total - a.total);
+        add('Onde atacar', 'NCs por operador', 'Cada apontamento conta 1. "Lotes" = lotes do período em que o operador executou algum estágio; "NC por lote" compara quem trabalhou muito com quem trabalhou pouco. Atribuição: etiqueta → Estágio 50; NC de um estágio → quem o executou; demais → Estágio 60.',
+          ops.length ? `<table class="op"><thead><tr><th>Operador</th><th class="n">NCs</th><th class="n">Lotes</th><th class="n">NC por lote</th>${cols.map((c) => `<th class="n tipo">${escHtml(c)}</th>`).join('')}${temOutros ? '<th class="n tipo">Outros</th>' : ''}</tr></thead><tbody>`
+            + ops.map((o) => { const lt = atuou.get(o.op) || 0; return `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.total}</strong></td><td class="n">${lt || '—'}</td><td class="n">${lt ? num(o.total / lt, 2) : '—'}</td>${cols.map((c) => `<td class="n">${o.t[c] || ''}</td>`).join('')}${temOutros ? `<td class="n">${(o.total - cols.reduce((s, c) => s + (o.t[c] || 0), 0)) || ''}</td>` : ''}</tr>`; }).join('')
+            + `<tr class="tot"><td>Total</td><td class="n">${regsP.length}</td><td class="n">${A.n}</td><td class="n">${A.n ? num(regsP.length / A.n, 2) : '—'}</td>${cols.map((c) => `<td class="n">${regsP.filter((r) => r.tipo === c).length}</td>`).join('')}${temOutros ? `<td class="n">${regsP.filter((r) => !cols.includes(r.tipo)).length}</td>` : ''}</tr></tbody></table>` : vazio('Sem não conformidades no período.'), true);
+      }
+      if (sec.atacar_lista) {
+        const ord = regsP.slice().sort((a, b) => new Date(a.ini) - new Date(b.ini));
+        add('Onde atacar', 'Lista detalhada das NCs', 'Cada apontamento com o item da análise que ficou não conforme.',
+          ord.length ? `<table class="lista"><thead><tr><th>Data</th><th>OP</th><th>Série</th><th>Equipamento</th><th>Tipo</th><th>Item não conforme</th>${podeOp ? '<th>Operador</th>' : ''}<th>Situação</th></tr></thead><tbody>`
+            + ord.map((r) => `<tr><td>${new Date(r.ini).toLocaleDateString('pt-BR')}</td><td>${escHtml(r.lote.final.numero_op || '—')}</td><td>${escHtml(r.lote.final.numero_serie || '—')}</td><td>${escHtml(r.equip)}</td><td>${escHtml(r.tipo)}</td><td class="desc">${escHtml(r.desc.length > 220 ? r.desc.slice(0, 219) + '…' : r.desc)}</td>${podeOp ? `<td>${escHtml(r.operador)}</td>` : ''}<td style="color:${r.aberto ? COR_RUIM : COR_OK};font-weight:600">${r.aberto ? 'Aberta' : 'Corrigida'}</td></tr>`).join('') + '</tbody></table>' : vazio('Sem não conformidades no período.'), true);
+      }
+
+      // ---------------- Gráficos ----------------
+      if (sec.graf_rosca) {
+        const c = { conforme: 0, ressalva: 0, corrigida: 0 };
+        for (const l of lotesP) { if (falhouF(l)) c.corrigida++; else if (l.final.status === 'ressalva') c.ressalva++; else c.conforme++; }
+        add('Gráficos', 'Conciliações realizadas', `Como terminaram os ${A.n} lotes conciliados no período.`, A.n ? svgRosca([
+          { label: 'Conformes', value: c.conforme, hex: '#1E9DBA' }, { label: 'Conforme com ressalvas', value: c.ressalva, hex: '#FFA300' }, { label: `Precisaram de correção${rotSetor}`, value: c.corrigida, hex: '#E03131' }], A.n) : vazio('Sem lotes no período.'));
+      }
+      if (sec.graf_docs) {
+        const conta = (ls) => { const m = {}; for (const l of ls) for (const cr of l.correcoes) for (const s of cr.slots) { if (setor && (SETOR_DO_SLOT[s] || 'PCP') !== setor) continue; m[s] = (m[s] || 0) + 1; } return m; };
+        const cA = conta(lotesP), cP = conta(lotesA);
+        const ks = Object.keys(cA).sort((a, b) => cA[b] - cA[a]);
+        add('Gráficos', 'Correções por tipo de documento', `Documentos substituídos em reanálises de correção, em número e por 100 lotes conciliados (normaliza o volume).`,
+          ks.length ? `<table><thead><tr><th>Documento</th><th class="n">Correções</th><th class="n">Por 100 lotes</th><th class="n">${escHtml(rotAnt)} (por 100)</th></tr></thead><tbody>${ks.map((s) => `<tr><td>${escHtml(ROTULO_SLOT[s] || s)}</td><td class="n"><strong>${cA[s]}</strong></td><td class="n">${num(cA[s] / (A.n || 1) * 100)}</td><td class="n">${P.n ? num((cP[s] || 0) / P.n * 100) : '—'}</td></tr>`).join('')}</tbody></table>` : vazio('Nenhuma correção de documento no período.'));
+      }
+      if (sec.graf_erros) {
+        const cats = (rs) => { const m = new Map(); for (const r of rs) { const s = m.get(r.cat) || new Set(); s.add(r.lote.chave); m.set(r.cat, s); } return m; };
+        const cA = cats(regsP), cP = cats(regsA);
+        const ls = [...cA.entries()].map(([c, s]) => ({ c, n: s.size, pct: A.n ? s.size / A.n * 100 : 0, pa: P.n ? ((cP.get(c) || new Set()).size / P.n * 100) : null })).sort((a, b) => b.n - a.n);
+        add('Gráficos', 'Erros que motivaram correção', 'Categoria do erro (independente do documento), em lotes e em % dos lotes conciliados.',
+          ls.length ? `<table><thead><tr><th>Categoria</th><th class="n">Lotes</th><th class="n">% dos lotes</th><th class="n">vs ${escHtml(rotAnt)}</th></tr></thead><tbody>${ls.map((x) => { const d = x.pa == null ? null : x.pct - x.pa; return `<tr><td>${escHtml(x.c)}</td><td class="n"><strong>${x.n}</strong></td><td class="n">${fmtPct1(x.pct)}</td><td class="n" style="color:${corDelta(d, false)}">${d == null ? '—' : pp(d)}</td></tr>`; }).join('')}</tbody></table>` : vazio('Sem não conformidades no período.'));
+      }
+      if (sec.graf_erros_equip) {
+        const m = new Map(); for (const l of lotesP) { const e = m.get(l.equip) || { equip: l.equip, n: 0, ap: 0 }; e.n++; m.set(l.equip, e); }
+        for (const r of regsP) { const e = m.get(r.equip); if (e) e.ap++; }
+        const ls = [...m.values()].filter((e) => e.ap > 0).map((e) => ({ ...e, pl: e.ap / e.n })).sort((a, b) => b.pl - a.pl);
+        add('Gráficos', 'Erros por equipamento', 'Apontamentos de NC por lote de cada equipamento — mostra a intensidade, não só o total.',
+          ls.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Apontamentos</th><th class="n">Por lote</th></tr></thead><tbody>${ls.map((e) => `<tr><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n"><strong>${e.ap}</strong></td><td class="n">${num(e.pl, 2)}</td></tr>`).join('')}</tbody></table>` : vazio('Sem não conformidades no período.'));
+      }
+      const tempoP = base.tempoRegs.filter((r) => mesesPer.includes(r.mes) && okLote(r.lote) && (!setor || r.setor === setor) && (!cfg.operador || r.operador === cfg.operador));
+      const estagiosTempo = new Set(tempoP.map((r) => r.estagio));
+      const execP = base.execsTempo.filter((e) => mesesPer.includes(e.mes) && okLote(e.lote) && estagiosTempo.has(e.estagio) && (!cfg.operador || e.operador === cfg.operador));
+      const FAIXAS_EXC = [['0–50%', '#FCC419'], ['50–100%', '#FD7E14'], ['100–150%', '#F76707'], ['150–200%', '#E03131'], ['200–500%', '#A61E4D'], ['> 500% (provável erro de apontamento)', '#868E96']];
+      const binExc = (x) => x < 50 ? 0 : x < 100 ? 1 : x < 150 ? 2 : x < 200 ? 3 : x <= 500 ? 4 : 5;
+      const opsTempo = (() => {
+        const m = new Map(); const g = (n) => { if (!m.has(n)) m.set(n, { op: n, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0] }); return m.get(n); };
+        for (const e of execP) g(e.operador).exec++;
+        for (const r of tempoP) { const o = g(r.operador); if (r.dir === 'abaixo') o.abaixo++; else { o.acima++; if (r.excesso != null) { o.exc.push(r.excesso); o.bins[binExc(r.excesso)]++; } } }
+        return [...m.values()].filter((o) => o.acima + o.abaixo > 0).sort((a, b) => (b.acima + b.abaixo) - (a.acima + a.abaixo));
+      })();
+      if (sec.graf_tempo_op && podeOp) {
+        add('Gráficos', 'Ressalvas de tempo de estágio por operador', '"% fora" = apontamentos ÷ execuções do estágio pelo operador no período (só onde a checagem está ativa) — normaliza quem executa muito ou pouco.',
+          opsTempo.length ? `<table><thead><tr><th>Operador</th><th class="n">Acima do tempo</th><th class="n">Abaixo do tempo</th><th class="n">Execuções</th><th class="n">% fora</th></tr></thead><tbody>${opsTempo.map((o) => { const p = o.exec ? (o.acima + o.abaixo) / o.exec * 100 : null; return `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.acima}</strong></td><td class="n">${o.abaixo || ''}</td><td class="n">${o.exec || '—'}</td><td class="n" style="font-weight:600;color:${p != null && p >= 50 ? COR_RUIM : 'inherit'}">${p == null ? '—' : fmtPct1(p)}</td></tr>`; }).join('')}</tbody></table>` : vazio('Nenhuma ressalva de tempo no período.'));
+      }
+      if (sec.graf_tempo_excesso && podeOp) {
+        const ls = opsTempo.filter((o) => o.exc.length);
+        const med = (xs) => { const v = xs.slice().sort((a, b) => a - b), k = Math.floor(v.length / 2); return v.length % 2 ? v[k] : (v[k - 1] + v[k]) / 2; };
+        add('Gráficos', 'Quanto passou do tempo', 'Excesso sobre o TETO da faixa aceita (teto 14 min, levou 21 = 50% acima). Quem concentra em 0–100% demora de fato; casos isolados acima de 500% costumam ser fim esquecido ou pausa não registrada.',
+          ls.length ? `<table><thead><tr><th>Operador</th><th class="n">Acima</th>${FAIXAS_EXC.map(([l, c]) => `<th class="n tipo" style="border-bottom:3px solid ${c}">${l}</th>`).join('')}<th class="n">Mediana</th></tr></thead><tbody>${ls.map((o) => `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.exc.length}</strong></td>${o.bins.map((v, i) => `<td class="n" style="${v ? `background:${FAIXAS_EXC[i][1]}33;font-weight:600` : ''}">${v || ''}</td>`).join('')}<td class="n">${Math.round(med(o.exc))}%</td></tr>`).join('')}</tbody></table>` : vazio('Nenhum apontamento acima do tempo no período.'));
+      }
+
+      // ---------------- Tendência e reincidência ----------------
+      const sit = situacaoCausas({ lotes: lotesBase, regs, ateIdx: i1 });
+      if (sec.tend_situacao) {
+        add('Tendência e reincidência', 'Situação de cada tipo de erro', `Últimos 6 meses (${rotuloMes(sit.meses[0])} a ${rotuloMes(sit.meses[5])}), em % dos lotes conciliados de cada mês. Subindo/caindo = últimos 3 meses × 3 anteriores; recorrente = apareceu em 3 ou mais meses; nova = só no último mês; zerou = sumiu no último mês.`,
+          sit.linhas.length ? `<table><thead><tr><th>Tipo de erro</th><th>Situação</th><th class="n">Meses com ocorrência</th><th class="n">% 3 meses anteriores</th><th class="n">% últimos 3 meses</th><th>6 meses</th></tr></thead><tbody>${sit.linhas.slice(0, 15).map((x) => `<tr><td>${escHtml(x.tipo)}</td><td><span class="tag" style="background:${SITUACAO_INFO[x.sit].cor}">${SITUACAO_INFO[x.sit].lbl}</span>${x.recorrente && x.sit !== 'recorrente' ? ' <span class="tag" style="background:#A61E4D">Recorrente</span>' : ''}</td><td class="n">${x.mesesCom}/6</td><td class="n">${fmtPct1(x.ant)}</td><td class="n">${fmtPct1(x.rec)}</td><td>${svgMiniLinha(x.pct)}</td></tr>`).join('')}</tbody></table>` : vazio('Sem não conformidades nos últimos 6 meses.'), true);
+      }
+      if (sec.tend_mapa) {
+        const m12 = []; for (let i = i1 - 11; i <= i1; i++) m12.push(ymDeIdx(i));
+        const nM = Object.fromEntries(m12.map((m) => [m, lotesBase.filter((l) => l.mes === m).length]));
+        const mp = new Map(), tot = {};
+        for (const r of regs) { if (!m12.includes(r.mes)) continue; const k = `${r.tipo}|${r.mes}`; const s = mp.get(k) || new Set(); s.add(r.lote.chave); mp.set(k, s); }
+        for (const [k, s] of mp) { const t = k.split('|')[0]; tot[t] = (tot[t] || 0) + s.size; }
+        const top = Object.entries(tot).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([t]) => t);
+        const val = (t, m) => (mp.get(`${t}|${m}`) || new Set()).size;
+        const mx = Math.max(0.0001, ...top.flatMap((t) => m12.map((m) => nM[m] ? val(t, m) / nM[m] : 0)));
+        add('Tendência e reincidência', 'Tipos de erro mês a mês', 'Número = lotes com o erro; cor = % dos lotes conciliados no mês (o volume não distorce a cor). Linha de baixo = lotes conciliados no mês.',
+          top.length ? htmlMapaCalor({ linhas: [...top, 'Lotes conciliados'], colunas: m12.map(rotuloMes), rotuloCanto: 'Tipo de erro', totaisLinha: false,
+            celulas: [...top.map((t) => m12.map((m) => { const v = val(t, m); return { v, i: nM[m] ? v / nM[m] / mx : 0 }; })), m12.map((m) => ({ v: nM[m], i: 0 }))] }) : vazio('Sem não conformidades em 12 meses.'));
+      }
+
+      // ---------------- Principais achados ----------------
+      const achados = [];
+      if (cfg.achados !== false && A.n) {
+        const dAp = P.n && P.ap != null ? A.ap - P.ap : null;
+        achados.push(`${setor ? `Lotes sem NC${rotSetor}` : 'Aprovação de primeira'}: <strong>${fmtPct1(A.ap)}</strong> (meta ${meta}%)${dAp != null ? `, ${dAp >= 0 ? 'alta' : 'queda'} de ${num(Math.abs(dAp))} p.p. em relação a ${rotAnt}` : ''}.`);
+        if (P.n) achados.push(`Foram conciliados <strong>${A.n}</strong> lotes, contra ${P.n} em ${rotAnt} (${volDelta >= 0 ? '+' : '−'}${num(Math.abs(volDelta), 0)}%); ${A.f} tiveram NC${rotSetor} (${fmtPct1(A.taxa)} dos lotes, antes ${fmtPct1(P.taxa)}).`);
+        if (tiposA[0]) achados.push(`Principal erro: <strong>${escHtml(tiposA[0].tipo)}</strong> — ${tiposA[0].ap} apontamento(s) em ${tiposA[0].nl} lote(s) (${fmtPct1(tiposA[0].pct)} dos lotes).`);
+        const altas = tiposA.map((t) => ({ t, d: t.pct - ((tiposAntMap.get(t.tipo) || {}).pct || 0) })).filter((x) => P.n && x.d >= 1 && x.t.nl >= 2).sort((a, b) => b.d - a.d);
+        if (altas[0]) achados.push(`Maior alta: <strong>${escHtml(altas[0].t.tipo)}</strong>, de ${fmtPct1((tiposAntMap.get(altas[0].t.tipo) || {}).pct || 0)} para ${fmtPct1(altas[0].t.pct)} dos lotes.`);
+        const cel = new Map(); for (const r of regsP) { const k = `${r.setor} · ${r.onde}`; cel.set(k, (cel.get(k) || 0) + 1); }
+        const topCel = [...cel.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (topCel) achados.push(`Ponto mais crítico: <strong>${escHtml(topCel[0])}</strong> (${topCel[1]} apontamento(s)).`);
+        const sub = sit.linhas.filter((x) => x.sit === 'subindo').slice(0, 2), zer = sit.linhas.filter((x) => x.sit === 'resolvida').slice(0, 2);
+        if (sub.length) achados.push(`Em alta nos últimos 3 meses: ${sub.map((x) => `<strong>${escHtml(x.tipo)}</strong> (${fmtPct1(x.ant)} → ${fmtPct1(x.rec)})`).join('; ')}.`);
+        if (zer.length) achados.push(`Zeraram no último mês: ${zer.map((x) => escHtml(x.tipo)).join('; ')}.`);
+        if (tempoP.length && (sec.graf_tempo_op || sec.graf_tempo_excesso)) achados.push(`${tempoP.length} ressalva(s) de tempo de estágio em ${execP.length} execução(ões) (${fmtPct1(execP.length ? tempoP.length / execP.length * 100 : 0)}).`);
+      } else if (cfg.achados !== false) achados.push(`Nenhum lote conciliado em ${rotPer}${cfg.equip ? ' para o equipamento escolhido' : ''}.`);
+
+      const recortes = [setor && `Setor: ${setor}`, cfg.equip && `Equipamento: ${cfg.equip}`, cfg.operador && `Operador: ${cfg.operador}`].filter(Boolean);
+      const paisagem = cfg.orientacao === 'paisagem';
+      const slug = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '_').replace(/^_|_$/g, '');
+      const nomeArq = `Relatorio_qualidade${cfg.titulo ? '_' + slug(cfg.titulo) : setor ? '_' + slug(setor) : ''}_${mesesPer[0]}${nMes > 1 ? '_a_' + mesesPer[nMes - 1] : ''}`;
+      let abaAtual = '', nSec = 0;
+      const corpo = secoes.map((s) => {
+        let h = '';
+        if (s.aba !== abaAtual) { abaAtual = s.aba; h += `<div class="aba">${escHtml(s.aba)}</div>`; }
+        nSec++;
+        return h + `<section class="${s.longa ? 'longa' : ''}"><h2><span class="n">${nSec}</span>${escHtml(s.titulo)}</h2><p class="q">${escHtml(s.pergunta)}</p>${s.html}</section>`;
+      }).join('\n');
+      const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nomeArq}</title><style>
+ @page{size:A4 ${paisagem ? 'landscape' : 'portrait'};margin:12mm}
+ *{box-sizing:border-box} body{font-family:'Segoe UI',Raleway,Arial,sans-serif;color:#1a2238;font-size:11px;margin:0}
+ .cab{border-bottom:3px solid #1E9DBA;padding-bottom:8px;display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+ .cab h1{font-size:18px;margin:0} .cab .sub{color:#64748b;font-size:10.5px;margin-top:2px} .cab .per{font-size:15px;font-weight:700;text-align:right}
+ .rec{font-size:10px;color:#475569;margin:5px 0 0}
+ .ach{margin-top:10px;border:1px solid #bfe3ec;background:#f0f9fb;border-radius:8px;padding:8px 12px} .ach h3{margin:0 0 4px;font-size:12px;color:#0c6f86;text-transform:uppercase;letter-spacing:.04em}
+ .ach ul{margin:0;padding-left:16px} .ach li{margin:3px 0;line-height:1.45}
+ .aba{margin-top:18px;padding:4px 8px;background:#1a2238;color:#fff;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;border-radius:4px;break-after:avoid}
+ section{margin-top:12px;break-inside:avoid-page} section.longa{break-inside:auto}
+ h2{font-size:13px;margin:0 0 2px;display:flex;gap:8px;align-items:baseline;break-after:avoid}
+ h2 .n{display:inline-block;background:#1E9DBA;color:#fff;border-radius:50%;width:20px;height:20px;line-height:20px;text-align:center;font-size:11px;flex:none}
+ .q{color:#64748b;font-size:10px;margin:0 0 6px 28px;break-after:avoid}
+ .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px} .k{border:1px solid #e2e8f0;border-radius:8px;padding:8px}
+ .kt{font-size:9px;text-transform:uppercase;color:#64748b;font-weight:600;letter-spacing:.03em} .kv{font-size:21px;font-weight:700;margin:2px 0} .ks{font-size:9.5px;color:#64748b}
+ table{border-collapse:collapse;width:100%} thead{display:table-header-group} tr{break-inside:avoid}
+ th{background:#f1f5f9;font-size:9.5px;text-transform:uppercase;letter-spacing:.02em;color:#475569;text-align:left;padding:5px 6px;border-bottom:1px solid #cbd5e1}
+ td{padding:4px 6px;border-bottom:1px solid #e2e8f0;font-size:10.5px;vertical-align:middle} .n{text-align:right}
+ th.tipo{text-transform:none;font-size:9px;max-width:95px;white-space:normal} tr.tot td{font-weight:700;background:#f8fafc;border-top:1px solid #cbd5e1}
+ table.lista td.desc{font-size:9.5px;color:#334155} .vazio{color:#64748b;font-style:italic;margin:4px 0 0 28px}
+ .tag{display:inline-block;color:#fff;border-radius:10px;padding:1px 7px;font-size:9px;font-weight:700}
+ svg{display:block;margin:0 auto} .rod{margin-top:16px;padding-top:6px;border-top:1px solid #e2e8f0;font-size:8.5px;color:#94a3b8}
+</style></head><body>
+<div class="cab"><div><h1>Relatório de qualidade — Conciliação da produção${cfg.titulo ? ` · ${escHtml(cfg.titulo)}` : ''}</h1><div class="sub">Confiance Medical · Garantia da Qualidade</div></div><div class="per">${escHtml(rotPer)}<div style="font-size:10px;font-weight:400;color:#64748b">${A.n} lote(s) conciliado(s)</div></div></div>
+${recortes.length ? `<div class="rec"><strong>Recorte:</strong> ${escHtml(recortes.join(' · '))}</div>` : ''}
+${achados.length ? `<div class="ach"><h3>Principais achados</h3><ul>${achados.map((a) => `<li>${a}</li>`).join('')}</ul></div>` : ''}
+${corpo}
+<div class="rod">Unidade: lote (OP + nº de série), no mês da 1ª análise. Aprovado de primeira = conforme ou conforme com ressalvas sem correção por não conformidade. Apontamentos de NC contam 1 cada. Comparações entre períodos usam a taxa sobre os lotes conciliados (o número absoluto é mostrado junto). Gerado em ${agora.toLocaleString('pt-BR')} por ${escHtml(ctx.autor || '—')}.</div>
+${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>' : ''}
+</body></html>`;
+      return { html, nomeArq, paisagem, rotPer, nSecoes: secoes.length, nLotes: A.n };
+    }
+
+    /* @@MOTOR_RELATORIO_FIM */
 
     function DashboardPage() {
       const toast = useToast();
@@ -1490,53 +2022,8 @@
       // do apontamento. Útil pra ver quais erros aparecem mais nas conciliações
       // (registro ANVISA errado, modelo errado, nome do produto, CNPJ, etc.).
       const tiposErroCount = {};
-      const categorias = [
-        { nome: 'Registro ANVISA',     re: /anvisa/i },
-        { nome: 'Modelo',              re: /\bmodelo\b/i },
-        { nome: 'Nome do produto',     re: /\bnome do produto|fam[íi]lia\b/i },
-        { nome: 'CNPJ',                re: /\bcnpj\b/i },
-        { nome: 'Fabricante',          re: /\bfabricante\b/i },
-        { nome: 'Endereço',            re: /\bendere[çc]o\b/i },
-        { nome: 'Telefone',            re: /\btelefone\b/i },
-        { nome: 'Responsável Técnico', re: /respons[áa]vel\s+t[ée]cnico|\brt\b/i },
-        { nome: 'CREA',                re: /\bcrea\b/i },
-        { nome: 'Responsável Legal',   re: /respons[áa]vel\s+legal/i },
-        { nome: 'Nº de série',         re: /\bs[ée]rie\b/i },
-        { nome: 'Cronologia incoerente', re: /cronologia|hor[áa]rio\s+incoerente|incoerente|sequ[êe]ncia\s+de\s+(est[áa]gios|etapas)/i },
-        { nome: 'Tempo de estágio',    re: /tempo esperado|faixa esperada|tempo do est[áa]gio/i },
-        { nome: 'Data',                re: /\bdata\b/i },
-        { nome: 'Validade',            re: /validade/i },
-        { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
-        { nome: 'Acessório',           re: /acess[óo]rio/i },
-        { nome: 'Componente/RC',       re: /\bcomponente|rela[çc][ãa]o de componentes|\brc\b/i },
-        { nome: 'Reprovação em inspeção', re: /reprova/i },
-        { nome: 'Cópia/revisão do FORM', re: /c[óo]pia controlada|revis[ãa]o do form/i },
-        { nome: 'Derivação/identificação do produto', re: /deriva[çc][ãa]o|identificar o produto|produto a partir dos documentos|cat[áa]logo de produtos/i },
-        { nome: 'Documento ausente/ilegível', re: /ausente|n[ãa]o anexad|n[ãa]o p[ôo]de ser parse|n[ãa]o parse[áa]vel|n[ãa]o extra[íi]d/i },
-        { nome: 'Inspeção/Medição',   re: /inspe[çc][ãa]o|medi[çc]/i },
-      ];
-      // Aptidão de operador/inspetor não é mais tratada como NC — excluída dos gráficos de erro.
-      const ehErroOperador = (ap) => /aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test((ap?.descricao || '') + ' ' + (ap?.documento_afetado || ''));
-      // Calibração 18/06/2026: o gráfico de "Principais erros" mostra o que MOTIVOU
-      // a correção — ou seja, os apontamentos NC/ressalva da análise ORIGINAL de cada
-      // lote (e não do estado final, que pode já estar limpo). Para lotes sem correção,
-      // usa o estado final mesmo (são erros ainda pendentes).
-      // Classifica um apontamento no documento que ele afeta (para o filtro do gráfico).
-      const classificarDocApontamento = (ap) => {
-        const d = String(ap?.documento_afetado || '').toLowerCase();
-        if (d.includes('etiqueta') && d.includes('acess')) return 'eac';
-        if (d.includes('etiqueta')) return 'etx';
-        if (/\brc\b|rela[çc][ãa]o de componentes/.test(d)) return 'rc';
-        if (/\bop\b|ordem de produ/.test(d)) return 'op';
-        return 'outros';
-      };
-      const categoriaDoTexto = (descricao, documento) => {
-        const txt = (descricao || '') + ' ' + (documento || '');
-        for (const cat of categorias) { if (cat.re.test(txt)) return cat.nome; }
-        // Sem palavra-chave: rotula pelo documento afetado (sempre descritivo aqui).
-        const doc = String(documento || '').trim();
-        return doc || 'Outros';
-      };
+      // Categorias de erro, ehErroOperador, classificarDocApontamento e categoriaDoTexto
+      // agora ficam no bloco do motor de relatório (topo), compartilhados com o serviço.
       // Descrição genérica do problema típico de cada categoria (para o painel de reincidência).
       const descProblema = (cat) => ({
         'Nº de série': 'número de série incorreto/divergente',
@@ -2128,215 +2615,95 @@
         return { intervalo, atual, anterior, abertos, aging, serieMensal, meses12, pareto, matriz, celTop, porEquip, mapaCausaMes, lotesPer, lotes, causasDe, ncRegs, porOperador, tiposOperador, atacar, tempo };
       })();
 
-      // ===== Relatório de qualidade PERSONALIZÁVEL (06/10/2026) =====
-      // A usuária escolhe período, recortes e seções; modelos ficam salvos no banco
-      // (config_app.relatorio_modelos) para todos. O PDF é gerado pelo serviço local
-      // (Chromium) — sem o cabeçalho "about:blank" da impressão do navegador. Se o
-      // serviço estiver fora, cai na janela de impressão.
-      const SECOES_REL = [
-        { id: 'indicadores', label: 'Indicadores e resumo', desc: 'Aprovação de primeira × meta, lotes com NC, tempo até a correção' },
-        { id: 'evolucao', label: 'Evolução em 12 meses', desc: 'Linha da aprovação de primeira mês a mês' },
-        { id: 'pareto', label: 'Pareto dos tipos de erro', desc: 'Tipos de erro (documento · campo) que mais geraram NC' },
-        { id: 'matriz', label: 'Setor × onde ocorreu', desc: 'Concentração por setor e estágio/documento' },
-        { id: 'equipamentos', label: 'Taxa de NC por equipamento', desc: '% dos lotes de cada equipamento com NC' },
-        { id: 'operadores', label: 'NCs por operador', desc: 'Operador × tipo de erro (apontamentos)', restrito: true },
-        { id: 'lista', label: 'Lista detalhada das NCs', desc: 'Cada apontamento com o texto do item não conforme' },
-        { id: 'abertasPeriodo', label: 'NCs do período ainda abertas', desc: 'Lotes do período que seguem sem correção' },
-        { id: 'abertasAnteriores', label: 'NCs abertas de períodos anteriores', desc: 'Pendências antigas, fora do período' },
-      ];
+      // ===== Relatório de qualidade (10/10/2026) =====
+      // Um único botão no topo do Dashboard. Seções agrupadas pelas abas, setor
+      // valendo para o relatório inteiro, "principais achados" e modelos (os 3
+      // padrão + salvos). O HTML vem do MOTOR compartilhado com o serviço — o mesmo
+      // relatório que a geração automática mensal grava na pasta da rede.
       const mesesEscolha = (() => { const out = [], d = new Date(); for (let i = 0; i < 24; i++) { const x = new Date(d.getFullYear(), d.getMonth() - i, 1); out.push(`${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`); } return out; })();
-      const cfgRelPadrao = () => ({
-        de: mesesEscolha[1], ate: mesesEscolha[1], equip: '', setor: '', operador: '', orientacao: 'retrato',
-        secoes: { indicadores: true, evolucao: true, pareto: true, matriz: true, equipamentos: true, operadores: false, lista: false, abertasPeriodo: true, abertasAnteriores: false },
+      const cfgDoModelo = (m) => ({
+        de: mesesEscolha[1], ate: mesesEscolha[1],
+        setor: m?.setor || '', equip: m?.equip || '', operador: m?.operador || '',
+        orientacao: m?.orientacao || 'paisagem', achados: m?.achados !== false,
+        automatico: !!m?.automatico,
+        secoes: { ...Object.fromEntries(TODAS_SECOES_REL.map((id) => [id, false])), ...(m?.secoes || {}) },
       });
       const [relOpen, setRelOpen] = useState(false);
-      const [relCfg, setRelCfg] = useState(cfgRelPadrao);
-      const [relModelos, setRelModelos] = useState([]);
-      const [relModeloSel, setRelModeloSel] = useState('');
+      const [relModelos, setRelModelos] = useState(MODELOS_RELATORIO_PADRAO);
+      const [relModeloSel, setRelModeloSel] = useState(MODELOS_RELATORIO_PADRAO[2].nome);
+      const [relCfg, setRelCfg] = useState(() => cfgDoModelo(MODELOS_RELATORIO_PADRAO[2]));
       const [relGerando, setRelGerando] = useState(false);
-      const carregarModelosRel = async () => {
+      const lerModelosSalvos = async () => {
         try {
           const { data } = await supabase.from('config_app').select('valor').eq('chave', 'relatorio_modelos').limit(1);
           const v = data && data[0] ? JSON.parse(data[0].valor || '[]') : [];
-          setRelModelos(Array.isArray(v) ? v : []);
-        } catch (e) { setRelModelos([]); }
+          return Array.isArray(v) ? v : [];
+        } catch (e) { return []; }
       };
-      const gravarModelosRel = async (lista) => {
-        const autor = perfil?.nome_completo || perfil?.email || null;
-        const { error } = await supabase.from('config_app').upsert([{ chave: 'relatorio_modelos', valor: JSON.stringify(lista), updated_at: new Date().toISOString(), updated_by: autor }], { onConflict: 'chave' });
-        if (error) throw error;
-        setRelModelos(lista);
+      const abrirMontagemRelatorio = async () => {
+        setRelOpen(true);
+        const todos = mesclarModelosRelatorio(await lerModelosSalvos());
+        setRelModelos(todos);
+        const m = todos.find((x) => x.nome === relModeloSel) || todos[0];
+        if (m) { setRelModeloSel(m.nome); setRelCfg((c) => ({ ...cfgDoModelo(m), de: c.de, ate: c.ate })); }
       };
-      const abrirMontagemRelatorio = () => { carregarModelosRel(); setRelOpen(true); };
       const aplicarModeloRel = (nome) => {
         setRelModeloSel(nome);
         const m = relModelos.find((x) => x.nome === nome);
-        if (!m) return;
-        setRelCfg((c) => ({ ...c, secoes: { ...cfgRelPadrao().secoes, ...(m.secoes || {}) }, orientacao: m.orientacao || 'retrato', equip: m.equip || '', setor: m.setor || '', operador: m.operador || '' }));
+        setRelCfg((c) => ({ ...cfgDoModelo(m), de: c.de, ate: c.ate }));
+      };
+      const gravarModelosSalvos = async (lista) => {
+        const autor = perfil?.nome_completo || perfil?.email || null;
+        const { error } = await supabase.from('config_app').upsert([{ chave: 'relatorio_modelos', valor: JSON.stringify(lista), updated_at: new Date().toISOString(), updated_by: autor }], { onConflict: 'chave' });
+        if (error) throw error;
+        setRelModelos(mesclarModelosRelatorio(lista));
       };
       const salvarModeloRel = async () => {
-        const nome = (prompt('Nome do modelo (ex.: "Completo", "Só operadores"):', relModeloSel || '') || '').trim();
+        const nome = (prompt('Nome do modelo (use o mesmo nome de um modelo padrão para substituí-lo):', relModeloSel || '') || '').trim();
         if (!nome) return;
-        const novo = { nome, secoes: relCfg.secoes, orientacao: relCfg.orientacao, equip: relCfg.equip, setor: relCfg.setor, operador: relCfg.operador };
+        const novo = { nome, setor: relCfg.setor, equip: relCfg.equip, operador: relCfg.operador, orientacao: relCfg.orientacao, achados: relCfg.achados, automatico: relCfg.automatico, secoes: relCfg.secoes };
         try {
-          await gravarModelosRel([...relModelos.filter((m) => m.nome !== nome), novo].sort((a, b) => a.nome.localeCompare(b.nome)));
+          const salvos = (await lerModelosSalvos()).filter((m) => m.nome !== nome);
+          await gravarModelosSalvos([...salvos, novo].sort((a, b) => a.nome.localeCompare(b.nome)));
           setRelModeloSel(nome);
           toast.success(`Modelo "${nome}" salvo para todos os usuários.`);
         } catch (e) { toast.error('Não foi possível salvar o modelo: ' + (e?.message || e)); }
       };
       const excluirModeloRel = async () => {
-        if (!relModeloSel || !confirm(`Excluir o modelo "${relModeloSel}"?`)) return;
-        try { await gravarModelosRel(relModelos.filter((m) => m.nome !== relModeloSel)); setRelModeloSel(''); toast.success('Modelo excluído.'); }
-        catch (e) { toast.error('Não foi possível excluir: ' + (e?.message || e)); }
+        const m = relModelos.find((x) => x.nome === relModeloSel);
+        if (!m || m.padrao) return;
+        const ehSubstituto = MODELOS_RELATORIO_PADRAO.some((x) => x.nome === m.nome);
+        if (!confirm(ehSubstituto ? `Voltar o modelo "${m.nome}" para a versão padrão?` : `Excluir o modelo "${m.nome}"?`)) return;
+        try {
+          await gravarModelosSalvos((await lerModelosSalvos()).filter((x) => x.nome !== m.nome));
+          const todos = mesclarModelosRelatorio((await lerModelosSalvos()));
+          const prox = todos.find((x) => x.nome === m.nome) || todos[0];
+          setRelModeloSel(prox.nome); setRelCfg((c) => ({ ...cfgDoModelo(prox), de: c.de, ate: c.ate }));
+          toast.success(ehSubstituto ? 'Modelo restaurado ao padrão.' : 'Modelo excluído.');
+        } catch (e) { toast.error('Não foi possível excluir: ' + (e?.message || e)); }
       };
-
-      const montarRelatorioHtml = (cfg, paraImpressao) => {
-        const ymIdx = (ym) => { const [y, m] = ym.split('-').map(Number); return y * 12 + (m - 1); };
-        const ymDeIdx = (i) => `${Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
-        let i0 = ymIdx(cfg.de), i1 = ymIdx(cfg.ate); if (i1 < i0) [i0, i1] = [i1, i0];
-        const nMes = i1 - i0 + 1;
-        const ini = new Date(Math.floor(i0 / 12), i0 % 12, 1), fim = new Date(Math.floor(i1 / 12), i1 % 12 + 1, 1);
-        const pIni = new Date(Math.floor((i0 - nMes) / 12), ((i0 - nMes) % 12 + 12) % 12, 1);
-        const rotPer = nMes === 1 ? rotuloMesLongo(ymDeIdx(i0)) : `${rotuloMes(ymDeIdx(i0))} a ${rotuloMes(ymDeIdx(i1))}`;
-        const rotAnt = nMes === 1 ? rotuloMesLongo(ymDeIdx(i0 - 1)) : 'período anterior';
-        const noIntervalo = (iso, a, b) => { const d = new Date(iso); return d >= a && d < b; };
-        const filtroNc = !!(cfg.setor || cfg.operador);
-        const regs = exec.ncRegs.filter((r) => (!cfg.equip || r.equip === cfg.equip) && (!cfg.setor || r.setor === cfg.setor) && (!cfg.operador || r.operador === cfg.operador));
-        const lotesComRegs = new Set(regs.map((r) => r.lote.chave));
-        const falhouF = (l) => (filtroNc ? lotesComRegs.has(l.chave) : l.falhou);
-        const lotesBase = exec.lotes.filter((l) => !cfg.equip || l.equip === cfg.equip);
-        const lotesP = lotesBase.filter((l) => noIntervalo(l.ini, ini, fim));
-        const lotesA = lotesBase.filter((l) => noIntervalo(l.ini, pIni, ini));
-        const regsP = regs.filter((r) => noIntervalo(r.ini, ini, fim));
-        const kp = (ls) => {
-          const n = ls.length, f = ls.filter(falhouF).length;
-          const t = ls.filter((l) => falhouF(l) && l.corrigidoEm).map((l) => (new Date(l.corrigidoEm) - new Date(l.ini)) / 864e5).filter((x) => x >= 0);
-          return { n, f, ap: n ? (n - f) / n * 100 : null, tm: t.length ? t.reduce((s, x) => s + x, 0) / t.length : null, ab: ls.filter((l) => l.aberto && falhouF(l)).length };
-        };
-        const A = kp(lotesP), P = kp(lotesA);
-        const num = (x, d = 1) => x == null ? '—' : x.toFixed(d).replace('.', ',');
-        const tipos = Object.entries(regsP.reduce((m, r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b[1] - a[1]);
-        const totRegs = regsP.length;
-        const sec = []; // { titulo, pergunta, html }
-
-        if (cfg.secoes.indicadores) {
-          const delta = A.ap != null && P.ap != null && P.n ? A.ap - P.ap : null;
-          const cor = A.ap == null ? 'inherit' : A.ap >= metaAprov ? COR_OK : COR_RUIM;
-          const k = (t, v, s, c) => `<div class="k"><div class="kt">${t}</div><div class="kv" style="color:${c || 'inherit'}">${v}</div><div class="ks">${s || ''}</div></div>`;
-          const top3 = tipos.slice(0, 3);
-          let txt = A.n === 0 ? `Nenhum lote analisado em ${rotPer}.` :
-            `Em ${rotPer}, ${fmtPct1(A.ap)} dos ${A.n} lote(s) foram aprovados de primeira, ${A.ap >= metaAprov ? 'dentro' : 'abaixo'} da meta de ${metaAprov}%`
-            + (delta != null ? ` (${delta >= 0 ? 'alta' : 'queda'} de ${num(Math.abs(delta))} p.p. em relação a ${rotAnt})` : '') + '. '
-            + (A.f ? `${A.f} lote(s) tiveram não conformidade, somando ${totRegs} apontamento(s)` + (top3.length ? `; os tipos mais frequentes foram ${top3.map(([t, v]) => `${t} (${v})`).join(', ')}` : '') + '.' : 'Nenhum lote teve não conformidade.')
-            + (A.ab ? ` ${A.ab} lote(s) do período ainda estão com NC em aberto.` : '');
-          sec.push({ titulo: 'Como fomos no período', pergunta: 'Resultado frente à meta de aprovação de primeira.', html:
-            `<div class="grid">${k('Aprovação de primeira', fmtPct1(A.ap), `Meta ${metaAprov}%${delta != null ? ` · ${delta >= 0 ? '▲ +' : '▼ −'}${num(Math.abs(delta))} p.p. vs ${rotAnt}` : ''}`, cor)}`
-            + `${k('Lotes analisados', A.n, `${A.f} com NC · ${totRegs} apontamento(s)`)}`
-            + `${k('Tempo médio até a correção', A.tm == null ? '—' : `${num(A.tm)} dias`, 'da 1ª análise à reanálise aprovada')}`
-            + `${k('NCs do período em aberto', A.ab, 'lotes ainda sem correção', A.ab ? COR_RUIM : COR_OK)}</div><div class="res">${escHtml(txt)}</div>` });
-        }
-        if (cfg.secoes.evolucao) {
-          const pts = [];
-          for (let i = i1 - 11; i <= i1; i++) { const ym = ymDeIdx(i); const ls = lotesBase.filter((l) => l.mes === ym); const f = ls.filter(falhouF).length; pts.push({ mes: ym, n: ls.length, pct: ls.length ? (ls.length - f) / ls.length * 100 : null }); }
-          sec.push({ titulo: 'Como estamos evoluindo', pergunta: 'Aprovação de primeira nos 12 meses até o fim do período. Verde = na meta; vermelho = abaixo.', html: svgLinhaAprovacao(pts, metaAprov) });
-        }
-        if (cfg.secoes.pareto) {
-          sec.push({ titulo: 'Quais erros mais geraram NC', pergunta: 'Tipos de erro (documento · campo) por número de apontamentos. Em vermelho, os que somam ~80% — onde a ação rende mais.', html:
-            tipos.length ? svgPareto(tipos.map(([label, value]) => ({ label, value })), 10) : '<p class="vazio">Sem não conformidades no período.</p>' });
-        }
-        if (cfg.secoes.matriz) {
-          const setores = [...new Set(regsP.map((r) => r.setor))].sort();
-          const ondes = [...new Set(regsP.map((r) => r.onde))].sort();
-          const cnt = (s, o) => regsP.filter((r) => r.setor === s && r.onde === o).length;
-          const mx = Math.max(1, ...setores.flatMap((s) => ondes.map((o) => cnt(s, o))));
-          sec.push({ titulo: 'Onde as NCs aconteceram', pergunta: 'Apontamentos por setor responsável e estágio da OP (ou documento). Quanto mais escura a célula, maior a concentração.', html:
-            regsP.length ? htmlMapaCalor({ linhas: setores, colunas: ondes, celulas: setores.map((s) => ondes.map((o) => { const v = cnt(s, o); return { v, i: v / mx }; })), rotuloCanto: 'Setor' }) : '<p class="vazio">Sem não conformidades no período.</p>' });
-        }
-        if (cfg.secoes.equipamentos) {
-          const m = new Map(); for (const l of lotesP) { const e = m.get(l.equip) || { equip: l.equip, n: 0, f: 0 }; e.n++; if (falhouF(l)) e.f++; m.set(l.equip, e); }
-          const eqs = [...m.values()].map((e) => ({ ...e, t: e.f / e.n * 100 })).sort((a, b) => b.t - a.t || b.n - a.n);
-          sec.push({ titulo: 'Quais equipamentos concentram NC', pergunta: `Taxa de lotes com NC por equipamento. Acima de ${100 - metaAprov}% = fora da meta.`, html:
-            eqs.length ? `<table><thead><tr><th>Equipamento</th><th class="n">Lotes</th><th class="n">Com NC</th><th class="n">Taxa de NC</th></tr></thead><tbody>${eqs.map((e) => `<tr><td>${escHtml(e.equip)}</td><td class="n">${e.n}</td><td class="n">${e.f}</td><td class="n" style="font-weight:600;color:${e.t > 100 - metaAprov ? COR_RUIM : COR_OK}">${fmtPct1(e.t)}</td></tr>`).join('')}</tbody></table>` : '<p class="vazio">Sem lotes no período.</p>' });
-        }
-        if (cfg.secoes.operadores && podeVerOperador) {
-          const cols = tipos.slice(0, 8).map(([t]) => t);
-          const temOutros = tipos.length > 8;
-          const ops = Object.values(regsP.reduce((m, r) => { const o = m[r.operador] || (m[r.operador] = { op: r.operador, total: 0, t: {} }); o.total++; o.t[r.tipo] = (o.t[r.tipo] || 0) + 1; return m; }, {})).sort((a, b) => b.total - a.total);
-          const cel = (o, c) => o.t[c] || '';
-          const outros = (o) => o.total - cols.reduce((s, c) => s + (o.t[c] || 0), 0);
-          sec.push({ titulo: 'NCs por operador', pergunta: 'Cada apontamento conta 1. Atribuição: etiquetas → quem executou o Estágio 50 (Embalagem); NC de um estágio → quem executou aquele estágio; demais → Estágio 60 (Conciliação).', html:
-            ops.length ? `<table class="op"><thead><tr><th>Operador</th><th class="n">NCs</th>${cols.map((c) => `<th class="n tipo">${escHtml(c)}</th>`).join('')}${temOutros ? '<th class="n tipo">Outros</th>' : ''}</tr></thead><tbody>`
-              + ops.map((o) => `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.total}</strong></td>${cols.map((c) => `<td class="n">${cel(o, c)}</td>`).join('')}${temOutros ? `<td class="n">${outros(o) || ''}</td>` : ''}</tr>`).join('')
-              + `<tr class="tot"><td>Total</td><td class="n">${totRegs}</td>${cols.map((c) => `<td class="n">${regsP.filter((r) => r.tipo === c).length}</td>`).join('')}${temOutros ? `<td class="n">${regsP.filter((r) => !cols.includes(r.tipo)).length}</td>` : ''}</tr></tbody></table>` : '<p class="vazio">Sem não conformidades no período.</p>' });
-        }
-        if (cfg.secoes.lista) {
-          const ord = regsP.slice().sort((a, b) => new Date(a.ini) - new Date(b.ini));
-          sec.push({ titulo: 'Lista detalhada das NCs', pergunta: 'Cada apontamento com o item da análise que ficou não conforme.', html:
-            ord.length ? `<table class="lista"><thead><tr><th>Data</th><th>OP</th><th>Série</th><th>Equipamento</th><th>Tipo</th><th>Item não conforme</th>${podeVerOperador ? '<th>Operador</th>' : ''}<th>Situação</th></tr></thead><tbody>`
-              + ord.map((r) => `<tr><td>${new Date(r.ini).toLocaleDateString('pt-BR')}</td><td>${escHtml(r.lote.final.numero_op || '—')}</td><td>${escHtml(r.lote.final.numero_serie || '—')}</td><td>${escHtml(r.equip)}</td><td>${escHtml(r.tipo)}</td><td class="desc">${escHtml(r.desc.length > 220 ? r.desc.slice(0, 219) + '…' : r.desc)}</td>${podeVerOperador ? `<td>${escHtml(r.operador)}</td>` : ''}<td style="color:${r.aberto ? COR_RUIM : COR_OK};font-weight:600">${r.aberto ? 'Aberta' : 'Corrigida'}</td></tr>`).join('')
-              + '</tbody></table>' : '<p class="vazio">Sem não conformidades no período.</p>' });
-        }
-        const tabelaAbertos = (ls) => `<table><thead><tr><th>OP</th><th>Série</th><th>Equipamento</th><th>1ª análise</th><th class="n">Em aberto</th><th>Tipos de erro</th></tr></thead><tbody>`
-          + ls.map((l) => { const ts = [...new Set(regs.filter((r) => r.lote.chave === l.chave).map((r) => r.tipo))]; return `<tr><td>${escHtml(l.final.numero_op || '—')}</td><td>${escHtml(l.final.numero_serie || '—')}</td><td>${escHtml(l.equip)}</td><td>${new Date(l.ini).toLocaleDateString('pt-BR')}</td><td class="n" style="font-weight:600;color:${(Date.now() - new Date(l.ini)) / 864e5 > 30 ? COR_RUIM : 'inherit'}">${Math.floor((Date.now() - new Date(l.ini)) / 864e5)} dia(s)</td><td>${escHtml(ts.join('; ') || '—')}</td></tr>`; }).join('') + '</tbody></table>';
-        if (cfg.secoes.abertasPeriodo) {
-          const ls = lotesP.filter((l) => l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
-          sec.push({ titulo: 'O que ficou pendente do período', pergunta: `Lotes analisados em ${rotPer} que ainda estão com NC em aberto hoje.`, html: ls.length ? tabelaAbertos(ls) : '<p class="vazio">Nenhum lote do período com NC em aberto.</p>' });
-        }
-        if (cfg.secoes.abertasAnteriores) {
-          const ls = lotesBase.filter((l) => new Date(l.ini) < ini && l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
-          sec.push({ titulo: 'Pendências de períodos anteriores', pergunta: `Lotes analisados antes de ${rotPer} que continuam com NC em aberto.`, html: ls.length ? tabelaAbertos(ls) : '<p class="vazio">Nenhuma pendência anterior.</p>' });
-        }
-
-        const recortes = [cfg.equip && `Equipamento: ${cfg.equip}`, cfg.setor && `Setor: ${cfg.setor}`, cfg.operador && `Operador: ${cfg.operador}`].filter(Boolean);
-        const paisagem = cfg.orientacao === 'paisagem';
-        const nomeArq = `Relatorio_qualidade_${ymDeIdx(i0)}${nMes > 1 ? '_a_' + ymDeIdx(i1) : ''}`;
-        const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nomeArq}</title><style>
- @page{size:A4 ${paisagem ? 'landscape' : 'portrait'};margin:12mm}
- *{box-sizing:border-box} body{font-family:'Segoe UI',Raleway,Arial,sans-serif;color:#1a2238;font-size:11px;margin:0}
- .cab{border-bottom:3px solid #1E9DBA;padding-bottom:8px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
- .cab h1{font-size:18px;margin:0} .cab .sub{color:#64748b;font-size:10.5px;margin-top:2px} .cab .per{font-size:15px;font-weight:700;text-align:right}
- .rec{font-size:10px;color:#475569;margin:4px 0 2px} .ind{font-size:10px;color:#64748b;margin-bottom:6px}
- section{margin-top:14px;break-inside:avoid-page} section.longa{break-inside:auto}
- h2{font-size:13px;margin:0 0 2px;color:#1a2238;display:flex;gap:8px;align-items:baseline}
- h2 .n{display:inline-block;background:#1E9DBA;color:#fff;border-radius:50%;width:20px;height:20px;line-height:20px;text-align:center;font-size:11px}
- .q{color:#64748b;font-size:10px;margin:0 0 6px 28px}
- .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px} .k{border:1px solid #e2e8f0;border-radius:8px;padding:8px}
- .kt{font-size:9px;text-transform:uppercase;color:#64748b;font-weight:600;letter-spacing:.03em} .kv{font-size:21px;font-weight:700;margin:2px 0} .ks{font-size:9.5px;color:#64748b}
- .res{background:#f1f5f9;border-left:3px solid #1E9DBA;border-radius:4px;padding:8px 10px;margin-top:8px;line-height:1.5}
- table{border-collapse:collapse;width:100%} thead{display:table-header-group} tr{break-inside:avoid}
- th{background:#f1f5f9;font-size:9.5px;text-transform:uppercase;letter-spacing:.02em;color:#475569;text-align:left;padding:5px 6px;border-bottom:1px solid #cbd5e1}
- td{padding:4px 6px;border-bottom:1px solid #e2e8f0;font-size:10.5px;vertical-align:top} .n{text-align:right}
- table.op th.tipo{text-transform:none;font-size:9px;max-width:90px;white-space:normal} tr.tot td{font-weight:700;background:#f8fafc;border-top:1px solid #cbd5e1}
- table.lista td.desc{font-size:9.5px;color:#334155} .vazio{color:#64748b;font-style:italic;margin:4px 0 0 28px}
- svg{display:block;margin:0 auto} .rod{margin-top:16px;padding-top:6px;border-top:1px solid #e2e8f0;font-size:8.5px;color:#94a3b8}
-</style></head><body>
-<div class="cab"><div><h1>Relatório de qualidade — Conciliação da produção</h1><div class="sub">Confiance Medical · Garantia da Qualidade</div></div><div class="per">${escHtml(rotPer)}</div></div>
-${recortes.length ? `<div class="rec"><strong>Recorte:</strong> ${escHtml(recortes.join(' · '))}</div>` : ''}
-<div class="ind">${sec.map((s, i) => `${i + 1}. ${escHtml(s.titulo)}`).join(' &nbsp;·&nbsp; ')}</div>
-${sec.map((s, i) => `<section class="${/<table class="(lista|op)"|<table>/.test(s.html) ? 'longa' : ''}"><h2><span class="n">${i + 1}</span>${escHtml(s.titulo)}</h2><p class="q">${escHtml(s.pergunta)}</p>${s.html}</section>`).join('\n')}
-<div class="rod">Unidade: lote (OP + nº de série), no mês da 1ª análise; aprovado de primeira = conforme ou conforme com ressalvas sem correção por não conformidade. Apontamentos de NC contam 1 cada. Gerado em ${new Date().toLocaleString('pt-BR')} por ${escHtml(perfil?.nome_completo || perfil?.email || '—')} na Plataforma de Conciliação.</div>
-${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>' : ''}
-</body></html>`;
-        return { html, nomeArq, paisagem, nSecoes: sec.length, rotPer };
-      };
+      // Base de qualidade (mesma do serviço) — usada no relatório e na aba Tendência.
+      const baseQualidade = useMemo(() => calcularBaseQualidade({ analises, produtos: catalogoProdutos, temposAtivos }), [analises, catalogoProdutos, temposAtivos]);
 
       const gerarRelatorio = async () => {
         const cfg = relCfg;
-        if (!Object.entries(cfg.secoes).some(([k, v]) => v && (k !== 'operadores' || podeVerOperador))) { toast.error('Marque ao menos uma seção.'); return; }
+        if (!Object.entries(cfg.secoes).some(([k, v]) => v && (podeVerOperador || !SECOES_RELATORIO.some((g) => g.itens.some((i) => i.id === k && i.restrito))))) { toast.error('Marque ao menos uma seção.'); return; }
         setRelGerando(true);
-        const { html, nomeArq, paisagem, rotPer } = montarRelatorioHtml(cfg, false);
+        const ctx = { meta: metaAprov, podeVerOperador, autor: perfil?.nome_completo || perfil?.email || '—', agora: new Date() };
+        const titulo = relModelos.some((m) => m.nome === relModeloSel) ? relModeloSel : '';
+        const r = gerarRelatorioQualidade(baseQualidade, { ...cfg, titulo }, ctx);
         let ok = false;
         try {
           const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
           const resp = await fetch(`${base}/converter-pdf`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream', 'X-Source-Format': 'html', 'X-Filename': `${nomeArq}.html`, 'X-Pdf-Landscape': paisagem ? '1' : '0' },
-            body: new Blob([html], { type: 'text/html' }),
+            headers: { 'Content-Type': 'application/octet-stream', 'X-Source-Format': 'html', 'X-Filename': `${r.nomeArq}.html`, 'X-Pdf-Landscape': r.paisagem ? '1' : '0' },
+            body: new Blob([r.html], { type: 'text/html' }),
           });
           if (resp.ok) {
             const blob = await resp.blob();
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = `${nomeArq}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+            const a = document.createElement('a'); a.href = url; a.download = `${r.nomeArq}.pdf`; document.body.appendChild(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 5000);
             ok = true;
             toast.success('Relatório gerado.');
@@ -2345,10 +2712,9 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
         if (!ok) {
           const w = window.open('', '_blank');
           if (!w) { toast.error('O serviço de PDF não respondeu e o navegador bloqueou a janela. Libere pop-ups e tente de novo.'); setRelGerando(false); return; }
-          w.document.open(); w.document.write(montarRelatorioHtml(cfg, true).html); w.document.close();
-          toast.info?.('Serviço de PDF indisponível — abrindo para imprimir. Desmarque "Cabeçalhos e rodapés" na impressão.');
+          w.document.open(); w.document.write(gerarRelatorioQualidade(baseQualidade, { ...cfg, titulo }, { ...ctx, paraImpressao: true }).html); w.document.close();
         }
-        registrarLog(perfil, 'relatorio_mensal', 'dashboard', nomeArq, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório de qualidade de ${rotPer}`);
+        registrarLog(perfil, 'relatorio_mensal', 'dashboard', r.nomeArq, `${perfil?.nome_completo || perfil?.email || 'Usuário'} gerou o relatório de qualidade de ${r.rotPer}${titulo ? ` (${titulo})` : ''}`);
         setRelGerando(false);
         setRelOpen(false);
       };
@@ -2483,8 +2849,8 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
             title="Dashboard"
             description="Visão geral das conciliações de produção analisadas pelo agente."
             actions={
-              <Button variant="outline" onClick={handleExportarPDF} className="no-print">
-                <Icon name="download" />Exportar em PDF
+              <Button onClick={abrirMontagemRelatorio} className="no-print" title="Relatório em PDF com as seções das abas — para enviar aos gestores">
+                <Icon name="download" />Gerar relatório
               </Button>
             }
           />
@@ -2568,27 +2934,26 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
             ))}
           </div>
 
-          {/* ===== Montagem do relatório de qualidade (06/10/2026) ===== */}
+          {/* ===== Montagem do relatório de qualidade (10/10/2026) ===== */}
           {relOpen && (() => {
             const set = (patch) => setRelCfg((c) => ({ ...c, ...patch }));
             const setSec = (id, v) => setRelCfg((c) => ({ ...c, secoes: { ...c.secoes, [id]: v } }));
-            const equips = [...new Set(exec.lotes.map((l) => l.equip))].sort();
-            const operadores = [...new Set(exec.ncRegs.map((r) => r.operador))].sort();
+            const equips = [...new Set(baseQualidade.lotes.map((l) => l.equip))].sort();
+            const operadores = [...new Set(baseQualidade.ncRegs.map((r) => r.operador))].sort();
             const sel = 'rounded-md border border-input bg-background px-2 py-1.5 text-sm w-full';
-            const visiveis = SECOES_REL.filter((x) => !x.restrito || podeVerOperador);
+            const modeloAtual = relModelos.find((m) => m.nome === relModeloSel);
             return (
-              <Modal open onClose={() => !relGerando && setRelOpen(false)} title="Montar relatório de qualidade" description="Escolha o período, o recorte e as seções. O PDF sai só com o que estiver marcado." size="xl">
+              <Modal open onClose={() => !relGerando && setRelOpen(false)} title="Gerar relatório de qualidade" description="Escolha um modelo ou monte o seu: período, setor e as seções de cada aba. O PDF sai só com o que estiver marcado." size="xl">
                 <div className="space-y-4">
                   <div className="flex items-end gap-2 flex-wrap rounded-md border p-3 bg-muted/20">
-                    <div className="flex-1 min-w-[200px]">
-                      <Label className="text-xs">Modelo salvo</Label>
+                    <div className="flex-1 min-w-[240px]">
+                      <Label className="text-xs">Modelo</Label>
                       <select value={relModeloSel} onChange={(e) => aplicarModeloRel(e.target.value)} className={sel}>
-                        <option value="">— sem modelo —</option>
-                        {relModelos.map((m) => <option key={m.nome} value={m.nome}>{m.nome}</option>)}
+                        {relModelos.map((m) => <option key={m.nome} value={m.nome}>{m.nome}{m.padrao ? ' (padrão)' : ''}{m.automatico ? ' · automático' : ''}</option>)}
                       </select>
                     </div>
-                    <Button variant="outline" size="sm" onClick={salvarModeloRel} title="Salva as seções, o recorte e a orientação (o período não é salvo)"><Icon name="check" className="h-3.5 w-3.5" />Salvar como modelo</Button>
-                    {relModeloSel && <Button variant="ghost" size="sm" onClick={excluirModeloRel}><Icon name="trash" className="h-3.5 w-3.5" />Excluir</Button>}
+                    <Button variant="outline" size="sm" onClick={salvarModeloRel} title="Salva setor, recorte, orientação, seções e a opção de geração automática (o período não é salvo)"><Icon name="check" className="h-3.5 w-3.5" />Salvar como modelo</Button>
+                    {modeloAtual && !modeloAtual.padrao && <Button variant="ghost" size="sm" onClick={excluirModeloRel}><Icon name="trash" className="h-3.5 w-3.5" />{MODELOS_RELATORIO_PADRAO.some((x) => x.nome === modeloAtual.nome) ? 'Restaurar padrão' : 'Excluir'}</Button>}
                   </div>
 
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -2596,34 +2961,54 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                       <select value={relCfg.de} onChange={(e) => set({ de: e.target.value })} className={sel}>{mesesEscolha.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}</select></div>
                     <div><Label className="text-xs">Até</Label>
                       <select value={relCfg.ate} onChange={(e) => set({ ate: e.target.value })} className={sel}>{mesesEscolha.map((m) => <option key={m} value={m}>{rotuloMesLongo(m)}</option>)}</select></div>
+                    <div><Label className="text-xs">Setor (vale para o relatório inteiro)</Label>
+                      <select value={relCfg.setor} onChange={(e) => set({ setor: e.target.value })} className={sel}><option value="">Todos</option><option value="PCP">PCP</option><option value="Almoxarifado">Almoxarifado</option></select></div>
                     <div><Label className="text-xs">Equipamento</Label>
                       <select value={relCfg.equip} onChange={(e) => set({ equip: e.target.value })} className={sel}><option value="">Todos</option>{equips.map((e) => <option key={e} value={e}>{e}</option>)}</select></div>
-                    <div><Label className="text-xs">Setor</Label>
-                      <select value={relCfg.setor} onChange={(e) => set({ setor: e.target.value })} className={sel}><option value="">Todos</option><option value="Almoxarifado">Almoxarifado</option><option value="PCP">PCP</option></select></div>
                     {podeVerOperador && <div><Label className="text-xs">Operador</Label>
                       <select value={relCfg.operador} onChange={(e) => set({ operador: e.target.value })} className={sel}><option value="">Todos</option>{operadores.map((o) => <option key={o} value={o}>{o}</option>)}</select></div>}
                     <div><Label className="text-xs">Orientação</Label>
-                      <select value={relCfg.orientacao} onChange={(e) => set({ orientacao: e.target.value })} className={sel}><option value="retrato">Retrato</option><option value="paisagem">Paisagem (melhor para tabelas largas)</option></select></div>
+                      <select value={relCfg.orientacao} onChange={(e) => set({ orientacao: e.target.value })} className={sel}><option value="paisagem">Paisagem</option><option value="retrato">Retrato</option></select></div>
+                    <label className="col-span-2 flex items-center gap-2 text-sm mt-5"><input type="checkbox" className="h-4 w-4" checked={relCfg.achados} onChange={(e) => set({ achados: e.target.checked })} />Abrir com "Principais achados" (resumo automático vs mês anterior)</label>
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <Label className="text-xs">Seções do relatório</Label>
+                      <Label className="text-xs">Seções por aba</Label>
                       <div className="flex gap-2 text-xs">
-                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: Object.fromEntries(visiveis.map((x) => [x.id, true])) }))}>marcar todas</button>
-                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: {} }))}>limpar</button>
+                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: Object.fromEntries(TODAS_SECOES_REL.map((id) => [id, true])) }))}>marcar todas</button>
+                        <button className="underline" onClick={() => setRelCfg((c) => ({ ...c, secoes: Object.fromEntries(TODAS_SECOES_REL.map((id) => [id, false])) }))}>limpar</button>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
-                      {visiveis.map((x) => (
-                        <label key={x.id} className={cn('flex items-start gap-2 rounded-md border p-2 cursor-pointer text-sm', relCfg.secoes[x.id] && 'border-accent bg-accent/5')}>
-                          <input type="checkbox" className="mt-0.5 h-4 w-4" checked={!!relCfg.secoes[x.id]} onChange={(e) => setSec(x.id, e.target.checked)} />
-                          <span><span className="font-medium">{x.label}</span>{x.restrito && <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted">admin/gestor</span>}<div className="text-xs text-muted-foreground">{x.desc}</div></span>
-                        </label>
-                      ))}
+                    <div className="space-y-3">
+                      {SECOES_RELATORIO.map((g) => {
+                        const itens = g.itens.filter((x) => !x.restrito || podeVerOperador);
+                        const todasMarcadas = itens.every((x) => relCfg.secoes[x.id]);
+                        return (
+                          <div key={g.aba} className="rounded-md border p-2.5">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-sm font-semibold">{g.aba}</span>
+                              <button className="text-xs underline" onClick={() => itens.forEach((x) => setSec(x.id, !todasMarcadas))}>{todasMarcadas ? 'desmarcar aba' : 'marcar aba'}</button>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                              {itens.map((x) => (
+                                <label key={x.id} className={cn('flex items-start gap-2 rounded-md border p-2 cursor-pointer text-sm', relCfg.secoes[x.id] && 'border-accent bg-accent/5')}>
+                                  <input type="checkbox" className="mt-0.5 h-4 w-4" checked={!!relCfg.secoes[x.id]} onChange={(e) => setSec(x.id, e.target.checked)} />
+                                  <span><span className="font-medium">{x.label}</span>{x.restrito && <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted">admin/gestor</span>}<div className="text-xs text-muted-foreground">{x.desc}</div></span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="text-[11px] text-muted-foreground mt-2">Setor e operador filtram as não conformidades: com esse recorte, um lote só conta como "com NC" se tiver NC daquele setor/operador. O recorte por equipamento filtra os lotes.</div>
+                    <div className="text-[11px] text-muted-foreground mt-2">Com um setor escolhido, todas as seções consideram só as NCs daquele setor (ex.: "lotes sem NC do PCP"). Todas as comparações com o mês anterior usam a <strong>taxa sobre os lotes conciliados</strong> — o número absoluto aparece junto, mas um mês com mais conciliações não parece pior só pelo volume.</div>
                   </div>
+
+                  <label className="flex items-start gap-2 text-sm rounded-md border p-2.5 bg-muted/20">
+                    <input type="checkbox" className="mt-0.5 h-4 w-4" checked={relCfg.automatico} onChange={(e) => set({ automatico: e.target.checked })} />
+                    <span><span className="font-medium">Gerar automaticamente todo mês</span><div className="text-xs text-muted-foreground">Ao salvar o modelo com esta opção, o serviço gera o PDF do mês anterior na pasta configurada em Configurações → Relatórios automáticos.</div></span>
+                  </label>
 
                   <div className="flex justify-end gap-2 pt-2 border-t">
                     <Button variant="outline" onClick={() => setRelOpen(false)} disabled={relGerando}>Cancelar</Button>
@@ -2659,9 +3044,6 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                   {exec.intervalo ? <>Período: <strong className="text-foreground">{exec.intervalo.nome}</strong> · comparação com o período anterior de mesma duração</> : <>Período: <strong className="text-foreground">todo o histórico</strong> (sem comparação)</>}
                 </div>
                 <div className="flex items-center gap-2 no-print">
-                  <Button onClick={abrirMontagemRelatorio} title="Montar o relatório para os gestores: escolha período, recortes e seções">
-                    <Icon name="download" className="h-4 w-4" />Relatório de qualidade (PDF)
-                  </Button>
                 </div>
               </div>
 
@@ -2757,6 +3139,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
                 <button key={k} onClick={() => setSetorAtacar(k)}
                   className={cn('text-xs px-3 py-1 rounded-full border transition-colors', setorAtacar === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}>{lbl}</button>
               ))}
+              <span className="text-xs font-semibold">{exec.lotesPer.length} lote(s) conciliado(s) no período ·</span>
               <span className="text-xs text-muted-foreground">{setorAtacar === 'todos' ? 'Todas as NCs do período.' : `Só NCs atribuídas ao ${setorAtacar}: etiquetas (externa e de acessório), lote/código de acessório entre RC e etiqueta e tempo dos Estágios 5 e 50 → Almoxarifado; OP, RC, identificação do produto e demais estágios → PCP.`}</span>
             </div>
             <Card className="mb-6">
@@ -2766,7 +3149,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
               </CardHeader>
               <CardContent>
                 {at.pareto.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma não conformidade no período.</div>
-                  : <div dangerouslySetInnerHTML={{ __html: svgPareto(at.pareto) }} />}
+                  : <div dangerouslySetInnerHTML={{ __html: svgPareto(at.pareto, 12, exec.lotesPer.length) }} />}
               </CardContent>
             </Card>
 
@@ -3175,6 +3558,44 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
           ))}
 
           {/* ===== Análise de tendência de correções (período personalizado) ===== */}
+          {dashTab === 'tendencia' && (() => {
+            const hoje = new Date();
+            const st = situacaoCausas({ lotes: baseQualidade.lotes, regs: baseQualidade.ncRegs, ateIdx: hoje.getFullYear() * 12 + hoje.getMonth() - 1 }); // até o último mês FECHADO
+            return (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="text-sm">Situação de cada tipo de erro — últimos 6 meses</CardTitle>
+                  <CardDescription>Em % dos lotes conciliados de cada mês (o volume não mascara a frequência). <strong>Subindo/caindo</strong> = últimos 3 meses × 3 anteriores · <strong>recorrente</strong> = apareceu em 3 ou mais meses · <strong>nova</strong> = só no mês atual · <strong>zerou</strong> = sumiu no mês atual. Considera até {rotuloMesLongo(st.meses[5])} (último mês fechado) — o mês em andamento não entra para não distorcer.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {st.linhas.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Sem não conformidades nos últimos 6 meses.</div> : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead><tr className="border-b text-left text-[10px] uppercase text-muted-foreground">
+                          <th className="py-2 px-2">Tipo de erro</th><th className="py-2 px-2">Situação</th><th className="py-2 px-2 text-right">Meses</th><th className="py-2 px-2 text-right">% 3 meses ant.</th><th className="py-2 px-2 text-right">% últimos 3</th><th className="py-2 px-2">6 meses</th>
+                        </tr></thead>
+                        <tbody>
+                          {st.linhas.slice(0, 25).map((x) => (
+                            <tr key={x.tipo} className="border-b">
+                              <td className="py-1.5 px-2">{x.tipo}</td>
+                              <td className="py-1.5 px-2 whitespace-nowrap">
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-white" style={{ background: SITUACAO_INFO[x.sit].cor }}>{SITUACAO_INFO[x.sit].lbl}</span>
+                                {x.recorrente && x.sit !== 'recorrente' && <span className="ml-1 text-[10px] font-semibold px-2 py-0.5 rounded-full text-white" style={{ background: SITUACAO_INFO.recorrente.cor }}>Recorrente</span>}
+                              </td>
+                              <td className="py-1.5 px-2 text-right">{x.mesesCom}/6</td>
+                              <td className="py-1.5 px-2 text-right">{fmtPct1(x.ant)}</td>
+                              <td className="py-1.5 px-2 text-right font-semibold">{fmtPct1(x.rec)}</td>
+                              <td className="py-1.5 px-2" title={st.meses.map((m, i) => `${rotuloMes(m)}: ${x.cont[i]} de ${st.nMes[m]} (${fmtPct1(x.pct[i])})`).join(' · ')}><div dangerouslySetInnerHTML={{ __html: svgMiniLinha(x.pct) }} /></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()}
           {dashTab === 'tendencia' && (
           <Card className="mb-6">
             <CardHeader>
@@ -3197,7 +3618,9 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
           </Card>
           )}
           {dashTab === 'tendencia' && (
-          <Card className="mt-6" id="chart-tendencia">
+          <details className="mt-6">
+          <summary className="cursor-pointer text-sm font-semibold text-muted-foreground mb-2">Consulta detalhada — correções por mês e reincidência (janela de 30 dias)</summary>
+          <Card className="mt-2" id="chart-tendencia">
             <CardHeader>
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
@@ -3292,6 +3715,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
               </div>
             </CardContent>
           </Card>
+          </details>
           )}
 
           {/* ===== Aba: Melhorias regulatórias ===== */}
@@ -18247,6 +18671,14 @@ ${parecer.parecer_tecnico ? `
       // Meta de aprovação de primeira (Dashboard / relatório). Padrão 90% (decisão 09/10/2026).
       const [metaAprov, setMetaAprov] = useState('90');
       const [salvandoMeta, setSalvandoMeta] = useState(false);
+      // Relatórios de qualidade automáticos (gerados pelo serviço todo mês).
+      const [relPasta, setRelPasta] = useState('');
+      const [relDia, setRelDia] = useState('1');
+      const [relHora, setRelHora] = useState('7');
+      const [relUltimo, setRelUltimo] = useState(null);
+      const [relMesManual, setRelMesManual] = useState(() => { const d = new Date(); const x = new Date(d.getFullYear(), d.getMonth() - 1, 1); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`; });
+      const [salvandoRel, setSalvandoRel] = useState(false);
+      const [gerandoRel, setGerandoRel] = useState(false);
       // NFs de venda (rastreabilidade série × nota) — pasta de rede e agendamento
       const [nfPasta, setNfPasta] = useState('');
       const [nfDia, setNfDia] = useState('1');
@@ -18260,7 +18692,7 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo', 'meta_aprovacao']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo', 'meta_aprovacao', 'relatorio_auto_pasta', 'relatorio_auto_dia', 'relatorio_auto_hora', 'relatorio_auto_ultimo']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
@@ -18273,6 +18705,10 @@ ${parecer.parecer_tecnico ? `
               if (map.nf_hora != null && map.nf_hora !== '') setNfHora(String(map.nf_hora));
               if (map.nf_ano_minimo != null && map.nf_ano_minimo !== '') setNfAnoMin(String(map.nf_ano_minimo));
               if (map.meta_aprovacao != null && map.meta_aprovacao !== '') setMetaAprov(String(map.meta_aprovacao));
+              if (map.relatorio_auto_pasta != null) setRelPasta(String(map.relatorio_auto_pasta));
+              if (map.relatorio_auto_dia) setRelDia(String(map.relatorio_auto_dia));
+              if (map.relatorio_auto_hora) setRelHora(String(map.relatorio_auto_hora));
+              if (map.relatorio_auto_ultimo) { try { setRelUltimo(JSON.parse(map.relatorio_auto_ultimo)); } catch (e) { /* ignora */ } }
             }
           } catch (e) { /* segue com o cache local */ }
         })();
@@ -18334,6 +18770,37 @@ ${parecer.parecer_tecnico ? `
         } catch (e) {
           toast.error('Erro ao salvar: ' + (e?.message || e));
         } finally { setSalvandoNf(false); }
+      };
+
+      const salvarRelAuto = async () => {
+        setSalvandoRel(true);
+        try {
+          const autor = perfil?.nome_completo || perfil?.email || null, agora = new Date().toISOString();
+          const dia = String(Math.min(28, Math.max(1, parseInt(relDia, 10) || 1))), hora = String(Math.min(23, Math.max(0, parseInt(relHora, 10) || 7)));
+          const { error } = await supabase.from('config_app').upsert([
+            { chave: 'relatorio_auto_pasta', valor: relPasta.trim(), updated_at: agora, updated_by: autor },
+            { chave: 'relatorio_auto_dia', valor: dia, updated_at: agora, updated_by: autor },
+            { chave: 'relatorio_auto_hora', valor: hora, updated_at: agora, updated_by: autor },
+          ], { onConflict: 'chave' });
+          if (error) throw error;
+          setRelDia(dia); setRelHora(hora);
+          registrarLog(perfil, 'editar_config', 'config', 'relatorio_auto', `${autor || 'Usuário'} configurou os relatórios automáticos (pasta ${relPasta.trim() || '—'}, dia ${dia}, ${hora}h)`);
+          toast.success('Relatórios automáticos configurados. O serviço gera os modelos marcados como "automático" todo mês.');
+        } catch (e) { toast.error('Erro ao salvar: ' + (e?.message || e)); }
+        finally { setSalvandoRel(false); }
+      };
+      const gerarRelAgora = async () => {
+        if (!relPasta.trim()) { toast.error('Informe e salve a pasta primeiro.'); return; }
+        setGerandoRel(true);
+        try {
+          const base = CONVERSAO_PDF_LOCAL.replace(/\/converter-pdf$/, '');
+          const resp = await fetch(`${base}/relatorios-mensais/gerar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mes: relMesManual }) });
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(j.error || `HTTP ${resp.status}`);
+          setRelUltimo(j);
+          toast.success(`${(j.arquivos || []).length} relatório(s) gerado(s) na pasta.`);
+        } catch (e) { toast.error('Não foi possível gerar: ' + (e?.message || e) + ' — o serviço foi reiniciado depois da atualização?'); }
+        finally { setGerandoRel(false); }
       };
 
       const salvarMeta = async () => {
@@ -18415,6 +18882,31 @@ ${parecer.parecer_tecnico ? `
                   <Input type="number" min="1" max="100" step="0.5" value={metaAprov} onChange={(e) => setMetaAprov(e.target.value)} disabled={!podeEditar} />
                 </div>
                 <Button onClick={salvarMeta} disabled={salvandoMeta || !podeEditar} title={podeEditar ? '' : 'Sem permissão para editar configurações'}><Icon name="check" className="h-4 w-4" />Salvar meta</Button>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Icon name="file" className="h-5 w-5 text-accent" />Relatórios de qualidade automáticos</CardTitle>
+                <CardDescription>Todo mês, a partir do dia e hora abaixo, o serviço gera o PDF do mês anterior para cada modelo marcado como "gerar automaticamente" (Dashboard → Gerar relatório) e grava em &lt;pasta&gt;\&lt;ano&gt;. Os 3 modelos padrão (Gestor PCP, Gestor Almoxarifado e Qualidade completo) já vêm marcados.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <div className="md:col-span-2"><Label>Pasta de destino</Label>
+                    <Input value={relPasta} onChange={(e) => setRelPasta(e.target.value)} placeholder="Ex.: \\192.168.20.252\qualidade\...\Relatórios mensais" disabled={!podeEditar} /></div>
+                  <div><Label>Dia do mês</Label><Input type="number" min="1" max="28" value={relDia} onChange={(e) => setRelDia(e.target.value)} disabled={!podeEditar} /></div>
+                  <div><Label>Hora (0–23)</Label><Input type="number" min="0" max="23" value={relHora} onChange={(e) => setRelHora(e.target.value)} disabled={!podeEditar} /></div>
+                </div>
+                <div className="flex items-end gap-2 flex-wrap">
+                  <Button onClick={salvarRelAuto} disabled={salvandoRel || !podeEditar}><Icon name="check" className="h-4 w-4" />Salvar</Button>
+                  <div className="flex items-end gap-2 ml-auto">
+                    <div><Label className="text-xs">Gerar agora para</Label>
+                      <Input type="month" value={relMesManual} onChange={(e) => setRelMesManual(e.target.value)} className="h-9" /></div>
+                    <Button variant="outline" onClick={gerarRelAgora} disabled={gerandoRel || !podeEditar}>{gerandoRel ? <><Icon name="loader" className="h-4 w-4 animate-spin" />Gerando…</> : <><Icon name="download" className="h-4 w-4" />Gerar agora</>}</Button>
+                  </div>
+                </div>
+                {relUltimo && <div className="text-xs text-muted-foreground rounded-md border p-2">Última geração: <strong>{relUltimo.mes}</strong> em {relUltimo.em ? new Date(relUltimo.em).toLocaleString('pt-BR') : '—'} ({relUltimo.origem === 'automatica' ? 'automática' : 'manual'}) — {(relUltimo.arquivos || []).length} arquivo(s){(relUltimo.arquivos || []).length ? <div className="mt-1 font-mono text-[11px] break-all">{relUltimo.arquivos.join(' · ')}</div> : null}</div>}
+                <p className="text-xs text-muted-foreground">Use o caminho UNC (\\servidor\...). A pasta precisa ser gravável pela conta que roda o serviço. Se o serviço estiver desligado no dia, a geração acontece assim que ele voltar (uma vez por mês).</p>
               </CardContent>
             </Card>
 
