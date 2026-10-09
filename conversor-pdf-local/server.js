@@ -834,7 +834,7 @@ async function gerarRelatoriosMensais({ mes, origem }) {
   if (!modelos.length) throw new Error('Nenhum modelo marcado como "gerar automaticamente".');
   const alvo = /^\d{4}-\d{2}$/.test(String(mes || '')) ? mes : mesAnteriorYM();
   const admin = supaAdmin();
-  const analises = await buscarTodasLinhas('analises', 'id, status, modelo, numero_op, numero_serie, created_at, parecer_completo, analise_origem_id, doc_substituido, motivo_reanalise, tipo_reanalise', 'created_at');
+  const analises = await buscarTodasLinhas('analises', 'id, status, modelo, numero_op, numero_serie, created_at, parecer_completo, analise_origem_id, origem_analise, doc_substituido, motivo_reanalise, tipo_reanalise', 'created_at');
   const { data: produtos } = await admin.from('produtos').select('id, modelo, codigo_sapiens, equipamento');
   let temposAtivos = [];
   try { const { data } = await admin.from('tempos_estagio').select('equipamento, estagio_numero, ativo').eq('ativo', true); temposAtivos = data || []; } catch (e) { /* tabela opcional */ }
