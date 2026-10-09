@@ -3864,8 +3864,17 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
       }
       m = t.match(/Modelo[\s:*]+([A-Za-z][\w\d\-\.]+)/i);
       if (m) r.modelo = m[1].trim().replace(/\*/g, '');
-      m = t.match(/N[º°o][\s*]*(?:de\s+)?S[ée]rie[\s:*]+([A-Z][A-Z0-9]{1,7}[-\s]?\d{4,6}[-\s]?\d+)/i);
-      if (m) r.serie = m[1].toUpperCase().replace(/\s/g, '');
+      // Nº de série: captura o VALOR INTEIRO escrito após o rótulo (até o fim da
+      // linha), sem exigir um formato. Antes o regex exigia "PREFIXO-AAAAMM-N" e,
+      // quando a etiqueta vinha com erro de digitação (ex.: "CMST-CMST-20269-1"),
+      // simplesmente não extraía nada — e a série da etiqueta sumia da comparação
+      // com a OP sem nenhum aviso (correção 09/10/2026).
+      m = tOriginal.replace(/\*+/g, '').match(/N[º°o]\s*(?:de\s+)?S[ée]rie\s*:?[ \t]*([^\n]+)/i);
+      if (m) {
+        const bruto = m[1].split(/\s{2,}|\b(?:Anvisa|Data\s+de|Prazo|Validade|Modelo)\b/i)[0]
+          .replace(/\s*-\s*/g, '-').trim().split(/\s+/)[0].toUpperCase();
+        if (/\d/.test(bruto)) r.serie = bruto;
+      }
       m = t.match(/Anvisa[\s:*]+(\d{9,15})/i);
       if (m) r.registroAnvisa = m[1].replace(/\s/g, '');
       m = t.match(/Data\s+de\s+Fabrica[çc][ãa]o[\s:*]+(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i);
@@ -6258,6 +6267,12 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
       const okSerie = [];
       const ressSerie = [];
       const ncSerie = [];
+      // Etiqueta anexada mas sem nº de série identificado: antes ela simplesmente
+      // saía da comparação e o lote passava. A série é obrigatória na etiqueta → NC.
+      if (et && !et.serie) {
+        ncSerie.push('nº de série não identificado na Etiqueta Externa');
+        apontar('nao_conforme', 1, 'Etiqueta Externa', 'Nº de série não identificado na etiqueta externa (campo ausente ou fora do padrão).', 'Conferir o campo "Nº de Série" da etiqueta: deve trazer exatamente a série da OP.', 'ISO 13485 §7.5.9 · RDC 751/2022');
+      }
       // Consistência
       if (seriesPresentes.length >= 2) {
         const todasIguais = seriesPresentes.every(([_, v]) => v === seriesPresentes[0][1]);
@@ -6266,7 +6281,18 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
         } else {
           const lista = seriesPresentes.map((s) => `${s[0]}: ${s[1]}`).join(' | ');
           ncSerie.push(`divergência entre documentos (${lista})`);
-          apontar('nao_conforme', 1, 'OP × Etiqueta × FORM', `Número de série diverge entre documentos: ${lista}.`, 'Corrigir o documento com erro antes da liberação.', 'ISO 13485 §7.5.9');
+          // Um apontamento POR documento que destoa da OP (a OP é a referência da
+          // série). Assim o documento — e o setor — a corrigir ficam explícitos, e a
+          // etiqueta não gera mais dois apontamentos para o mesmo erro (09/10/2026).
+          if (op?.serie) {
+            const nomeDoc = { Etiqueta: 'Etiqueta Externa', FORM: 'FORM-GQ-0047' };
+            for (const [doc, v] of seriesPresentes) {
+              if (doc === 'OP' || v === op.serie) continue;
+              apontar('nao_conforme', 1, nomeDoc[doc] || doc, `Nº de série ${doc === 'Etiqueta' ? 'da etiqueta' : 'do ' + doc} ("${v}") difere do da OP ("${op.serie}"). Deve ser exatamente igual ao da OP.`, `Corrigir ${doc === 'Etiqueta' ? 'a etiqueta' : 'o ' + doc} com a série da OP antes da liberação.`, 'ISO 13485 §7.5.9');
+            }
+          } else {
+            apontar('nao_conforme', 1, 'OP × Etiqueta × FORM', `Número de série diverge entre documentos: ${lista}.`, 'Corrigir o documento com erro antes da liberação.', 'ISO 13485 §7.5.9');
+          }
         }
       } else if (seriesPresentes.length === 1) {
         ressSerie.push(`série "${seriesPresentes[0][1]}" só foi extraída de ${seriesPresentes[0][0]}`);
@@ -6275,14 +6301,20 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
         apontar('nao_conforme', 1, 'Documentos do lote', 'Nº de série não extraído.', 'Confirmar que o número está legível em todos os documentos.', 'ISO 13485 §7.5.9');
       }
       // Convenção
-      if (produto?.serialPrefix && (op?.serie || et?.serie)) {
-        const s = op?.serie || et?.serie;
+      // Convenção: confere a série de CADA documento (antes só a da OP, ou a da
+      // etiqueta quando a OP não tinha) — uma etiqueta fora do padrão não escapa mais.
+      if (produto?.serialPrefix && seriesPresentes.length) {
         const re = new RegExp(`^${produto.serialPrefix}-?\\d{4}\\d{1,2}-?\\d+$`, 'i');
-        if (re.test(s)) {
+        const fora = seriesPresentes.filter(([, v]) => !re.test(v));
+        if (fora.length === 0) {
           okSerie.push(`convenção "${produto.serialPrefix}-AAAAMM-N" respeitada`);
         } else {
-          ncSerie.push(`fora da convenção "${produto.serialPrefix}-AAAAMM-N" da Ficha Mestre`);
-          apontar('nao_conforme', 1, 'Série', `Número de série "${s}" não segue a convenção da Ficha Mestre ("${produto.serialPrefix}-AAAAMM-N").`, 'Corrigir o número de série conforme a convenção da Ficha Mestre; se a convenção mudou, atualizar a Ficha e refazer a análise.', 'ISO 13485 §7.5.9');
+          ncSerie.push(`fora da convenção "${produto.serialPrefix}-AAAAMM-N" da Ficha Mestre (${fora.map(([d, v]) => `${d}: ${v}`).join(' | ')})`);
+          for (const [doc, v] of fora) {
+            // Já apontado acima como "difere da OP" — não duplica o mesmo erro.
+            if (doc !== 'OP' && op?.serie && v !== op.serie) continue;
+            apontar('nao_conforme', 1, doc === 'Etiqueta' ? 'Etiqueta Externa' : doc === 'FORM' ? 'FORM-GQ-0047' : 'OP', `Número de série "${v}" (${doc}) não segue a convenção da Ficha Mestre ("${produto.serialPrefix}-AAAAMM-N").`, 'Corrigir o número de série conforme a convenção da Ficha Mestre; se a convenção mudou, atualizar a Ficha e refazer a análise.', 'ISO 13485 §7.5.9');
+          }
         }
       }
       const serieStatus = ncSerie.length > 0 ? 'nao_conforme' : ressSerie.length > 0 ? 'ressalva' : 'conforme';
@@ -6831,7 +6863,7 @@ ${paraImpressao ? '<script>window.onload=function(){setTimeout(function(){window
             okCampos.push(`série "${et.serie}"`);
           } else {
             ncCampos.push(`série "${et.serie}" ≠ OP "${op.serie}"`);
-            apontar('nao_conforme', 1, 'Etiqueta × OP', `Número de série divergente.`, 'Corrigir o documento com erro.', 'ISO 13485 §7.5.9');
+            // Apontamento já emitido na verificação consolidada de nº de série (Camada 1).
           }
         }
         // 3. Fabricante (Razão Social) — Etiqueta × Ficha (NC)
