@@ -1390,6 +1390,44 @@
       return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" fill="none" stroke="${COR_NEUTRA}" stroke-width="1.6"/>${vals.map((v, i) => i === n - 1 ? `<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${COR_RUIM}"/>` : '').join('')}</svg>`;
     }
 
+    // ---- Ressalvas de tempo de estágio (11/10/2026) ----
+    // Lê o texto do apontamento: estágio, tempo total, direção e teto da faixa.
+    function parseApontTempo(desc) {
+      const d = String(desc || '');
+      const nf = (x) => parseFloat(String(x).replace(',', '.'));
+      const m = d.match(/Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)[\s\S]*?faixa esperada\s+([\d.,]+)\s*[–-]\s*([\d.,]+)\s*min/i);
+      if (m) return { est: +m[1], nomeEst: m[2], total: nf(m[3]), dir: m[4].toLowerCase(), teto: nf(m[6]) };
+      const m2 = d.match(/Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)/i);
+      if (!m2) return null;
+      const mt = d.match(/m[ée]dia\s+([\d.,]+)\s*min[\s\S]*?toler[âa]ncia\s+([\d.,]+)\s*%/i);
+      return { est: +m2[1], nomeEst: m2[2], total: nf(m2[3]), dir: m2[4].toLowerCase(), teto: mt ? nf(mt[1]) * (1 + nf(mt[2]) / 100) : null };
+    }
+    // Ocorrências de tempo de um lote, contadas na PRIMEIRA análise em que apareceram
+    // (com o tempo e o excesso originais), e a situação atual de cada uma:
+    // 'corrigida' (sumiu na análise vigente — OP reapontada), 'justificada' (RT
+    // justificou) ou 'aberta'. Antes só a análise vigente contava, e as corrigidas sumiam.
+    function ocorrenciasTempoDoLote(cadeia) {
+      const tempoAps = (an) => (an?.parecer_completo?.apontamentos || []).filter((ap) => ap.severidade === 'ressalva' && /tempo esperado/i.test(ap.descricao || ''));
+      const vig = cadeia[cadeia.length - 1];
+      const naVigente = new Map();
+      for (const ap of tempoAps(vig)) { const p = parseApontTempo(ap.descricao); if (p) naVigente.set(`${p.est}|${p.dir}`, ap); }
+      const vistos = new Set(), out = [];
+      for (const an of cadeia) {
+        for (const ap of tempoAps(an)) {
+          const p = parseApontTempo(ap.descricao);
+          if (!p) continue;
+          const k = `${p.est}|${p.dir}`;
+          if (vistos.has(k)) continue;
+          vistos.add(k);
+          const apVig = naVigente.get(k);
+          const situacao = !apVig ? 'corrigida' : (String(apVig.justificativa || '').trim() ? 'justificada' : 'aberta');
+          out.push({ an, ap, ...p, situacao, excesso: p.dir === 'acima' && p.teto ? (p.total - p.teto) / p.teto * 100 : null });
+        }
+      }
+      return out;
+    }
+    const SITUACAO_TEMPO = { corrigida: { lbl: 'Corrigida', cor: '#1E9DBA' }, justificada: { lbl: 'Justificada', cor: '#FFA300' }, aberta: { lbl: 'Em aberto', cor: '#E03131' } };
+
     /* ====================================================================
        BASE DE QUALIDADE — calcula, a partir do histórico completo de análises,
        o estado de cada LOTE (OP + série) e os registros por apontamento.
@@ -1471,25 +1509,19 @@
             doc, cat, tipo: cat === doc ? doc : `${doc} · ${cat}`, desc: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
             operador: operador || 'Não identificado', estagio: operador ? estAtrib : null });
         }
-        // Tempo de estágio: execuções (denominador) e ressalvas da análise vigente.
+        // Tempo de estágio: execuções (denominador, na análise original) e ocorrências.
         const vistos = new Set();
-        for (const cr of (final.parecer_completo?.cronologia || [])) {
+        for (const cr of (raiz.parecer_completo?.cronologia || final.parecer_completo?.cronologia || [])) {
           const est = estDaCrono(cr);
           if (isNaN(est) || vistos.has(est)) continue;
           vistos.add(est);
           if (ativos.size && !ativos.has(`${normEq(lote.equip)}|${est}`)) continue;
           execsTempo.push({ lote, mes: lote.mes, operador: nomeOperador(cr) || 'Não identificado', estagio: est, equip: lote.equip });
         }
-        for (const ap of (final.parecer_completo?.apontamentos || [])) {
-          if (ap.severidade !== 'ressalva' || !/tempo esperado/i.test(ap.descricao || '')) continue;
-          const d = String(ap.descricao);
-          const m = d.match(reTempo);
-          let est, nomeEst, total, dir, teto = null;
-          if (m) { est = +m[1]; nomeEst = m[2]; total = nf(m[3]); dir = m[4].toLowerCase(); teto = nf(m[6]); }
-          else { const m2 = d.match(reTempoCurto); if (!m2) continue; est = +m2[1]; nomeEst = m2[2]; total = nf(m2[3]); dir = m2[4].toLowerCase(); const mt = d.match(reMediaTol); if (mt) teto = nf(mt[1]) * (1 + nf(mt[2]) / 100); }
-          tempoRegs.push({ lote, mes: lote.mes, operador: executor(final, est) || 'Não identificado', estagio: est, nomeEst, equip: lote.equip, total, dir, teto,
-            setor: ap.setor_responsavel || ((est === 5 || est === 50) ? 'Almoxarifado' : 'PCP'),
-            excesso: dir === 'acima' && teto ? (total - teto) / teto * 100 : null });
+        for (const o of ocorrenciasTempoDoLote(cadeia)) {
+          tempoRegs.push({ lote, mes: lote.mes, operador: executor(o.an, o.est) || 'Não identificado', estagio: o.est, nomeEst: o.nomeEst, equip: lote.equip,
+            total: o.total, dir: o.dir, teto: o.teto, excesso: o.excesso, situacao: o.situacao,
+            setor: o.ap.setor_responsavel || ((o.est === 5 || o.est === 50) ? 'Almoxarifado' : 'PCP') });
         }
       }
       return { lotes, ncRegs, tempoRegs, execsTempo };
@@ -1720,14 +1752,14 @@
       const FAIXAS_EXC = [['0–50%', '#FCC419'], ['50–100%', '#FD7E14'], ['100–150%', '#F76707'], ['150–200%', '#E03131'], ['200–500%', '#A61E4D'], ['> 500% (provável erro de apontamento)', '#868E96']];
       const binExc = (x) => x < 50 ? 0 : x < 100 ? 1 : x < 150 ? 2 : x < 200 ? 3 : x <= 500 ? 4 : 5;
       const opsTempo = (() => {
-        const m = new Map(); const g = (n) => { if (!m.has(n)) m.set(n, { op: n, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0] }); return m.get(n); };
+        const m = new Map(); const g = (n) => { if (!m.has(n)) m.set(n, { op: n, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0], sit: { corrigida: 0, justificada: 0, aberta: 0 } }); return m.get(n); };
         for (const e of execP) g(e.operador).exec++;
-        for (const r of tempoP) { const o = g(r.operador); if (r.dir === 'abaixo') o.abaixo++; else { o.acima++; if (r.excesso != null) { o.exc.push(r.excesso); o.bins[binExc(r.excesso)]++; } } }
+        for (const r of tempoP) { const o = g(r.operador); if (r.situacao) o.sit[r.situacao]++; if (r.dir === 'abaixo') o.abaixo++; else { o.acima++; if (r.excesso != null) { o.exc.push(r.excesso); o.bins[binExc(r.excesso)]++; } } }
         return [...m.values()].filter((o) => o.acima + o.abaixo > 0).sort((a, b) => (b.acima + b.abaixo) - (a.acima + a.abaixo));
       })();
       if (sec.graf_tempo_op && podeOp) {
-        add('Gráficos', 'Ressalvas de tempo de estágio por operador', '"% fora" = apontamentos ÷ execuções do estágio pelo operador no período (só onde a checagem está ativa) — normaliza quem executa muito ou pouco.',
-          opsTempo.length ? `<table><thead><tr><th>Operador</th><th class="n">Acima do tempo</th><th class="n">Abaixo do tempo</th><th class="n">Execuções</th><th class="n">% fora</th></tr></thead><tbody>${opsTempo.map((o) => { const p = o.exec ? (o.acima + o.abaixo) / o.exec * 100 : null; return `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.acima}</strong></td><td class="n">${o.abaixo || ''}</td><td class="n">${o.exec || '—'}</td><td class="n" style="font-weight:600;color:${p != null && p >= 50 ? COR_RUIM : 'inherit'}">${p == null ? '—' : fmtPct1(p)}</td></tr>`; }).join('')}</tbody></table>` : vazio('Nenhuma ressalva de tempo no período.'));
+        add('Gráficos', 'Ressalvas de tempo de estágio por operador', 'Cada ocorrência conta uma vez, na análise em que apareceu — mesmo se depois foi corrigida (OP reapontada) ou justificada. "% fora" = ocorrências ÷ execuções do estágio pelo operador no período (só onde a checagem está ativa).',
+          opsTempo.length ? `<table><thead><tr><th>Operador</th><th class="n">Acima do tempo</th><th class="n">Abaixo do tempo</th><th class="n">Corrigidas</th><th class="n">Justificadas</th><th class="n">Em aberto</th><th class="n">Execuções</th><th class="n">% fora</th></tr></thead><tbody>${opsTempo.map((o) => { const p = o.exec ? (o.acima + o.abaixo) / o.exec * 100 : null; return `<tr><td>${escHtml(o.op)}</td><td class="n"><strong>${o.acima}</strong></td><td class="n">${o.abaixo || ''}</td><td class="n">${o.sit.corrigida || ''}</td><td class="n">${o.sit.justificada || ''}</td><td class="n" style="${o.sit.aberta ? `color:${COR_RUIM};font-weight:600` : ''}">${o.sit.aberta || ''}</td><td class="n">${o.exec || '—'}</td><td class="n" style="font-weight:600;color:${p != null && p >= 50 ? COR_RUIM : 'inherit'}">${p == null ? '—' : fmtPct1(p)}</td></tr>`; }).join('')}</tbody></table>` : vazio('Nenhuma ressalva de tempo no período.'));
       }
       if (sec.graf_tempo_excesso && podeOp) {
         const ls = opsTempo.filter((o) => o.exc.length);
@@ -2457,7 +2489,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           const ncAps = (ncAnalise?.parecer_completo?.apontamentos || [])
             .filter((ap) => ap.severidade === 'nao_conforme' && !ehErroOperador(ap));
           lotes.push({
-            chave: chaveLote(final), final, raiz, aberto, falhou, ncAps, ncAnalise,
+            chave: chaveLote(final), final, raiz, cadeia, aberto, falhou, ncAps, ncAnalise,
             ini: raiz.created_at, mes: ymDe(raiz.created_at),
             corrigidoEm: falhou && !aberto ? final.created_at : null,
             equip: equipDoLote(raiz.parecer_completo ? raiz : final),
@@ -2695,7 +2727,8 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         let semFaixa = 0;
         for (const l of lotesPer) {
           const an = l.final;
-          const crono = an?.parecer_completo?.cronologia || [];
+          // Execuções contadas na análise ORIGINAL (onde as ocorrências são contadas).
+          const crono = l.raiz?.parecer_completo?.cronologia || an?.parecer_completo?.cronologia || [];
           const vistos = new Set();
           for (const c of crono) {
             const est = Number(c.estagio_numero ?? parseInt(String(c.estagio || ''), 10));
@@ -2705,23 +2738,10 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             const op = nomeOperador(c) || 'Não identificado';
             const k = `${op}|${est}|${l.equip}`; execMap.set(k, (execMap.get(k) || 0) + 1);
           }
-          for (const ap of (an?.parecer_completo?.apontamentos || [])) {
-            if (ap.severidade !== 'ressalva' || !/tempo esperado/i.test(ap.descricao || '')) continue;
-            const m = String(ap.descricao).match(reTempo);
-            let est, nomeEst, total, dir, teto;
-            if (m) { est = +m[1]; nomeEst = m[2]; total = nf(m[3]); dir = m[4].toLowerCase(); teto = nf(m[6]); }
-            else {
-              const m2 = String(ap.descricao).match(/Est[áa]gio\s+(\d+)\s*\(([^)]*)\)\s*levou\s+([\d.,]+)\s*min[^,]*,\s*(acima|abaixo)/i);
-              const mt = String(ap.descricao).match(reMediaTol);
-              if (!m2) { semFaixa++; continue; }
-              est = +m2[1]; nomeEst = m2[2]; total = nf(m2[3]); dir = m2[4].toLowerCase();
-              teto = mt ? nf(mt[1]) * (1 + nf(mt[2]) / 100) : null;
-              if (teto == null) semFaixa++;
-            }
-            const operador = executorDoEstagio(an, est) || 'Não identificado';
-            tempoRegs.push({ operador, estagio: est, nomeEst, equip: l.equip, total, dir, teto,
-              excesso: dir === 'acima' && teto ? (total - teto) / teto * 100 : null,
-              op: an.numero_op, serie: an.numero_serie });
+          for (const o of ocorrenciasTempoDoLote(l.cadeia || [an])) {
+            if (o.teto == null) semFaixa++;
+            tempoRegs.push({ operador: executorDoEstagio(o.an, o.est) || 'Não identificado', estagio: o.est, nomeEst: o.nomeEst, equip: l.equip,
+              total: o.total, dir: o.dir, teto: o.teto, excesso: o.excesso, situacao: o.situacao, op: an.numero_op, serie: an.numero_serie });
           }
         }
         const tempo = {
@@ -3517,12 +3537,13 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             const regs = T.regs.filter((r) => (tempoEst === 'todos' || r.estagio === Number(tempoEst)) && (tempoEquip === 'todos' || r.equip === tempoEquip));
             const execs = T.execs.filter((e) => (tempoEst === 'todos' ? T.estagios.includes(e.estagio) : e.estagio === Number(tempoEst)) && (tempoEquip === 'todos' || e.equip === tempoEquip));
             const ops = new Map();
-            const garante = (nome) => { if (!ops.has(nome)) ops.set(nome, { operador: nome, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0] }); return ops.get(nome); };
+            const garante = (nome) => { if (!ops.has(nome)) ops.set(nome, { operador: nome, acima: 0, abaixo: 0, exec: 0, exc: [], bins: [0, 0, 0, 0, 0, 0], sit: { corrigida: 0, justificada: 0, aberta: 0 } }); return ops.get(nome); };
             for (const e of execs) garante(e.operador).exec += e.n;
             const FAIXAS = [['0–50%', '#FCC419'], ['50–100%', '#FD7E14'], ['100–150%', '#F76707'], ['150–200%', '#E03131'], ['200–500%', '#A61E4D'], ['> 500% (provável erro de apontamento)', '#868E96']];
             const binDe = (x) => x < 50 ? 0 : x < 100 ? 1 : x < 150 ? 2 : x < 200 ? 3 : x <= 500 ? 4 : 5;
             for (const r of regs) {
               const o = garante(r.operador);
+              if (r.situacao) o.sit[r.situacao]++;
               if (r.dir === 'abaixo') { o.abaixo++; continue; }
               o.acima++;
               if (r.excesso != null) { o.exc.push(r.excesso); o.bins[binDe(r.excesso)]++; }
@@ -3550,7 +3571,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                     <div className="flex items-start justify-between gap-3 flex-wrap">
                       <div>
                         <CardTitle className="text-sm">Ressalvas de tempo de estágio por operador</CardTitle>
-                        <CardDescription>Apontamentos de tempo fora da faixa no período do filtro do topo, atribuídos a quem executou o estágio. "% fora" = apontamentos ÷ execuções daquele estágio pelo operador (só onde a checagem de tempo está ativa) — compara quem executa muito com quem executa pouco.</CardDescription>
+                        <CardDescription>Cada ocorrência de tempo fora da faixa conta UMA vez, na análise em que apareceu — mesmo que depois tenha sido corrigida (OP reapontada) ou justificada pela RT. A barra mostra a situação atual. "% fora" = ocorrências ÷ execuções do estágio pelo operador (só onde a checagem está ativa).</CardDescription>
                       </div>
                       {filtros}
                     </div>
@@ -3559,7 +3580,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                     {lista.length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhuma ressalva de tempo no período{tempoEst !== 'todos' || tempoEquip !== 'todos' ? ' com esse filtro' : ''}.</div> : (
                       <div className="space-y-1.5">
                         <div className="grid grid-cols-12 gap-2 text-[10px] uppercase text-muted-foreground font-semibold pb-1 border-b">
-                          <div className="col-span-3">Operador</div><div className="col-span-5">Apontamentos (acima · abaixo)</div><div className="col-span-1 text-right">Acima</div><div className="col-span-1 text-right">Abaixo</div><div className="col-span-1 text-right">Execuções</div><div className="col-span-1 text-right">% fora</div>
+                          <div className="col-span-3">Operador</div><div className="col-span-5">Ocorrências por situação atual</div><div className="col-span-1 text-right">Acima</div><div className="col-span-1 text-right">Abaixo</div><div className="col-span-1 text-right">Execuções</div><div className="col-span-1 text-right">% fora</div>
                         </div>
                         {lista.map((o) => {
                           const pct = o.exec ? (o.acima + o.abaixo) / o.exec * 100 : null;
@@ -3567,8 +3588,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                             <div key={o.operador} className="grid grid-cols-12 gap-2 items-center text-xs">
                               <div className="col-span-3 truncate" title={o.operador}>{o.operador}</div>
                               <div className="col-span-5 flex h-4 rounded overflow-hidden bg-muted" style={{ width: `${(o.acima + o.abaixo) / maxA * 100}%`, minWidth: '4px' }}>
-                                <div style={{ width: `${o.acima / (o.acima + o.abaixo) * 100}%`, background: '#E03131' }} title={`${o.acima} acima do tempo`} />
-                                <div style={{ width: `${o.abaixo / (o.acima + o.abaixo) * 100}%`, background: '#1E9DBA' }} title={`${o.abaixo} abaixo do tempo`} />
+                                {['corrigida', 'justificada', 'aberta'].map((k) => o.sit[k] ? <div key={k} title={`${SITUACAO_TEMPO[k].lbl}: ${o.sit[k]}`} style={{ width: `${o.sit[k] / (o.acima + o.abaixo) * 100}%`, background: SITUACAO_TEMPO[k].cor }} className="text-[10px] text-white font-semibold flex items-center justify-center">{o.sit[k]}</div> : null)}
                               </div>
                               <div className="col-span-1 text-right font-semibold">{o.acima}</div>
                               <div className="col-span-1 text-right">{o.abaixo || ''}</div>
@@ -3577,7 +3597,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                             </div>
                           );
                         })}
-                        <div className="text-[11px] text-muted-foreground pt-2"><span className="inline-block h-2 w-2 rounded-sm mr-1" style={{ background: '#E03131' }} />acima do tempo (possível fim esquecido) · <span className="inline-block h-2 w-2 rounded-sm mx-1" style={{ background: '#1E9DBA' }} />abaixo do tempo (possível início/fim batido errado){T.semFaixa ? ` · ${T.semFaixa} apontamento(s) antigo(s) sem faixa registrada ficaram fora do cálculo de excesso` : ''}.</div>
+                        <div className="text-[11px] text-muted-foreground pt-2">{['corrigida', 'justificada', 'aberta'].map((k) => <span key={k} className="mr-3"><span className="inline-block h-2 w-2 rounded-sm mr-1" style={{ background: SITUACAO_TEMPO[k].cor }} />{SITUACAO_TEMPO[k].lbl}</span>)}· "Acima" = possível fim esquecido; "Abaixo" = possível início/fim batido errado{T.semFaixa ? ` · ${T.semFaixa} apontamento(s) antigo(s) sem faixa registrada ficaram fora do cálculo de excesso` : ''}.</div>
                       </div>
                     )}
                   </CardContent>
@@ -3586,7 +3606,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-sm">Quanto passou do tempo — por operador</CardTitle>
-                    <CardDescription>Cada apontamento "acima do tempo" classificado pelo excesso sobre o TETO da faixa aceita (ex.: teto 14 min, levou 21 min = 50% acima). Quem concentra em 0–100% está de fato demorando; 1 ou 2 casos em "&gt; 500%" costumam ser fim esquecido ou pausa não registrada. Mediana = excesso típico do operador.</CardDescription>
+                    <CardDescription>Cada ocorrência "acima do tempo" (contada na análise em que apareceu, com o tempo ORIGINAL, mesmo se depois corrigida ou justificada) classificada pelo excesso sobre o TETO da faixa aceita (ex.: teto 14 min, levou 21 min = 50% acima). Quem concentra em 0–100% está de fato demorando; 1 ou 2 casos em "&gt; 500%" costumam ser fim esquecido ou pausa não registrada. Mediana = excesso típico do operador.</CardDescription>
                   </CardHeader>
                   <CardContent>
                     {lista.filter((o) => o.exc.length).length === 0 ? <div className="text-sm text-muted-foreground text-center py-8">Nenhum apontamento acima do tempo no período.</div> : (() => {
