@@ -1351,12 +1351,26 @@
     ];
     // Aptidão de operador/inspetor não é tratada como NC — fora das contagens de erro.
     const ehErroOperador = (ap) => /aptid[ãa]o|n[ãa]o consta apto|operador n[ãa]o autorizado|inspetor n[ãa]o autorizado|quadro de operadores/i.test((ap?.descricao || '') + ' ' + (ap?.documento_afetado || ''));
+    // Análises MANUAIS gravam o TIPO de erro no lugar do documento (ex.:
+    // documento_afetado = "Cronologia incoerente"). Aqui o documento é inferido
+    // pelo tipo — senão o mesmo erro aparecia como dois tipos diferentes
+    // ("OP · Cronologia incoerente" × "Cronologia incoerente") e caía no setor errado.
+    const DOC_DO_TIPO_MANUAL = {
+      'cronologia incoerente': 'op', 'data': 'op', 'inspecao/medicao': 'op',
+      'registro anvisa': 'etx', 'modelo': 'etx', 'nome do produto': 'etx', 'cnpj': 'etx', 'fabricante': 'etx',
+      'endereco': 'etx', 'telefone': 'etx', 'responsavel tecnico': 'etx', 'crea': 'etx', 'responsavel legal': 'etx', 'validade': 'etx',
+      'acessorio': 'eac',
+    };
+    const TIPOS_MANUAIS_AMBIGUOS = new Set(['nº de serie', 'n° de serie', 'no de serie', 'lote/codigo', 'outros']);
+    const normTipo = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
     const classificarDocApontamento = (ap) => {
       const d = String(ap?.documento_afetado || '').toLowerCase();
       if (d.includes('etiqueta') && d.includes('acess')) return 'eac';
       if (d.includes('etiqueta')) return 'etx';
       if (/\brc\b|rela[çc][ãa]o de componentes/.test(d)) return 'rc';
       if (/\bop\b|ordem de produ/.test(d)) return 'op';
+      const manual = DOC_DO_TIPO_MANUAL[normTipo(ap?.documento_afetado)];
+      if (manual) return manual;
       return 'outros';
     };
     const categoriaDoTexto = (descricao, documento) => {
@@ -1368,7 +1382,7 @@
     // Setor dono da NC (decisão 09/10/2026): etiquetas e lote/código de acessório
     // (RC × etiqueta) → Almoxarifado; tempo dos Estágios 5/50 vem marcado no próprio
     // apontamento; o resto (OP, RC, identificação) → PCP.
-    const setorDoApontamento = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+    const setorDoApontamento = (ap) => ap.setor_responsavel || (['etx', 'eac'].includes(classificarDocApontamento(ap)) ? 'Almoxarifado' : 'PCP');
     const ondeDoApontamento = (ap) => {
       const doc = classificarDocApontamento(ap);
       if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
@@ -1389,6 +1403,7 @@
       if (b === 'rc') return 'RC';
       if (/form/i.test(ap.documento_afetado || '')) return 'FORM-GQ-0047';
       if (b === 'op') return 'OP';
+      if (TIPOS_MANUAIS_AMBIGUOS.has(normTipo(ap.documento_afetado))) return 'Registro manual';
       return String(ap.documento_afetado || 'Outros').trim() || 'Outros';
     };
     const ROTULO_SLOT = { op: 'OP', rc: 'RC', form_gq_0047: 'FORM-GQ-0047', etiqueta_externa: 'Etiqueta Externa', etiqueta_acessorio: 'Etiqueta de acessório', op_reprocesso: 'OP de Reprocesso', rnc: 'RNC' };
@@ -2605,7 +2620,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         const pareto = Object.entries(causasPer).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
 
         // Matriz setor × onde (estágio da OP ou documento). 1 contagem por lote e célula.
-        const setorDoAp = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+        const setorDoAp = setorDoApontamento; // regra única (motor)
         const ondeDoAp = (ap) => {
           const doc = classificarDocApontamento(ap);
           if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
@@ -2679,15 +2694,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         // atribuído: etiqueta → quem executou o Estágio 50 (Embalagem, onde a etiqueta
         // é aplicada); NC de um estágio específico → executor daquele estágio; demais →
         // executor do Estágio 60 (Conciliação), que regulariza a OP.
-        const docRotulo = (ap) => {
-          const b = classificarDocApontamento(ap);
-          if (b === 'etx') return 'Etiqueta Externa';
-          if (b === 'eac') return 'Etiqueta de acessório';
-          if (b === 'rc') return 'RC';
-          if (/form/i.test(ap.documento_afetado || '')) return 'FORM-GQ-0047';
-          if (b === 'op') return 'OP';
-          return String(ap.documento_afetado || 'Outros').trim() || 'Outros';
-        };
+        const docRotulo = rotuloDocApontamento; // regra única (motor)
         const nomeOperador = (c) => {
           if (!c) return null;
           if (c.operador_nome) return String(c.operador_nome).trim();
@@ -5030,7 +5037,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       return [...fichasMapeadas, ...semFichaMapeados];
     }
 
-    function detectarProdutoNoTexto(corpus, produtos, opDerivacao) {
+    function detectarProdutoNoTexto(corpus, produtos, opDerivacao, opInfo = null) {
       const corpusLow = corpus.toLowerCase();
       const derivAlvo = opDerivacao ? String(opDerivacao).padStart(3, '0') : null;
 
@@ -5083,6 +5090,29 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           derivacoesCadastradas: candidatos.map((p) => p.derivacao || '000'),
         };
       };
+
+      // 0) A OP manda (correção 11/10/2026). Antes a identificação varria o corpus
+      //    inteiro — OP + RC + FORM + ETIQUETAS — e o primeiro prefixo/código que
+      //    aparecesse vencia. Uma etiqueta de OUTRO modelo (ex.: HIS33 numa OP de
+      //    HIS28) fazia o agente identificar o produto errado e apontar divergências
+      //    na OP e na série, quando o erro era da etiqueta. Agora o código Sapiens e
+      //    a série DA OP têm prioridade; o corpus só é usado se a OP não os trouxer.
+      if (opInfo && opInfo.codigoSapiens) {
+        const cod = String(opInfo.codigoSapiens).trim().toUpperCase();
+        const candidatos = produtos.filter((q) => String(q.codigoSapiens || '').toUpperCase() === cod);
+        const res = refinarPorDerivacao(candidatos, `Código Sapiens da OP "${cod}"`);
+        if (res) return res;
+      }
+      if (opInfo && opInfo.serie) {
+        const serieOp = String(opInfo.serie).toUpperCase();
+        const prefixos = produtos.filter((p) => p.serialPrefix && new RegExp(`^${p.serialPrefix}[-\\s]?\\d{4}\\d{1,2}[-\\s]?\\d+$`, 'i').test(serieOp))
+          .sort((a, b) => String(b.serialPrefix).length - String(a.serialPrefix).length);
+        if (prefixos.length) {
+          const pref = prefixos[0].serialPrefix;
+          const res = refinarPorDerivacao(produtos.filter((q) => q.serialPrefix === pref), `Prefixo de série da OP "${pref}"`);
+          if (res) return { ...res, serie: serieOp };
+        }
+      }
 
       // 1) Match por prefixo de série (mais específico)
       for (const p of produtos) {
@@ -8136,7 +8166,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
 
       // 2) Carregar produtos com fichas mestres do Supabase
       const produtos = await loadProdutosComFichas();
-      const identificacao = detectarProdutoNoTexto(corpus, produtos, docs.op?.derivacao);
+      const identificacao = detectarProdutoNoTexto(corpus, produtos, docs.op?.derivacao, docs.op);
       const produto = identificacao?.produto || null;
 
       // BLOQUEIO: análise não prossegue sem produto identificado E sem ficha mestre cadastrada.
@@ -8733,7 +8763,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           ].join('\n\n');
           const produtos = await loadProdutosComFichas();
           const opParsed = parseOP(slots.op?.text || '');
-          const ident = detectarProdutoNoTexto(corpus, produtos, opParsed?.derivacao);
+          const ident = detectarProdutoNoTexto(corpus, produtos, opParsed?.derivacao, opParsed);
           const produto = ident?.produto || null;
 
           if (kind === 'form') {
