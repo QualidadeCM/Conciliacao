@@ -1342,7 +1342,7 @@
       { nome: 'Data',                re: /\bdata\b/i },
       { nome: 'Validade',            re: /validade/i },
       { nome: 'Lote/Código',         re: /\b(lote|c[óo]digo)\b/i },
-      { nome: 'Acessório',           re: /acess[óo]rio/i },
+      { nome: 'Acessório',           re: /acess[óo]rio|grupo alternativo/i },
       { nome: 'Componente/RC',       re: /\bcomponente|rela[çc][ãa]o de componentes|\brc\b/i },
       { nome: 'Reprovação em inspeção', re: /reprova/i },
       { nome: 'Cópia/revisão do FORM', re: /c[óo]pia controlada|revis[ãa]o do form/i },
@@ -1383,7 +1383,10 @@
     // Setor dono da NC (decisão 09/10/2026): etiquetas e lote/código de acessório
     // (RC × etiqueta) → Almoxarifado; tempo dos Estágios 5/50 vem marcado no próprio
     // apontamento; o resto (OP, RC, identificação) → PCP.
-    const setorDoApontamento = (ap) => ap.setor_responsavel || (['etx', 'eac'].includes(classificarDocApontamento(ap)) ? 'Almoxarifado' : 'PCP');
+    // Acessório faltando na RC / grupo alternativo sem variante na RC = baixa de
+    // acessório, feita pelo Almoxarifado (11/10/2026) — também para análises antigas.
+    const ehBaixaAcessorio = (ap) => /acess[óo]rios?\s+obrigat[óo]rios?\s+faltando\s+na\s+rc|nenhuma\s+variante\s+presente\s+na\s+rc/i.test(ap?.descricao || '');
+    const setorDoApontamento = (ap) => ap.setor_responsavel || ((['etx', 'eac'].includes(classificarDocApontamento(ap)) || ehBaixaAcessorio(ap)) ? 'Almoxarifado' : 'PCP');
     const ondeDoApontamento = (ap) => {
       const doc = classificarDocApontamento(ap);
       if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
@@ -6752,8 +6755,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             `Acessório(s) obrigatório(s) AUSENTE(S) na RC: ${obrigatorioSemRC.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}.`);
           apontar('nao_conforme', 2, 'RC × Ficha Mestre',
             `Acessórios obrigatórios faltando na RC: ${obrigatorioSemRC.map((a) => a.descricao).join(', ')}.`,
-            'Garantir que todos os acessórios obrigatórios constem na embalagem antes da liberação. Verificar OP e RC para confirmar apontamento correto.',
-            'Ficha Mestre seção 4');
+            'Garantir que todos os acessórios obrigatórios constem na embalagem antes da liberação. Verificar a baixa do acessório na RC (Almoxarifado).',
+            'Ficha Mestre seção 4',
+            { setorResponsavel: 'Almoxarifado' }); // baixa de acessório = Almoxarifado (decisão 11/10/2026)
         }
 
         // (1b) Está na RC mas sem etiqueta anexada — NC bloqueadora.
@@ -6848,8 +6852,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               `Nenhuma variante do grupo "${g.nome}" foi identificada na RC — pelo menos uma é obrigatória. Opções cadastradas: ${g.membros.map((a) => `${a.descricao} (${a.codigoSapiens})`).join('; ')}.`);
             apontar('nao_conforme', 2, 'RC × Ficha Mestre',
               `Grupo alternativo "${g.nome}": nenhuma variante presente na RC. Pelo menos uma deve constar e ter a etiqueta anexada para conferência.`,
-              'Confirmar na OP/RC qual variante foi utilizada neste lote e garantir que conste na RC com a etiqueta correspondente anexada.',
-              'Ficha Mestre seção 3 (acessórios alternativos)');
+              'Confirmar qual variante foi utilizada neste lote e garantir a baixa dela na RC (Almoxarifado), com a etiqueta correspondente anexada.',
+              'Ficha Mestre seção 3 (acessórios alternativos)',
+              { setorResponsavel: 'Almoxarifado' }); // baixa de acessório = Almoxarifado
           }
           // NC — grupo obrigatório que pode sair na NF, mas sem etiqueta anexada para conferir
           for (const g of gruposNFsemEtq) {
@@ -11393,7 +11398,7 @@ ${parecer.parecer_tecnico ? `
             // O canal segue o RESPONSÁVEL: setor_responsavel explícito (ex.: tempo do
             // estágio → Almoxarifado), senão o dono do documento (etiqueta →
             // Almoxarifado; OP/RC/FORM/etc → PCP).
-            const responsavel = ap.setor_responsavel || responsavelPorSlot(slotKey);
+            const responsavel = ap.setor_responsavel || (ehBaixaAcessorio(ap) ? 'Almoxarifado' : responsavelPorSlot(slotKey));
             const setor = responsavel;
             return {
               codigo: ap.codigo || (ehRessalva ? 'R' : 'NC'),
@@ -13569,7 +13574,7 @@ ${parecer.parecer_tecnico ? `
         return n ? n[1] : '';
       };
       const templateProblema = (desc, doc) => (doc || '') + ' :: ' + String(desc || '').replace(/\d+([.,]\d+)?/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 160);
-      const setorDe = (ap) => ap.setor_responsavel || (/etiqueta/i.test(ap.documento_afetado || '') ? 'Almoxarifado' : 'PCP');
+      const setorDe = setorDoApontamento; // regra única (motor)
       // Reconhece o apontamento de TEMPO de estágio para montar um cabeçalho específico
       // (estágio + faixa esperada) e agrupar sem misturar estágios/faixas diferentes.
       const parseApontTempo = (desc) => {
