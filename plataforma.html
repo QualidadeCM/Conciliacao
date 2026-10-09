@@ -1325,6 +1325,7 @@
 
     // ---- Classificação dos apontamentos (única fonte: Dashboard, relatório e serviço) ----
     const CATEGORIAS_ERRO = [
+      { nome: 'Apontamento manual (código de barras)', re: /c[óo]digos?\s+de\s+barras\s+de\s+apontamento\s+manual|apontamento manual \(c[óo]digo de barras\)/i },
       { nome: 'Registro ANVISA',     re: /anvisa/i },
       { nome: 'Modelo',              re: /\bmodelo\b/i },
       { nome: 'Nome do produto',     re: /\bnome do produto|fam[íi]lia\b/i },
@@ -1388,7 +1389,8 @@
       if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
       if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
       if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
-      let est = ap.estagio_responsavel;
+      let est = estagioCausaDoApontamento(ap);
+      if (est == null) est = ap.estagio_responsavel;
       if (est == null) { const ir = inspetorResponsavel(ap, null); if (ir && ir.estagio != null) est = ir.estagio; }
       if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
       if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
@@ -1435,6 +1437,18 @@
       const x = (i) => 3 + i * (W - 6) / Math.max(1, n - 1), y = (v) => H - 3 - v / mx * (H - 6);
       const d = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
       return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" fill="none" stroke="${COR_NEUTRA}" stroke-width="1.6"/>${vals.map((v, i) => i === n - 1 ? `<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${COR_RUIM}"/>` : '').join('')}</svg>`;
+    }
+
+    // ---- Estágio que CAUSOU a NC (11/10/2026) ----
+    // Código de barras de apontamento manual ("Início/Fim"/"Pausa") num estágio:
+    // a causa é de quem executou AQUELE estágio (início em dobro / pausa aberta);
+    // a correção continua com o PCP (Estágio 60). Novas análises gravam
+    // estagio_causa; nas antigas, o estágio é lido do texto.
+    function estagioCausaDoApontamento(ap) {
+      if (!ap) return null;
+      if (ap.estagio_causa != null && !isNaN(Number(ap.estagio_causa))) return Number(ap.estagio_causa);
+      const m = String(ap.descricao || '').match(/Est[áa]gio\s+(\d+)[^.]*?c[óo]digos?\s+de\s+barras\s+de\s+apontamento\s+manual/i);
+      return m ? Number(m[1]) : null;
     }
 
     // ---- Responsável por NC de CRONOLOGIA INCOERENTE (11/10/2026) ----
@@ -1570,6 +1584,7 @@
           const b = classificarDocApontamento(ap);
           let est;
           if (b === 'etx' || b === 'eac') est = 50;
+          else if (estagioCausaDoApontamento(ap) != null) est = estagioCausaDoApontamento(ap);
           else if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
           else if (Array.isArray(ap.estagios) && ap.estagios.length && !isNaN(parseInt(String(ap.estagios[0]), 10))) est = parseInt(String(ap.estagios[0]), 10);
           else est = 60;
@@ -2621,19 +2636,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
 
         // Matriz setor × onde (estágio da OP ou documento). 1 contagem por lote e célula.
         const setorDoAp = setorDoApontamento; // regra única (motor)
-        const ondeDoAp = (ap) => {
-          const doc = classificarDocApontamento(ap);
-          if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
-          if (doc === 'eac') return { k: 'z2', lbl: 'Etiqueta de acessório' };
-          if (doc === 'rc') return { k: 'z3', lbl: 'RC' };
-          let est = ap.estagio_responsavel;
-          if (est == null) { const ir = inspetorResponsavel(ap, null); if (ir && ir.estagio != null) est = ir.estagio; }
-          if (est == null && Array.isArray(ap.estagios) && ap.estagios.length) est = parseInt(String(ap.estagios[0]), 10);
-          if (est != null && !isNaN(est)) return { k: `e${String(est).padStart(3, '0')}`, lbl: `Est. ${est}` };
-          if (/form/i.test(ap.documento_afetado || '')) return { k: 'z4', lbl: 'FORM-GQ-0047' };
-          if (doc === 'op') return { k: 'e999', lbl: 'OP (geral)' };
-          return { k: 'z9', lbl: 'Outros' };
-        };
+        const ondeDoAp = ondeDoApontamento; // regra única (motor)
         const matrizMap = new Map(), colunasMap = new Map();
         for (const l of lotesPer) {
           if (!l.falhou) continue;
@@ -2713,6 +2716,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             const b = classificarDocApontamento(ap);
             let est;
             if (b === 'etx' || b === 'eac') est = 50;
+            else if (estagioCausaDoApontamento(ap) != null) est = estagioCausaDoApontamento(ap);
             else if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
             else if (Array.isArray(ap.estagios) && ap.estagios.length && !isNaN(parseInt(String(ap.estagios[0]), 10))) est = parseInt(String(ap.estagios[0]), 10);
             else est = 60;
@@ -6563,6 +6567,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         // quando o documento afetado é a OP (que por padrão iria ao PCP).
         if (extra && extra.setorResponsavel) ap.setor_responsavel = String(extra.setorResponsavel);
         if (extra && extra.estagioResponsavel != null) ap.estagio_responsavel = Number(extra.estagioResponsavel);
+        // Estágio que CAUSOU (ex.: código de barras de apontamento manual) — usado nas
+        // estatísticas por operador; a correção segue a regra de estagio_responsavel/60.
+        if (extra && extra.estagioCausa != null) ap.estagio_causa = Number(extra.estagioCausa);
         // Cronologia incoerente: o responsável é o inspetor da inspeção fora de ordem.
         if (extra && extra.inspetorResponsavel) ap.inspetor_responsavel = String(extra.inspetorResponsavel);
         if (extra && extra.estagioInspecao != null) ap.estagio_inspecao = Number(extra.estagioInspecao);
@@ -7225,8 +7232,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         for (const e of op.estagiosComBarcode) {
           apontar('nao_conforme', 1, 'OP',
             `O Estágio ${e.numero} (${e.nome}) apresenta os códigos de barras de apontamento manual "Início/Fim" e "Pausa", indicando que não foi finalizado corretamente — ou dois operadores diferentes iniciaram o mesmo estágio, ou uma pausa foi aberta e não encerrada.`,
-            'Verificar com o PCP o que ocasionou o apontamento manual e regularizar a finalização do estágio na OP antes da liberação do lote.',
-            'ISO 13485 §7.5.1 (controle da produção)');
+            `Verificar com o PCP o que ocasionou o apontamento manual e regularizar a finalização do Estágio ${e.numero} na OP antes da liberação do lote (correção por quem executou a Conciliação — Estágio 60; causa: quem executou o Estágio ${e.numero}).`,
+            'ISO 13485 §7.5.1 (controle da produção)',
+            { estagios: [e.numero], estagioCausa: e.numero });
         }
       } else if (op) {
         add(C1, 'Finalização correta dos estágios (apontamento manual)', 'conforme',
