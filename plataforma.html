@@ -2260,6 +2260,10 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         }
       }
       const totalStatus = categoriasLote.conformes + categoriasLote.ressalvas + categoriasLote.corrigidas;
+      // Card "Conciliações corrigidas" = mesma régua do donut (NC corrigida; ressalva
+      // corrigida conta como conforme). Antes contava qualquer correção de documento,
+      // inclusive de ressalva, e não batia com a fatia vermelha (04/11/2026).
+      const ncAbertasPeriodo = lotesFinais.filter((a) => a.status === 'nao_conforme').length;
 
       // === Principais tipos de erro encontrados (decisão 18/06/2026) ===
       // Categoriza apontamentos NC e ressalva pelo campo afetado, lendo a descricao
@@ -3461,9 +3465,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             <MetricCard
               icon="upload"
               label="Conciliações corrigidas"
-              value={loading ? '…' : totalCorrigidas}
+              value={loading ? '…' : (categoriasLote.corrigidas - ncAbertasPeriodo)}
               accent="default"
-              hint={docTipoMaisCorrigido ? `Documento mais corrigido: ${SLOT_LABELS[docTipoMaisCorrigido[0]] || docTipoMaisCorrigido[0]} (${docTipoMaisCorrigido[1]}×)` : 'Sem correções no período'}
+              hint={`NCs já corrigidas${ncAbertasPeriodo ? ` · + ${ncAbertasPeriodo} ainda em aberto (= ${categoriasLote.corrigidas} na fatia "Precisaram de correção")` : ''}${docTipoMaisCorrigido ? ` · documento mais corrigido: ${SLOT_LABELS[docTipoMaisCorrigido[0]] || docTipoMaisCorrigido[0]} (${docTipoMaisCorrigido[1]}×)` : ''}`}
             />
           </div>
 
@@ -14927,36 +14931,43 @@ ${parecer.parecer_tecnico ? `
         return { etiqueta, op };
       };
 
-      const filtered = useMemo(() => {
-        // 1) Filtra por período (mês/ano/tudo)
-        const dentroPeriodo = (a) => {
-          if (filtroPeriodo === 'tudo') return true;
-          if (!a.created_at) return false;
-          const d = new Date(a.created_at);
-          if (d.getFullYear() !== filtroAno) return false;
-          if (filtroPeriodo === 'mes' && d.getMonth() + 1 !== filtroMes) return false;
-          return true;
-        };
-        const dentroFiltro = analises.filter(dentroPeriodo);
-        // 2) Conjunto de IDs de análises ORIGINAIS que foram re-analisadas
-        const idsCorrigidas = new Set(
-          dentroFiltro.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id)
-        );
-        // 3) Agrupa por chave (numero_op + numero_serie), pega a mais recente
+      // Um LOTE por linha, no estado ATUAL (análise vigente), pertencendo ao período
+      // da sua 1ª análise — o mesmo critério do Dashboard (alinhado 04/11/2026).
+      // Antes o filtro pegava qualquer análise feita no mês: um lote conciliado em
+      // setembro e reanalisado em outubro aparecia em outubro (e o status mostrado
+      // era o do fim do mês filtrado, não o atual).
+      const lotesVigentes = useMemo(() => {
+        const idsSubst = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
+        const byId = new Map(analises.map((a) => [a.id, a]));
         const porLote = new Map();
-        for (const a of dentroFiltro) {
-          if (idsCorrigidas.has(a.id)) continue;
+        for (const a of analises) {
+          if (idsSubst.has(a.id)) continue;
           const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
           const atual = porLote.get(chave);
-          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) {
-            porLote.set(chave, a);
-          }
+          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(chave, a);
         }
+        return [...porLote.values()].map((a) => {
+          let c = a, g = 20;
+          while (c?.analise_origem_id && g-- > 0) { const p = byId.get(c.analise_origem_id); if (!p) break; c = p; }
+          return { ...a, _data1a: c?.created_at || a.created_at };
+        });
+      }, [analises]);
+      const dentroPeriodoLote = (a) => {
+        if (filtroPeriodo === 'tudo') return true;
+        if (!a._data1a) return false;
+        const d = new Date(a._data1a);
+        if (d.getFullYear() !== filtroAno) return false;
+        if (filtroPeriodo === 'mes' && d.getMonth() + 1 !== filtroMes) return false;
+        return true;
+      };
+
+      const filtered = useMemo(() => {
+        const porLote = new Map(lotesVigentes.filter(dentroPeriodoLote).map((a) => [a.id, a]));
         // Ordenação dinâmica (clique no cabeçalho)
         const STATUS_ORDER = { conforme: 0, ressalva: 1, nao_conforme: 2 };
         const getVal = (a) => {
           switch (sort.campo) {
-            case 'data':         return new Date(a.created_at || 0).getTime();
+            case 'data':         return new Date(a._data1a || a.created_at || 0).getTime();
             case 'op':           return parseInt((a.numero_op || '').replace(/\D/g, ''), 10) || 0;
             case 'equipamento':  return (a.parecer_completo?.produto?.familia
                                        || a.parecer_completo?.produto?.equipamento
@@ -15028,31 +15039,13 @@ ${parecer.parecer_tecnico ? `
           (a.numero_serie || '').toLowerCase().includes(q) ||
           (a.modelo || '').toLowerCase().includes(q)
         );
-      }, [analises, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, filtroProblema, nfPorSerie, sort]);
+      }, [lotesVigentes, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, filtroProblema, nfPorSerie, sort]);
 
       // Contador de pacotes pendentes (apenas análises do agente, com período aplicado)
       const totalPendentes = useMemo(() => {
-        const dentroPeriodo = (a) => {
-          if (filtroPeriodo === 'tudo') return true;
-          if (!a.created_at) return false;
-          const d = new Date(a.created_at);
-          if (d.getFullYear() !== filtroAno) return false;
-          if (filtroPeriodo === 'mes' && d.getMonth() + 1 !== filtroMes) return false;
-          return true;
-        };
-        // MESMA deduplicação da lista: exclui substituídas e mantém a mais recente por
-        // (OP|série). Assim o contador do "Só pendentes" bate com o que a lista mostra.
-        const dentroFiltro = analises.filter(dentroPeriodo);
-        const idsCorrigidas = new Set(dentroFiltro.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
-        const porLote = new Map();
-        for (const a of dentroFiltro) {
-          if (idsCorrigidas.has(a.id)) continue;
-          const chave = `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
-          const atual = porLote.get(chave);
-          if (!atual || new Date(a.created_at) > new Date(atual.created_at)) porLote.set(chave, a);
-        }
-        return [...porLote.values()].filter((a) => a.origem_analise !== 'manual' && !a.pacote_zip_path).length;
-      }, [analises, filtroPeriodo, filtroAno, filtroMes]);
+        // MESMO critério da lista (lote vigente, no mês da 1ª análise).
+        return lotesVigentes.filter(dentroPeriodoLote).filter((a) => a.origem_analise !== 'manual' && !a.pacote_zip_path).length;
+      }, [lotesVigentes, filtroPeriodo, filtroAno, filtroMes]);
 
       // Lotes CONFORMES (ou conforme corrigido) sem pacote — candidatos ao download em lote.
       const pendentesConformes = useMemo(() => {
@@ -15146,7 +15139,7 @@ ${parecer.parecer_tecnico ? `
           const wb = new window.ExcelJS.Workbook();
           const ws = wb.addWorksheet('Histórico');
           ws.columns = [
-            { header: 'Data', key: 'data', width: 14 },
+            { header: 'Data (1ª análise)', key: 'data', width: 16 },
             { header: 'Nº OP', key: 'op', width: 10 },
             { header: 'Nº Série', key: 'serie', width: 22 },
             { header: 'Modelo', key: 'modelo', width: 20 },
@@ -15163,7 +15156,7 @@ ${parecer.parecer_tecnico ? `
           for (const a of filtered) {
             const cInfo = getCorrecaoInfo(a, analises);
             ws.addRow({
-              data: formatDate(a.created_at),
+              data: formatDate(a._data1a || a.created_at),
               op: a.numero_op || '',
               serie: a.numero_serie || '',
               modelo: a.modelo || '',
@@ -15235,7 +15228,7 @@ ${parecer.parecer_tecnico ? `
             const nfs = nfPorSerie.get(a.numero_serie) || [];
             const equip = pc.produto?.familia || pc.produto?.equipamento || a.nome_produto || '';
             const base = {
-              data: formatDate(a.created_at),
+              data: formatDate(a._data1a || a.created_at),
               dias,
               op: a.numero_op || '',
               serie: a.numero_serie || '',
@@ -15634,7 +15627,7 @@ ${parecer.parecer_tecnico ? `
                         {batchAtivo ? (<><Icon name="loader" className="h-3.5 w-3.5 animate-spin" />Baixando…</>) : (<><Icon name="download" className="h-3.5 w-3.5" />Baixar pendentes na pasta{pendentesConformes.length > 0 ? ` (${pendentesConformes.length})` : ''}</>)}
                       </Button>
                     )}
-                    <span className="text-xs text-muted-foreground ml-auto font-medium">{filtered.length} análise(s)</span>
+                    <span className="text-xs text-muted-foreground ml-auto font-medium" title="Um lote por linha, no estado atual; o período considera a data da 1ª análise (reanálises não contam de novo)">{filtered.length} lote(s) conciliado(s)</span>
                   </div>
                 </div>
                 );
@@ -15694,7 +15687,12 @@ ${parecer.parecer_tecnico ? `
                           className="border-b hover:bg-muted/50 transition-colors cursor-pointer"
                           onClick={() => a.parecer_completo && setViewing(a)}
                         >
-                          <td className="px-3 py-3">{formatDate(a.created_at)}</td>
+                          <td className="px-3 py-3">
+                            {formatDate(a._data1a || a.created_at)}
+                            {a._data1a && String(a._data1a).slice(0, 10) !== String(a.created_at).slice(0, 10) && (
+                              <div className="text-[10px] text-muted-foreground" title="Data da reanálise/correção que gerou o estado atual">atualizada em {formatDate(a.created_at)}</div>
+                            )}
+                          </td>
                           <td className="px-3 py-3 font-mono text-xs">{a.numero_op || '—'}</td>
                           <td className="px-3 py-3">{a.nome_produto || a.modelo || '—'}</td>
                           <td className="px-3 py-3 font-mono text-xs">{a.numero_serie || '—'}</td>
