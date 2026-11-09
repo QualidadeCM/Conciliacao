@@ -1516,12 +1516,77 @@
     }
     const SITUACAO_TEMPO = { corrigida: { lbl: 'Corrigida', cor: '#1E9DBA' }, justificada: { lbl: 'Justificada', cor: '#FFA300' }, aberta: { lbl: 'Em aberto', cor: '#E03131' } };
 
+    // ---- Acompanhamento das correções enviadas aos setores (06/11/2026) ----
+    // Dias ÚTEIS = segunda a sexta (feriados não são descontados).
+    function somarDiasUteis(data, n) {
+      const d = new Date(data);
+      let faltam = n;
+      while (faltam > 0) { d.setDate(d.getDate() + 1); const w = d.getDay(); if (w !== 0 && w !== 6) faltam--; }
+      return d;
+    }
+    // Tempo útil decorrido entre duas datas, em dias (fracionário; fim de semana não conta).
+    function diasUteisEntre(a, b) {
+      let ini = new Date(a), fim = new Date(b);
+      if (!(fim > ini)) return 0;
+      let ms = 0;
+      while (ini < fim) {
+        const prox = new Date(ini.getFullYear(), ini.getMonth(), ini.getDate() + 1);
+        const corte = prox < fim ? prox : fim;
+        const w = ini.getDay();
+        if (w !== 0 && w !== 6) ms += corte - ini;
+        ini = corte;
+      }
+      return ms / 864e5;
+    }
+    const PRAZO_CORRECAO_COM_NF = 1, PRAZO_CORRECAO_SEM_NF = 3;
+    // Para cada envio: prazo (1 dia útil se o equipamento já tem NF de venda, senão
+    // 3), retorno (1ª análise do lote DEPOIS do envio) e situação.
+    function statusCorrecoes({ envios = [], lotes = [], nfSeries = new Set(), agora = new Date() }) {
+      const chave = (op, serie) => `${String(op || '').replace(/\D/g, '')}|${String(serie || '').toUpperCase().replace(/\s+/g, '')}`;
+      const porChave = new Map(lotes.map((l) => [chave(l.final.numero_op, l.final.numero_serie), l]));
+      return envios.map((e) => {
+        const lote = porChave.get(chave(e.numero_op, e.numero_serie)) || null;
+        const serie = String(e.numero_serie || lote?.final?.numero_serie || '').toUpperCase().replace(/\s+/g, '');
+        const temNf = !!(serie && nfSeries.has(serie));
+        const prazoDias = temNf ? PRAZO_CORRECAO_COM_NF : PRAZO_CORRECAO_SEM_NF;
+        const enviado = new Date(e.enviado_em);
+        const prazoEm = somarDiasUteis(enviado, prazoDias);
+        const depois = (lote?.cadeia || []).map((x) => new Date(x.created_at)).filter((d) => d > enviado).sort((a, b) => a - b);
+        const retornoEm = depois[0] || null;
+        const emAberto = lote ? ['nao_conforme', 'ressalva'].includes(String(lote.final.status || '').toLowerCase()) : true;
+        let situacao, diasUteis = null;
+        if (retornoEm) { diasUteis = diasUteisEntre(enviado, retornoEm); situacao = retornoEm <= prazoEm ? 'retornou_no_prazo' : 'retornou_atrasada'; }
+        else if (!emAberto) situacao = 'resolvida_sem_reanalise'; // ex.: ressalva justificada
+        else { diasUteis = diasUteisEntre(enviado, agora); situacao = agora > prazoEm ? 'atrasada' : 'aguardando'; }
+        return { envio: e, lote, setor: e.setor || '—', temNf, prazoDias, prazoEm, retornoEm, situacao, diasUteis };
+      });
+    }
+    const SITUACAO_CORRECAO = {
+      aguardando: { lbl: 'Aguardando', cor: '#E8890C' }, atrasada: { lbl: 'Atrasada', cor: '#E03131' },
+      retornou_no_prazo: { lbl: 'Retornou no prazo', cor: '#2F9E44' }, retornou_atrasada: { lbl: 'Retornou atrasada', cor: '#A61E4D' },
+      resolvida_sem_reanalise: { lbl: 'Resolvida sem reanálise', cor: '#868E96' },
+    };
+    // Resumo por setor (envios de um conjunto já filtrado).
+    function resumoCorrecoesPorSetor(st) {
+      const m = new Map();
+      for (const x of st) {
+        const r = m.get(x.setor) || { setor: x.setor, enviadas: 0, retornaram: 0, noPrazo: 0, aguardando: 0, atrasadas: 0, tempos: [] };
+        r.enviadas++;
+        if (x.situacao === 'retornou_no_prazo' || x.situacao === 'retornou_atrasada') { r.retornaram++; r.tempos.push(x.diasUteis); if (x.situacao === 'retornou_no_prazo') r.noPrazo++; }
+        if (x.situacao === 'aguardando') r.aguardando++;
+        if (x.situacao === 'atrasada') r.atrasadas++;
+        m.set(x.setor, r);
+      }
+      return [...m.values()].map((r) => ({ ...r, tempoMedio: r.tempos.length ? r.tempos.reduce((a, b) => a + b, 0) / r.tempos.length : null, pctNoPrazo: r.retornaram ? r.noPrazo / r.retornaram * 100 : null }))
+        .sort((a, b) => String(a.setor).localeCompare(String(b.setor)));
+    }
+
     /* ====================================================================
        BASE DE QUALIDADE — calcula, a partir do histórico completo de análises,
        o estado de cada LOTE (OP + série) e os registros por apontamento.
        Usada pelo relatório no navegador e pelo serviço (geração automática).
        ==================================================================== */
-    function calcularBaseQualidade({ analises, produtos = [], temposAtivos = [] }) {
+    function calcularBaseQualidade({ analises, produtos = [], temposAtivos = [], envios = [], nfSeries = null }) {
       const byId = new Map(analises.map((a) => [a.id, a]));
       const idsSubst = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
       const ajuste = (t) => t === 'atualizacao_ficha' || t === 'atualizacao_cadastro';
@@ -1575,7 +1640,7 @@
         const ncAps = (ncAnalise?.parecer_completo?.apontamentos || []).filter((ap) => ap.severidade === 'nao_conforme' && !ehErroOperador(ap));
         const categoria = falhou ? 'corrigida' : (final.status === 'ressalva' ? 'ressalva' : 'conforme');
         const lote = {
-          chave: chaveLote(final), final, raiz, aberto, falhou, categoria, ncAps, ncAnalise,
+          chave: chaveLote(final), final, raiz, cadeia, aberto, falhou, categoria, ncAps, ncAnalise,
           ini: raiz.created_at, mes: ymDe(raiz.created_at),
           corrigidoEm: falhou && !aberto ? final.created_at : null,
           equip: equipDe(raiz.parecer_completo ? raiz : final),
@@ -1615,7 +1680,7 @@
             setor: o.ap.setor_responsavel || ((o.est === 5 || o.est === 50) ? 'Almoxarifado' : 'PCP') });
         }
       }
-      return { lotes, ncRegs, tempoRegs, execsTempo, inicioSistema: inicioDoSistema(analises) };
+      return { lotes, ncRegs, tempoRegs, execsTempo, inicioSistema: inicioDoSistema(analises), envios: envios || [], nfSeries: nfSeries instanceof Set ? nfSeries : new Set(nfSeries || []) };
     }
 
     // Situação de cada tipo de erro nos 6 meses até `ateIdx` (índice ano*12+mês).
@@ -1660,6 +1725,7 @@
         { id: 'exec_evolucao', label: 'Evolução em 12 meses', desc: 'Aprovação de primeira mês a mês, com o nº de lotes de cada mês' },
         { id: 'exec_abertas', label: 'NCs do período ainda abertas', desc: 'Lotes do período que seguem sem correção' },
         { id: 'exec_anteriores', label: 'Pendências de períodos anteriores', desc: 'NCs abertas de lotes de antes do período' },
+        { id: 'exec_retorno', label: 'Retorno das correções por setor', desc: 'Envios para correção, prazo (1 dia útil com NF / 3 sem), tempo de retorno e atrasadas' },
       ] },
       { aba: 'Onde atacar', itens: [
         { id: 'atacar_pareto', label: 'Pareto dos tipos de erro', desc: 'Apontamentos por tipo (documento · campo), % dos lotes e variação' },
@@ -1685,9 +1751,9 @@
     const secoesDe = (ids) => Object.fromEntries(TODAS_SECOES_REL.map((id) => [id, ids.includes(id)]));
     const MODELOS_RELATORIO_PADRAO = [
       { nome: 'Mensal — Gestor PCP', padrao: true, automatico: true, setor: 'PCP', equip: '', operador: '', orientacao: 'paisagem', achados: true,
-        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'tend_situacao', 'tend_mapa']) },
+        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'exec_retorno', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'tend_situacao', 'tend_mapa']) },
       { nome: 'Mensal — Gestor Almoxarifado', padrao: true, automatico: true, setor: 'Almoxarifado', equip: '', operador: '', orientacao: 'paisagem', achados: true,
-        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'graf_tempo_op', 'graf_tempo_excesso', 'tend_situacao', 'tend_mapa']) },
+        secoes: secoesDe(['exec_indicadores', 'exec_evolucao', 'exec_abertas', 'exec_retorno', 'atacar_pareto', 'atacar_matriz', 'atacar_equip', 'atacar_operadores', 'graf_tempo_op', 'graf_tempo_excesso', 'tend_situacao', 'tend_mapa']) },
       { nome: 'Mensal — Qualidade (completo)', padrao: true, automatico: true, setor: '', equip: '', operador: '', orientacao: 'paisagem', achados: true,
         secoes: secoesDe(TODAS_SECOES_REL) },
     ];
@@ -1770,6 +1836,17 @@
       if (sec.exec_anteriores) {
         const ls = lotesBase.filter((l) => l.mes < mesesPer[0] && l.aberto && falhouF(l)).sort((a, b) => new Date(a.ini) - new Date(b.ini));
         add('Visão executiva', 'Pendências de períodos anteriores', `Lotes de antes de ${rotPer} que continuam com NC${rotSetor} em aberto.`, ls.length ? tabAbertos(ls) : vazio('Nenhuma pendência anterior.'), true);
+      }
+
+      if (sec.exec_retorno) {
+        const st = statusCorrecoes({ envios: (base.envios || []).filter((e) => mesesPer.includes(String(e.enviado_em || '').slice(0, 7)) && (!setor || e.setor === setor)), lotes: base.lotes, nfSeries: base.nfSeries, agora })
+          .filter((x) => !x.lote || okLote(x.lote));
+        const res = resumoCorrecoesPorSetor(st);
+        const pend = st.filter((x) => x.situacao === 'atrasada' || x.situacao === 'aguardando').sort((a, b) => (b.diasUteis || 0) - (a.diasUteis || 0));
+        add('Visão executiva', 'Retorno das correções por setor', `Envios para correção feitos no período. Prazo: ${PRAZO_CORRECAO_COM_NF} dia útil se o equipamento já tem NF de venda, ${PRAZO_CORRECAO_SEM_NF} dias úteis nos demais. Retorno = 1ª análise do lote depois do envio. Dias úteis = seg. a sex.`,
+          st.length ? `<table><thead><tr><th>Setor</th><th class="n">Enviadas</th><th class="n">Retornaram</th><th class="n">No prazo</th><th class="n">Tempo médio (d úteis)</th><th class="n">Aguardando</th><th class="n">Atrasadas</th></tr></thead><tbody>${res.map((r) => `<tr><td>${escHtml(r.setor)}</td><td class="n">${r.enviadas}</td><td class="n">${r.retornaram}</td><td class="n">${r.pctNoPrazo == null ? '—' : fmtPct1(r.pctNoPrazo)}</td><td class="n">${r.tempoMedio == null ? '—' : num(r.tempoMedio)}</td><td class="n">${r.aguardando || ''}</td><td class="n" style="${r.atrasadas ? `color:${COR_RUIM};font-weight:700` : ''}">${r.atrasadas || ''}</td></tr>`).join('')}</tbody></table>`
+            + (pend.length ? `<table style="margin-top:8px"><thead><tr><th>OP</th><th>Série</th><th>Setor</th><th>Enviada em</th><th class="n">Prazo</th><th class="n">Aguardando há</th><th>Situação</th></tr></thead><tbody>${pend.slice(0, 25).map((x) => `<tr><td>${escHtml(x.envio.numero_op)}</td><td>${escHtml(x.envio.numero_serie || '—')}</td><td>${escHtml(x.setor)}</td><td>${new Date(x.envio.enviado_em).toLocaleDateString('pt-BR')}</td><td class="n">${x.prazoDias} d útil${x.prazoDias > 1 ? 's' : ''}${x.temNf ? ' (com NF)' : ''}</td><td class="n">${num(x.diasUteis)} d</td><td style="color:${SITUACAO_CORRECAO[x.situacao].cor};font-weight:600">${SITUACAO_CORRECAO[x.situacao].lbl}</td></tr>`).join('')}</tbody></table>` : '')
+            : vazio('Nenhum envio para correção registrado no período.'), true);
       }
 
       // ---------------- Onde atacar ----------------
@@ -1894,6 +1971,11 @@
         const sub = sit.linhas.filter((x) => x.sit === 'subindo').slice(0, 2), zer = sit.linhas.filter((x) => x.sit === 'resolvida').slice(0, 2);
         if (sub.length) achados.push(`Em alta nos últimos 3 meses: ${sub.map((x) => `<strong>${escHtml(x.tipo)}</strong> (${fmtPct1(x.ant)} → ${fmtPct1(x.rec)})`).join('; ')}.`);
         if (zer.length) achados.push(`Zeraram no último mês: ${zer.map((x) => escHtml(x.tipo)).join('; ')}.`);
+        if (sec.exec_retorno) {
+          const stA = statusCorrecoes({ envios: (base.envios || []).filter((e) => mesesPer.includes(String(e.enviado_em || '').slice(0, 7)) && (!setor || e.setor === setor)), lotes: base.lotes, nfSeries: base.nfSeries, agora });
+          const ret = stA.filter((x) => x.situacao.startsWith('retornou')), noPr = ret.filter((x) => x.situacao === 'retornou_no_prazo').length, atr = stA.filter((x) => x.situacao === 'atrasada').length;
+          if (stA.length) achados.push(`Correções${rotSetor}: ${stA.length} enviada(s), ${ret.length} retornaram${ret.length ? ` (${fmtPct1(noPr / ret.length * 100)} no prazo)` : ''}${atr ? `; <strong style="color:${COR_RUIM}">${atr} atrasada(s) aguardando retorno</strong>` : ''}.`);
+        }
         if (tempoP.length && (sec.graf_tempo_op || sec.graf_tempo_excesso)) achados.push(`${tempoP.length} ressalva(s) de tempo de estágio em ${execP.length} execução(ões) (${fmtPct1(execP.length ? tempoP.length / execP.length * 100 : 0)}).`);
       } else if (cfg.achados !== false) achados.push(`Nenhum lote conciliado em ${rotPer}${cfg.equip ? ' para o equipamento escolhido' : ''}.`);
 
@@ -2006,6 +2088,10 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       // Checagens de tempo de estágio ATIVAS (equipamento × estágio) — denominador
       // da taxa de ressalvas de tempo por operador.
       const [temposAtivos, setTemposAtivos] = useState([]);
+      // Acompanhamento das correções enviadas aos setores + séries com NF de venda
+      // (prazo: 1 dia útil com NF, 3 sem).
+      const [enviosCorrecao, setEnviosCorrecao] = useState([]);
+      const [seriesComNf, setSeriesComNf] = useState(() => new Set());
       // Aba interna do Dashboard: gráficos | correções | tendência.
       const [dashTab, setDashTab] = useState('executiva');
       // "Onde atacar": recorte por setor (todos | Almoxarifado | PCP).
@@ -2046,6 +2132,11 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             supabase.from('melhorias_regulatorias').select('*').order('codigo', { ascending: true }),
           ]);
           try { const { data: tAt } = await supabase.from('tempos_estagio').select('equipamento, estagio_numero, ativo').eq('ativo', true); setTemposAtivos(tAt || []); } catch (e) { setTemposAtivos([]); }
+          try { setEnviosCorrecao(await buscarTudoSupabase('correcoes_solicitadas', 'id, numero_op, numero_serie, setor, origem, problema, enviado_em, enviado_por', { campo: 'enviado_em', asc: false })); } catch (e) { setEnviosCorrecao([]); }
+          try {
+            const nv = await buscarTudoSupabase('nfs_venda', 'numero_serie', { campo: 'numero_serie', asc: true });
+            setSeriesComNf(new Set(nv.map((r) => String(r.numero_serie || '').toUpperCase().replace(/\s+/g, '')).filter(Boolean)));
+          } catch (e) { setSeriesComNf(new Set()); }
           setAnalises(aData);
           setMelhorias(mRes.data || []);
           setCatalogoProdutos(pRes.data || []);
@@ -2908,7 +2999,25 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       // Base de qualidade (mesma do serviço) — usada no relatório e na aba Tendência.
       // Calculada só quando é usada (montagem do relatório ou aba Tendência).
       const precisaBase = relOpen || dashTab === 'tendencia';
-      const baseQualidade = useMemo(() => (precisaBase ? calcularBaseQualidade({ analises, produtos: catalogoProdutos, temposAtivos }) : { lotes: [], ncRegs: [], tempoRegs: [], execsTempo: [] }), [analises, catalogoProdutos, temposAtivos, precisaBase]);
+      const baseQualidade = useMemo(() => (precisaBase ? calcularBaseQualidade({ analises, produtos: catalogoProdutos, temposAtivos, envios: enviosCorrecao, nfSeries: seriesComNf }) : { lotes: [], ncRegs: [], tempoRegs: [], execsTempo: [], envios: enviosCorrecao, nfSeries: seriesComNf }), [analises, catalogoProdutos, temposAtivos, precisaBase, enviosCorrecao, seriesComNf]);
+      // Retorno das correções (Visão executiva): lotes mínimos só dos envios —
+      // vigente = análise não substituída mais recente; cadeia = todas do lote.
+      const retornoCorrecoes = useMemo(() => {
+        if (!enviosCorrecao.length) return [];
+        const norm = (op, serie) => `${String(op || '').replace(/\D/g, '')}|${String(serie || '').toUpperCase().replace(/\s+/g, '')}`;
+        const chaves = new Set(enviosCorrecao.map((e) => norm(e.numero_op, e.numero_serie)));
+        const grupos = new Map();
+        for (const a of analises) {
+          const k = norm(a.numero_op, a.numero_serie);
+          if (!chaves.has(k)) continue;
+          const g = grupos.get(k) || { final: null, cadeia: [] };
+          g.cadeia.push(a);
+          if (!idsSubstituidas.has(a.id) && (!g.final || new Date(a.created_at) > new Date(g.final.created_at))) g.final = a;
+          grupos.set(k, g);
+        }
+        const lotesMin = [...grupos.values()].filter((g) => g.final).map((g) => ({ final: { ...g.final, status: String(g.final?.parecer_completo?.resultado_geral || g.final.status || '').toLowerCase() }, cadeia: g.cadeia }));
+        return statusCorrecoes({ envios: enviosCorrecao, lotes: lotesMin, nfSeries: seriesComNf, agora: new Date() });
+      }, [enviosCorrecao, analises, seriesComNf]);
 
       const gerarRelatorio = async () => {
         const cfg = relCfg;
@@ -3356,6 +3465,56 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                   </div>
                 </CardContent>
               </Card>
+              {/* Retorno das correções por setor (prazo 1 dia útil com NF / 3 sem NF) */}
+              {(() => {
+                const iv = exec.intervalo;
+                const doPer = retornoCorrecoes.filter((x) => !iv || (new Date(x.envio.enviado_em) >= iv.ini && new Date(x.envio.enviado_em) < iv.fim));
+                const pend = retornoCorrecoes.filter((x) => x.situacao === 'aguardando' || x.situacao === 'atrasada')
+                  .sort((a, b) => (a.situacao === 'atrasada' ? 0 : 1) - (b.situacao === 'atrasada' ? 0 : 1) || a.prazoEm - b.prazoEm);
+                const res = resumoCorrecoesPorSetor(doPer);
+                const fmtD = (n) => n == null ? '—' : n.toFixed(1).replace('.', ',');
+                const fmtDt = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : '—';
+                return (
+                  <Card>
+                    <CardHeader><CardTitle className="text-base">Retorno das correções por setor</CardTitle>
+                      <div className="text-xs text-muted-foreground">Envios para correção {iv ? `em ${iv.nome}` : '(todo o período)'} · prazo de 1 dia útil para equipamento com NF de venda e 3 dias úteis nos demais · retorno = 1ª análise do lote após o envio.</div>
+                    </CardHeader>
+                    <CardContent>
+                      {res.length === 0 ? <div className="text-sm text-muted-foreground">Nenhum envio para correção registrado no período.</div> : (
+                        <table className="w-full text-sm mb-4">
+                          <thead><tr className="text-left text-xs uppercase tracking-wide text-muted-foreground border-b">
+                            <th className="py-1.5">Setor</th><th className="text-right">Enviadas</th><th className="text-right">Retornaram</th><th className="text-right">No prazo</th><th className="text-right">Tempo médio (d úteis)</th><th className="text-right">Aguardando</th><th className="text-right">Atrasadas</th>
+                          </tr></thead>
+                          <tbody>{res.map((r) => (
+                            <tr key={r.setor} className="border-b last:border-0">
+                              <td className="py-1.5 font-medium">{r.setor}</td><td className="text-right">{r.enviadas}</td><td className="text-right">{r.retornaram}</td>
+                              <td className="text-right">{r.pctNoPrazo == null ? '—' : fmtPct1(r.pctNoPrazo)}</td><td className="text-right">{fmtD(r.tempoMedio)}</td>
+                              <td className="text-right" style={{ color: r.aguardando ? '#E8890C' : undefined }}>{r.aguardando}</td>
+                              <td className="text-right font-semibold" style={{ color: r.atrasadas ? COR_RUIM : undefined }}>{r.atrasadas}</td>
+                            </tr>))}</tbody>
+                        </table>
+                      )}
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Aguardando retorno agora ({pend.length})</div>
+                      {pend.length === 0 ? <div className="text-sm text-muted-foreground">Nenhuma correção pendente.</div> : (
+                        <div className="max-h-64 overflow-auto">
+                          <table className="w-full text-sm">
+                            <thead><tr className="text-left text-xs text-muted-foreground border-b"><th className="py-1">OP / série</th><th>Setor</th><th>Enviada</th><th>Prazo</th><th className="text-right">Dias úteis</th><th>Situação</th></tr></thead>
+                            <tbody>{pend.slice(0, 50).map((x) => (
+                              <tr key={x.envio.id} className="border-b last:border-0" title={x.envio.problema || ''}>
+                                <td className="py-1">OP {x.envio.numero_op}{x.envio.numero_serie ? ` / ${x.envio.numero_serie}` : ''}</td>
+                                <td>{x.setor}</td><td>{fmtDt(x.envio.enviado_em)}</td>
+                                <td>{fmtDt(x.prazoEm)} <span className="text-xs text-muted-foreground">({x.prazoDias} d{x.temNf ? ' · com NF' : ''})</span></td>
+                                <td className="text-right">{fmtD(x.diasUteis)}</td>
+                                <td><span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: SITUACAO_CORRECAO[x.situacao].cor + '22', color: SITUACAO_CORRECAO[x.situacao].cor }}>{SITUACAO_CORRECAO[x.situacao].lbl}</span></td>
+                              </tr>))}</tbody>
+                          </table>
+                          {pend.length > 50 && <div className="text-xs text-muted-foreground mt-1">Mostrando 50 de {pend.length}.</div>}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                );
+              })()}
             </>);
           })()}
 
@@ -11604,6 +11763,17 @@ ${parecer.parecer_tecnico ? `
               await enviarTexto(texto, canal, `${setor} dúvida (${duv.length})`);
             }
           }
+          // Acompanhamento: registra a solicitação de correção por setor (dúvidas de
+          // ficha não entram — não há correção de documento a esperar).
+          try {
+            const opReg = String(p.numero_op || '').trim();
+            const regs = opReg && opReg !== '—' ? Object.entries(porSetor)
+              .map(([setor, l]) => [setor, l.filter((it) => it.tipo !== 'duvida')]).filter(([, l]) => l.length)
+              .map(([setor, l]) => ({ numero_op: opReg, numero_serie: String(p.numero_serie && p.numero_serie !== '—' ? p.numero_serie : ''), analise_id: analiseId || null,
+                setor, origem: 'slack_individual', problema: l.map((it) => `${it.codigo} [${it.doc}]`).join('; '),
+                enviado_por_id: usuarioAtual?.id || null, enviado_por: usuarioAtual?.nome_completo || usuarioAtual?.email || null })) : [];
+            if (regs.length) await supabase.from('correcoes_solicitadas').insert(regs);
+          } catch (e) { console.warn('Não foi possível registrar o acompanhamento da correção:', e?.message || e); }
           const resumo = itens.map((it) => `${it.codigo} [${it.doc}] {${it.setor}} <${it.tipo === 'duvida' ? 'dúvida' : 'correção'}>: ${it.erro}`).join(' || ');
           await registrarLog(usuarioAtual, 'notificar_slack', 'analise', `OP ${p.numero_op || '?'} / ${p.numero_serie || '?'}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} enviou alerta de NC ao Slack da OP ${p.numero_op || '?'} — canais: ${enviados.join(', ')}${incluirReinc ? ' (com aviso de reincidência)' : ''}. ${resumo}`);
           toast.success(`Alerta enviado ao Slack — ${enviados.join(', ')}.`);
@@ -13404,175 +13574,294 @@ ${parecer.parecer_tecnico ? `
        cadastrado ou repetido na própria planilha).
        ==================================================================== */
     /* ====================================================================
-       MODAL: Reanalisar com OP corrigida (individual e em massa)
-       Você sobe as OPs corrigidas; o sistema casa cada arquivo com a análise
-       existente PELO NÚMERO DA OP, refaz a análise e — só quando o resultado
-       muda — deixa o pacote pendente de download (substituindo, no download,
-       a mesma pasta da rede). Resultado idêntico é ignorado.
+       REANALISAR DOCUMENTOS CORRIGIDOS (individual e em massa) — 06/11/2026
+       Substitui o antigo "Reanalisar OP corrigida". Aceita QUALQUER documento
+       corrigido (OP, RC, etiqueta externa, etiquetas de acessório, FORM,
+       reprocesso, RNC), soltos ou em pastas (uma pasta por OP).
+         • Cada arquivo é classificado e casado com o lote: OP/RC pelo nº da OP,
+           etiqueta externa/FORM pela série; etiquetas de acessório, reprocesso e
+           RNC pela PASTA em que vieram (precisam estar junto de um documento que
+           identifique o lote, ou numa pasta "OP_1234…").
+         • Análise com documentos guardados → troca só o que foi enviado.
+         • Análise SEM documentos guardados → aceita se vier a pasta completa
+           (OP, RC e etiqueta externa) e faz a análise nova inteira.
+       Só o que muda de resultado (ou de conteúdo) vira nova análise.
        ==================================================================== */
+    const ROTULO_SLOT_REANALISE = { op: 'OP', rc: 'RC', etiqueta_externa: 'Etiqueta externa', etiqueta_acessorio: 'Etiqueta de acessório', form_gq_0047: 'FORM-GQ-0047', op_reprocesso: 'OP de reprocesso', rnc: 'RNC' };
+    async function classificarDocumentoArquivo(file) {
+      const nome = (file.name || '').toLowerCase();
+      const ext = (nome.match(/\.[^.]+$/) || [''])[0];
+      let text = '';
+      try { text = await extractTextFromFile(file); } catch (e) { text = ''; }
+      if (ext === '.xlsx' || ext === '.csv') return { slot: 'rc', text };
+      if (ext === '.docx') return { slot: /acess[óo]rio\s+exclusivo/i.test(text) ? 'etiqueta_acessorio' : 'etiqueta_externa', text };
+      if (ext === '.pdf') {
+        if (/reprocesso/i.test(nome)) return { slot: 'op_reprocesso', text };
+        if (/\brnc\b/i.test(nome)) return { slot: 'rnc', text };
+        if (/form.?gq.?0047/i.test(nome) || /FORM-GQ-0047|CHECK-?LIST/i.test(text)) return { slot: 'form_gq_0047', text };
+        if (/^rc[_\-\s]/i.test(nome) || /rela[çc][ãa]o.*componentes/i.test(nome) || /rela[çc][ãa]o de componentes/i.test(text)) return { slot: 'rc', text };
+        if (/^op[_\-\s]/i.test(nome) || /ordem.*produ/i.test(nome) || /O\.?P\.?\s*:|Est[áa]gio\s*:|Ordem de Produ/i.test(text)) return { slot: 'op', text };
+        if (/n[ãa]o\s+conformidade|\bRNC\b/i.test(text)) return { slot: 'rnc', text };
+      }
+      return { slot: null, text };
+    }
+
+    // Refaz UMA análise trocando os documentos enviados. modo: 'substituir' (usa os
+    // originais guardados) | 'completa' (só os documentos enviados). Retorna { mudou, novoId }.
+    async function reanalisarComDocsCorrigidos(row, docs, acessorios, modo) {
+      const vazio = { op: null, rc: null, form_gq_0047: null, etiqueta_externa: null, etiqueta_acessorio: [], op_reprocesso: null, rnc: null };
+      const slots = modo === 'completa' ? vazio : await reconstruirSlotsDeStorageGlobal(row.parecer_completo || {});
+      const trocados = [];
+      for (const k of ['op', 'rc', 'etiqueta_externa', 'form_gq_0047', 'op_reprocesso', 'rnc']) {
+        if (docs[k]) { slots[k] = { text: docs[k].text, file: docs[k].file, status: 'done' }; trocados.push(k); }
+      }
+      if (acessorios && acessorios.length) {
+        const codDe = (t) => String(parseEtiquetaAcessorio(t || '')?.codigoSapiens || '').toUpperCase();
+        const novosCod = new Set(acessorios.map((a) => codDe(a.text)).filter(Boolean));
+        // Mantém os acessórios guardados que NÃO foram reenviados; troca os de mesmo código.
+        const mantidos = (slots.etiqueta_acessorio || []).filter((it) => { const c = codDe(it.text); return !c || !novosCod.has(c); });
+        slots.etiqueta_acessorio = [...mantidos, ...acessorios.map((a) => ({ text: a.text, file: a.file, status: 'done' }))];
+        trocados.push('etiqueta_acessorio');
+      }
+      const novo = await executarAnaliseLocal(slots, { permitirRefazer: true });
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const antigos = row.parecer_completo?.slots_text || {};
+      const docMudou = trocados.some((k) => k === 'etiqueta_acessorio'
+        ? acessorios.some((a) => !(antigos.etiqueta_acessorio || []).some((t) => norm(t) === norm(a.text)))
+        : norm(docs[k].text) !== norm(antigos[k] || ''));
+      const parecerMudou = assinaturaParecer(row.parecer_completo) !== assinaturaParecer(novo);
+      const mudou = modo === 'completa' || docMudou || parecerMudou;
+      if (novo?._analiseId) {
+        if (mudou) {
+          const soOp = trocados.length === 1 && trocados[0] === 'op';
+          await supabase.from('analises').update({
+            analise_origem_id: row.id,
+            tipo_reanalise: soOp ? 'reanalise_op_corrigida' : 'reanalise_docs_corrigidos',
+            doc_substituido: trocados.join(','), // chaves de SLOT_LABELS (minúsculas)
+            motivo_reanalise: `Documento(s) corrigido(s) e resubmetido(s): ${trocados.map((k) => ROTULO_SLOT_REANALISE[k] || k).join(', ')}${modo === 'completa' ? ' (pasta completa — análise sem documentos guardados)' : ''}.`,
+            pasta_rede_path: row.pasta_rede_path || null,
+            data_ref_original: row.data_ref_original || row.created_at || null,
+          }).eq('id', novo._analiseId);
+        } else {
+          try { await supabase.from('apontamentos').delete().eq('analise_id', novo._analiseId); } catch (e) {}
+          try { await supabase.from('analises').delete().eq('id', novo._analiseId); } catch (e) {}
+        }
+      }
+      return { mudou, novoId: novo?._analiseId || null, trocados };
+    }
+
     function ReanalisarOpCorrigidaModal({ open, onClose, onDone, perfil }) {
       const toast = useToast();
       const [parsing, setParsing] = useState(false);
       const [rodando, setRodando] = useState(false);
-      const [pares, setPares] = useState([]);   // [{ file, opNum, serie, row, status, sel }]
-      const [semMatch, setSemMatch] = useState([]); // [{ file, opNum }]
+      const [lotes, setLotes] = useState([]);       // [{ key, opNum, serie, row, modo, docs, acessorios, sel, status, motivo }]
+      const [ignorados, setIgnorados] = useState([]); // [{ nome, motivo }]
       const [prog, setProg] = useState({ idx: 0, total: 0 });
       const [resumo, setResumo] = useState(null);
+      const pastaRef = useRef(null);
 
-      const reset = () => { setPares([]); setSemMatch([]); setResumo(null); setProg({ idx: 0, total: 0 }); };
+      const reset = () => { setLotes([]); setIgnorados([]); setResumo(null); setProg({ idx: 0, total: 0 }); };
       const handleClose = () => { if (rodando) return; reset(); onClose(); };
       const normOp = (v) => String(v || '').replace(/\D/g, '');
+      const normSerie = (v) => String(v || '').toUpperCase().replace(/\s+/g, '');
 
-      // Lê os arquivos, extrai o nº da OP e casa com a análise mais recente daquela OP.
       const receberArquivos = async (arqs) => {
-        const pdfs = (arqs || []).filter((f) => /\.pdf$/i.test(f.name) || /\.xlsx$/i.test(f.name) || /\.docx$/i.test(f.name));
-        if (pdfs.length === 0) { toast.error('Selecione as OPs corrigidas (PDF, XLSX ou DOCX).'); return; }
-        setParsing(true);
+        const lista = (arqs || []).filter((f) => /\.(pdf|xlsx|csv|docx)$/i.test(f.name));
+        if (lista.length === 0) { toast.error('Selecione os documentos corrigidos (PDF, XLSX, CSV ou DOCX).'); return; }
+        setParsing(true); setResumo(null);
         try {
-          // Extrai OP de cada arquivo
-          const lidos = [];
-          for (const f of pdfs) {
-            let opNum = '', serie = '', text = '';
-            try { text = await extractTextFromFile(f); const p = parseOP(text); opNum = normOp(p?.op); serie = p?.serie || ''; } catch (e) {}
-            lidos.push({ file: f, opNum, serie, text });
+          const ign = [];
+          // 1) Classifica e identifica cada arquivo
+          const itens = [];
+          for (const f of lista) {
+            const rel = String(f.webkitRelativePath || f.name);
+            if (/(^|\/)semiacabad/i.test(rel)) { ign.push({ nome: rel, motivo: 'pasta de semiacabados (não entra na reanálise do produto)' }); continue; }
+            const c = await classificarDocumentoArquivo(f);
+            if (!c.slot) { ign.push({ nome: rel, motivo: 'tipo de documento não reconhecido' }); continue; }
+            let opNum = '', serie = '';
+            if (c.slot === 'op') { const p = parseOP(c.text); opNum = normOp(p?.op); serie = normSerie(p?.serie); }
+            else if (c.slot === 'rc') opNum = normOp(parseRC(c.text)?.opRelacionada);
+            else if (c.slot === 'etiqueta_externa') serie = normSerie(parseEtiqueta(c.text)?.serie);
+            else if (c.slot === 'form_gq_0047') serie = normSerie(parseForm0047(c.text)?.serie);
+            const dirs = rel.split('/').slice(0, -1);
+            itens.push({ file: f, rel, dirs, slot: c.slot, text: c.text, opNum, serie });
           }
-          // Busca as análises mais recentes das OPs encontradas
-          const ops = [...new Set(lidos.map((l) => l.opNum).filter(Boolean))];
-          const porOp = new Map();
-          if (ops.length) {
-            // Correção 06/11/2026: antes buscava TODAS as análises com o parecer
-            // completo para depois achar as OPs — com o histórico grande a consulta
-            // estourava o tempo/limite do banco, voltava vazia e TODAS as OPs saíam
-            // como "nenhuma análise com esse nº de OP". Agora busca só as OPs
-            // enviadas (leve) e o parecer completo apenas das análises escolhidas.
-            const comPonto = ops.map((o) => o.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
-            const { data: leves, error: errLeve } = await supabase.from('analises')
-              .select('id, numero_op, created_at, analise_origem_id')
-              .in('numero_op', [...new Set([...ops, ...comPonto])]);
-            if (errLeve) throw errLeve;
-            const substituidas = new Set((leves || []).filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
-            const escolhida = new Map(); // op -> id da análise vigente (mais recente não substituída)
-            for (const a of (leves || [])) {
-              const k = normOp(a.numero_op);
-              if (!k || substituidas.has(a.id)) continue;
-              const at = escolhida.get(k);
-              if (!at || new Date(a.created_at) > new Date(at.created_at)) escolhida.set(k, a);
-            }
-            const ids = [...escolhida.values()].map((a) => a.id);
-            for (let i = 0; i < ids.length; i += 20) {
-              const { data, error } = await supabase.from('analises')
-                .select('id, numero_op, numero_serie, modelo, status, created_at, parecer_completo, pasta_rede_path, data_ref_original, origem_analise')
-                .in('id', ids.slice(i, i + 20));
-              if (error) throw error;
-              for (const a of (data || [])) porOp.set(normOp(a.numero_op), a);
+          // 2) Busca as análises das OPs/séries identificadas (consulta leve) → vigente de cada lote
+          const ops = [...new Set(itens.map((i) => i.opNum).filter(Boolean))];
+          const series = [...new Set(itens.map((i) => i.serie).filter(Boolean))];
+          // nº de OP no nome das pastas (ex.: "OP_8141_LEDT-…")
+          for (const it of itens) for (const d of it.dirs) { const m = d.match(/\bop[\s_\-]*(\d{4,6})\b/i); if (m && !ops.includes(m[1])) ops.push(m[1]); }
+          const comPonto = ops.map((o) => o.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+          const leves = [];
+          if (ops.length) { const { data, error } = await supabase.from('analises').select('id, numero_op, numero_serie, created_at, analise_origem_id').in('numero_op', [...new Set([...ops, ...comPonto])]); if (error) throw error; leves.push(...(data || [])); }
+          if (series.length) { const { data, error } = await supabase.from('analises').select('id, numero_op, numero_serie, created_at, analise_origem_id').in('numero_serie', series); if (error) throw error; leves.push(...(data || [])); }
+          const subst = new Set(leves.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
+          const vig = new Map(); // opNum -> análise vigente (leve)
+          for (const a of leves) {
+            if (subst.has(a.id)) continue;
+            const k = normOp(a.numero_op); if (!k) continue;
+            const at = vig.get(k);
+            if (!at || new Date(a.created_at) > new Date(at.created_at)) vig.set(k, a);
+          }
+          const opDaSerie = new Map([...vig.values()].map((a) => [normSerie(a.numero_serie), normOp(a.numero_op)]));
+          // 3) Lote de cada arquivo identificado; pastas que apontam para UM único lote
+          for (const it of itens) { if (!it.opNum && it.serie) it.opNum = opDaSerie.get(it.serie) || ''; }
+          const dirLotes = new Map(); // caminho de pasta -> Set(opNum)
+          for (const it of itens) {
+            if (!it.opNum) continue;
+            for (let d = 1; d <= it.dirs.length; d++) { const k = it.dirs.slice(0, d).join('/'); if (!dirLotes.has(k)) dirLotes.set(k, new Set()); dirLotes.get(k).add(it.opNum); }
+          }
+          for (const it of itens) {
+            if (it.opNum) continue;
+            for (let d = it.dirs.length; d >= 1 && !it.opNum; d--) {
+              const k = it.dirs.slice(0, d).join('/');
+              const s = dirLotes.get(k);
+              if (s && s.size === 1) it.opNum = [...s][0];
+              else { const m = it.dirs[d - 1].match(/\bop[\s_\-]*(\d{4,6})\b/i); if (m) it.opNum = m[1]; }
             }
           }
-          const casados = [], faltando = [];
-          for (const l of lidos) {
-            const row = l.opNum ? porOp.get(l.opNum) : null;
+          // 4) Agrupa por lote
+          const porLote = new Map();
+          for (const it of itens) {
+            if (!it.opNum) {
+              ign.push({ nome: it.rel, motivo: it.slot === 'etiqueta_acessorio' || it.slot === 'op_reprocesso' || it.slot === 'rnc'
+                ? `${ROTULO_SLOT_REANALISE[it.slot]} sem identificação do lote — envie dentro da pasta da OP (junto da OP/RC/etiqueta externa) ou numa pasta "OP_1234"`
+                : `${ROTULO_SLOT_REANALISE[it.slot]}: não foi possível ler o nº da OP/série` });
+              continue;
+            }
+            if (!porLote.has(it.opNum)) porLote.set(it.opNum, { opNum: it.opNum, docs: {}, acessorios: [], arquivos: [] });
+            const L = porLote.get(it.opNum);
+            L.arquivos.push(it.rel);
+            if (it.slot === 'etiqueta_acessorio') L.acessorios.push({ file: it.file, text: it.text });
+            else if (L.docs[it.slot]) ign.push({ nome: it.rel, motivo: `segundo arquivo de ${ROTULO_SLOT_REANALISE[it.slot]} para a OP ${it.opNum} — usado só o primeiro` });
+            else L.docs[it.slot] = { file: it.file, text: it.text };
+          }
+          // 5) Parecer completo das análises vigentes escolhidas
+          const ids = [...porLote.keys()].map((k) => vig.get(k)?.id).filter(Boolean);
+          const completos = new Map();
+          for (let i = 0; i < ids.length; i += 20) {
+            const { data, error } = await supabase.from('analises')
+              .select('id, numero_op, numero_serie, modelo, status, created_at, parecer_completo, pasta_rede_path, data_ref_original, origem_analise')
+              .in('id', ids.slice(i, i + 20));
+            if (error) throw error;
+            for (const a of (data || [])) completos.set(normOp(a.numero_op), a);
+          }
+          const result = [];
+          for (const L of porLote.values()) {
+            const row = completos.get(L.opNum) || null;
             const temOriginais = !!(row?.parecer_completo?.arquivos_originais?.op?.path);
-            if (row && temOriginais) casados.push({ file: l.file, opNum: l.opNum, serie: l.serie, text: l.text, row, sel: true, status: null });
-            else faltando.push({ file: l.file, opNum: l.opNum, motivo: !row ? 'nenhuma análise com esse nº de OP' : 'análise sem documentos originais guardados (não dá para reprocessar)' });
+            const faltando = ['op', 'rc', 'etiqueta_externa'].filter((k) => !L.docs[k]);
+            let modo = null, motivo = '';
+            if (!row) motivo = 'nenhuma análise com esse nº de OP';
+            else if (temOriginais) modo = 'substituir';
+            else if (faltando.length === 0) modo = 'completa';
+            else motivo = `análise sem documentos guardados — envie a pasta completa (faltando: ${faltando.map((k) => ROTULO_SLOT_REANALISE[k]).join(', ')})`;
+            result.push({ ...L, key: L.opNum, row, modo, motivo, serie: row?.numero_serie || '', sel: !!modo, status: null });
           }
-          setPares(casados);
-          setSemMatch(faltando);
-        } catch (e) { toast.error('Erro ao ler arquivos: ' + (e?.message || e)); }
+          result.sort((a, b) => (Number(a.opNum) || 0) - (Number(b.opNum) || 0));
+          setLotes(result);
+          setIgnorados(ign);
+        } catch (e) { toast.error('Erro ao ler os arquivos: ' + (e?.message || e)); }
         setParsing(false);
       };
 
       const executar = async () => {
-        const sel = pares.filter((p) => p.sel);
-        if (sel.length === 0) { toast.error('Nenhuma OP marcada para reanalisar.'); return; }
+        const sel = lotes.filter((l) => l.sel && l.modo);
+        if (sel.length === 0) { toast.error('Nenhum lote marcado para reanalisar.'); return; }
         setRodando(true);
         setProg({ idx: 0, total: sel.length });
         let mudaram = 0, iguais = 0; const falhas = [];
         for (let i = 0; i < sel.length; i++) {
-          const p = sel[i];
+          const L = sel[i];
           setProg({ idx: i + 1, total: sel.length });
-          setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: 'rodando' } : x)));
+          setLotes((arr) => arr.map((x) => (x.key === L.key ? { ...x, status: 'rodando' } : x)));
           try {
-            const { mudou } = await reanalisarComOpCorrigida(p.row, p.file, p.text);
+            const { mudou } = await reanalisarComDocsCorrigidos(L.row, L.docs, L.acessorios, L.modo);
             if (mudou) mudaram++; else iguais++;
-            setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: mudou ? 'mudou' : 'igual' } : x)));
+            setLotes((arr) => arr.map((x) => (x.key === L.key ? { ...x, status: mudou ? 'mudou' : 'igual' } : x)));
           } catch (e) {
-            falhas.push(`OP ${p.opNum}: ${e?.message || e}`);
-            setPares((arr) => arr.map((x) => (x.file === p.file ? { ...x, status: 'falha' } : x)));
+            falhas.push(`OP ${L.opNum}: ${e?.message || e}`);
+            setLotes((arr) => arr.map((x) => (x.key === L.key ? { ...x, status: 'falha' } : x)));
           }
         }
-        await registrarLog(perfil, 'reanalisar_op_corrigida', 'analise', 'lote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} reanalisou ${sel.length} OP(s) corrigida(s): ${mudaram} com mudança (pendentes de download), ${iguais} sem mudança${falhas.length ? `, ${falhas.length} falha(s)` : ''}`);
+        await registrarLog(perfil, 'reanalisar_docs_corrigidos', 'analise', 'lote', `${perfil?.nome_completo || perfil?.email || 'Usuário'} reanalisou ${sel.length} lote(s) com documentos corrigidos: ${mudaram} com mudança (pendentes de download), ${iguais} sem mudança${falhas.length ? `, ${falhas.length} falha(s)` : ''}`);
         setResumo({ mudaram, iguais, falhas });
         setRodando(false);
         onDone?.();
       };
 
       if (!open) return null;
-      const selCount = pares.filter((p) => p.sel).length;
+      const selCount = lotes.filter((l) => l.sel && l.modo).length;
       const StatusChip = ({ s }) => {
         if (!s) return null;
         const map = { rodando: ['…', 'hsl(var(--muted-foreground))'], mudou: ['pendente ✓', 'hsl(var(--status-ressalva))'], igual: ['sem mudança', 'hsl(var(--muted-foreground))'], falha: ['falha', 'hsl(var(--status-nao-conforme))'] };
         const [txt, col] = map[s] || ['', ''];
-        return <span className="text-[10px] font-semibold" style={{ color: col }}>{txt}</span>;
+        return <span className="text-[10px] font-semibold shrink-0" style={{ color: col }}>{txt}</span>;
       };
 
       return (
-        <Modal open={open} onClose={handleClose} title="Reanalisar com OP corrigida" description="Suba as OPs corrigidas (uma ou várias). O sistema casa cada arquivo com a análise pelo número da OP e refaz a análise. Só as que mudarem de resultado voltam a ficar pendentes de download." size="lg">
+        <Modal open={open} onClose={handleClose} title="Reanalisar documentos corrigidos" description="Suba os documentos corrigidos — soltos ou em pastas (uma por OP). O sistema identifica cada documento, casa com o lote e refaz a análise trocando só o que foi enviado. Só o que mudar volta a ficar pendente de download." size="xl">
           <div className="space-y-4">
-            <DropZone
-              onFiles={(arqs) => { if (!parsing && !rodando) receberArquivos(arqs); }}
-              disabled={parsing || rodando}
-              className="rounded-md border border-dashed p-3 transition-colors"
-            >
+            <DropZone onFiles={(arqs) => { if (!parsing && !rodando) receberArquivos(arqs); }} disabled={parsing || rodando} className="rounded-md border border-dashed p-3 transition-colors">
               {(dragging) => (<>
-                <Input type="file" accept=".pdf,.xlsx,.docx" multiple onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ''; if (fs.length) receberArquivos(fs); }} disabled={parsing || rodando} />
-                <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte as OPs corrigidas aqui' : 'ou arraste as OPs corrigidas para cá (pode soltar várias de uma vez)'}</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Input type="file" accept=".pdf,.xlsx,.csv,.docx" multiple className="flex-1 min-w-[220px]" onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ''; if (fs.length) receberArquivos(fs); }} disabled={parsing || rodando} />
+                  <input ref={pastaRef} type="file" style={{ display: 'none' }} webkitdirectory="" directory="" multiple onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ''; if (fs.length) receberArquivos(fs); }} />
+                  <Button variant="outline" size="sm" onClick={() => pastaRef.current && pastaRef.current.click()} disabled={parsing || rodando}><Icon name="upload" className="h-4 w-4" />Selecionar pasta</Button>
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-1">{dragging ? 'Solte os arquivos ou pastas aqui' : 'ou arraste arquivos/pastas para cá. OP e RC são casadas pelo nº da OP; etiqueta externa e FORM pela série; etiquetas de acessório precisam vir dentro da pasta da OP.'}</div>
               </>)}
             </DropZone>
-            {parsing && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Lendo e casando com as análises…</div>}
+            {parsing && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Lendo, classificando e casando com as análises…</div>}
 
-            {semMatch.length > 0 && (
-              <div className="text-xs rounded-md border border-dashed p-2 space-y-0.5" style={{ borderColor: 'hsl(var(--status-nao-conforme) / 0.4)' }}>
-                <div className="font-semibold text-destructive">{semMatch.length} arquivo(s) não casaram:</div>
-                {semMatch.map((s, i) => <div key={i} className="text-muted-foreground">{s.file.name} — {s.opNum ? `OP ${s.opNum}: ` : ''}{s.motivo}</div>)}
+            {lotes.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">{lotes.length} lote(s) identificado(s) — {selCount} marcado(s)</span>
+                  <div className="flex gap-2 text-xs">
+                    <button className="underline" onClick={() => setLotes((a) => a.map((x) => ({ ...x, sel: !!x.modo })))} disabled={rodando}>marcar todos</button>
+                    <button className="underline" onClick={() => setLotes((a) => a.map((x) => ({ ...x, sel: false })))} disabled={rodando}>desmarcar</button>
+                  </div>
+                </div>
+                <div className="max-h-80 overflow-auto border rounded-lg divide-y">
+                  {lotes.map((L) => {
+                    const trocas = [...Object.keys(L.docs).map((k) => ROTULO_SLOT_REANALISE[k]), ...(L.acessorios.length ? [`${L.acessorios.length} etiqueta(s) de acessório`] : [])];
+                    return (
+                      <div key={L.key} className={cn('flex items-start gap-2 p-2 text-sm', !L.modo && 'opacity-70')}>
+                        <input type="checkbox" checked={L.sel} disabled={rodando || !L.modo} onChange={(e) => setLotes((a) => a.map((x) => (x.key === L.key ? { ...x, sel: e.target.checked } : x)))} className="h-4 w-4 mt-0.5" />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium">OP {L.opNum}{L.serie ? ` · ${L.serie}` : ''} {L.row && <span className="text-xs text-muted-foreground">— {L.row.modelo || '—'} · análise de {L.row.created_at ? new Date(L.row.created_at).toLocaleDateString('pt-BR') : '?'} ({(L.row.status || '').toUpperCase()})</span>}</div>
+                          <div className="text-[11px]">substitui: <strong>{trocas.join(', ') || '—'}</strong>{L.modo === 'completa' && <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted">análise completa (sem documentos guardados)</span>}</div>
+                          {L.motivo && <div className="text-[11px] text-destructive">{L.motivo}</div>}
+                        </div>
+                        <StatusChip s={L.status} />
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
-            {pares.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">{pares.length} OP(s) casada(s) — {selCount} marcada(s)</span>
-                  <div className="flex gap-2 text-xs">
-                    <button className="underline" onClick={() => setPares((a) => a.map((x) => ({ ...x, sel: true })))} disabled={rodando}>marcar todas</button>
-                    <button className="underline" onClick={() => setPares((a) => a.map((x) => ({ ...x, sel: false })))} disabled={rodando}>desmarcar</button>
-                  </div>
-                </div>
-                <div className="max-h-72 overflow-auto border rounded-lg divide-y">
-                  {pares.map((p, i) => (
-                    <div key={i} className="flex items-center gap-2 p-2 text-sm">
-                      <input type="checkbox" checked={p.sel} disabled={rodando} onChange={(e) => setPares((a) => a.map((x) => (x.file === p.file ? { ...x, sel: e.target.checked } : x)))} className="h-4 w-4" />
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium">OP {p.opNum}{p.serie ? ` · ${p.serie}` : ''} <span className="text-xs text-muted-foreground">— {p.row.modelo || '—'}</span></div>
-                        <div className="text-[11px] text-muted-foreground truncate">{p.file.name} · análise de {p.row.created_at ? new Date(p.row.created_at).toLocaleDateString('pt-BR') : '?'} ({(p.row.status || '').toUpperCase()})</div>
-                      </div>
-                      <StatusChip s={p.status} />
-                    </div>
-                  ))}
-                </div>
-              </div>
+            {ignorados.length > 0 && (
+              <details className="text-xs rounded-md border border-dashed p-2" style={{ borderColor: 'hsl(var(--status-ressalva) / 0.5)' }}>
+                <summary className="cursor-pointer font-semibold">{ignorados.length} arquivo(s) não usado(s) — ver motivos</summary>
+                <div className="mt-1 space-y-0.5">{ignorados.map((s, i) => <div key={i} className="text-muted-foreground">{s.nome} — {s.motivo}</div>)}</div>
+              </details>
             )}
 
             {rodando && <div className="text-sm text-muted-foreground"><Icon name="loader" className="h-4 w-4 animate-spin inline mr-2" />Reprocessando {prog.idx}/{prog.total}…</div>}
 
             {resumo && (
               <div className="text-sm rounded-md border p-3 bg-muted/30 space-y-1">
-                <div><strong>{resumo.mudaram}</strong> reanalisada(s) com mudança → pendente(s) de download.</div>
-                <div className="text-muted-foreground">{resumo.iguais} sem mudança (mantidas como estavam).{resumo.falhas.length ? ` ${resumo.falhas.length} falha(s).` : ''}</div>
+                <div><strong>{resumo.mudaram}</strong> reanalisado(s) com mudança → pendente(s) de download.</div>
+                <div className="text-muted-foreground">{resumo.iguais} sem mudança (mantido(s) como estava(m)).{resumo.falhas.length ? ` ${resumo.falhas.length} falha(s).` : ''}</div>
                 {resumo.falhas.length > 0 && <div className="text-[11px] text-destructive">{resumo.falhas.map((f, i) => <div key={i}>{f}</div>)}</div>}
               </div>
             )}
 
             <div className="flex justify-end gap-2 pt-2 border-t">
               <Button variant="outline" onClick={handleClose} disabled={rodando}>{resumo ? 'Fechar' : 'Cancelar'}</Button>
-              {!resumo && <Button onClick={executar} disabled={rodando || selCount === 0}>{rodando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Reprocessando…</> : `Reanalisar ${selCount} OP(s)`}</Button>}
+              {!resumo && <Button onClick={executar} disabled={rodando || selCount === 0}>{rodando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Reprocessando…</> : `Reanalisar ${selCount} lote(s)`}</Button>}
             </div>
           </div>
         </Modal>
@@ -13804,6 +14093,13 @@ ${parecer.parecer_tecnico ? `
             }));
             const { error: errIns } = await supabase.from('envios_pacote').insert(linhas);
             if (errIns) throw errIns;
+            // Acompanhamento de prazo/retorno da correção (tabela própria).
+            try {
+              await supabase.from('correcoes_solicitadas').insert(itens.map((it) => ({
+                numero_op: String(it.opNum || ''), numero_serie: String(it.serie || ''), setor: grupoSel.setor || null,
+                origem: 'slack_pacote', problema: grupoSel.label, enviado_por_id: perfil?.id || null, enviado_por: perfil?.nome_completo || perfil?.email || null,
+              })));
+            } catch (e) { console.warn('Não foi possível registrar o acompanhamento:', e?.message || e); }
             // Reflete na memória para o aviso aparecer sem precisar recarregar.
             setEnviosAnteriores((m) => {
               const n = new Map(m);
@@ -14854,6 +15150,8 @@ ${parecer.parecer_tecnico ? `
       const [filtroEquipamento, setFiltroEquipamento] = useState('todos');
       const [filtroModelo, setFiltroModelo] = useState('todos');
       const [filtroOrigem, setFiltroOrigem] = useState('todos');     // 'todos' | 'agente' | 'manual'
+      // Correções enviadas aos setores (acompanhamento de prazo/retorno).
+      const [enviosCorrecaoHist, setEnviosCorrecaoHist] = useState([]);
       const [filtroStatus, setFiltroStatus] = useState('todos'); // 'todos' | 'conforme' | 'corrigido' | 'nao_conforme'
       // NF de venda vinculada por número de série (rastreabilidade) + filtro "sem NF"
       const [nfsVenda, setNfsVenda] = useState([]);
@@ -14891,6 +15189,7 @@ ${parecer.parecer_tecnico ? `
             }
             setNfsVenda(todas);
           } catch (e) { setNfsVenda([]); }
+          try { setEnviosCorrecaoHist(await buscarTudoSupabase('correcoes_solicitadas', 'id, numero_op, numero_serie, setor, problema, enviado_em', { campo: 'enviado_em', asc: false })); } catch (e) { setEnviosCorrecaoHist([]); }
           setLoading(false);
         };
         load();
@@ -14906,6 +15205,30 @@ ${parecer.parecer_tecnico ? `
         }
         return m;
       }, [nfsVenda]);
+
+      // Correção pendente por lote: último envio DEPOIS da análise vigente, com o
+      // lote ainda NC/ressalva. Prazo: 1 dia útil com NF de venda, 3 sem.
+      const correcaoPendente = useMemo(() => {
+        const norm = (op, serie) => `${String(op || '').replace(/\D/g, '')}|${String(serie || '').toUpperCase().replace(/\s+/g, '')}`;
+        const ultimo = new Map();
+        for (const e of enviosCorrecaoHist) {
+          const k = norm(e.numero_op, e.numero_serie);
+          const atual = ultimo.get(k);
+          if (!atual || new Date(e.enviado_em) > new Date(atual.enviado_em)) ultimo.set(k, e);
+        }
+        const agora = new Date();
+        const out = new Map(); // id da análise vigente -> info
+        for (const a of analises) {
+          if (a.status !== 'nao_conforme' && a.status !== 'ressalva') continue;
+          const e = ultimo.get(norm(a.numero_op, a.numero_serie));
+          if (!e || new Date(e.enviado_em) <= new Date(a.created_at)) continue;
+          const temNf = !!(a.numero_serie && nfPorSerie.has(a.numero_serie));
+          const prazoDias = temNf ? PRAZO_CORRECAO_COM_NF : PRAZO_CORRECAO_SEM_NF;
+          const prazoEm = somarDiasUteis(new Date(e.enviado_em), prazoDias);
+          out.set(a.id, { envio: e, temNf, prazoDias, prazoEm, dias: diasUteisEntre(new Date(e.enviado_em), agora), atrasada: agora > prazoEm });
+        }
+        return out;
+      }, [enviosCorrecaoHist, analises, nfPorSerie]);
 
       // Filtro do histórico: apenas a análise MAIS RECENTE por OP/série.
       // Análises originais que foram corrigidas (têm re-análises filhas) são
@@ -15058,6 +15381,10 @@ ${parecer.parecer_tecnico ? `
         } else if (filtroStatus === 'em_aberto') {
           // Atalho para a fila de trabalho: tudo que ainda precisa de correção.
           unicas = unicas.filter((a) => a.status === 'nao_conforme' || a.status === 'ressalva');
+        } else if (filtroStatus === 'aguardando_correcao') {
+          unicas = unicas.filter((a) => correcaoPendente.has(a.id));
+        } else if (filtroStatus === 'correcao_atrasada') {
+          unicas = unicas.filter((a) => correcaoPendente.get(a.id)?.atrasada);
         }
         if (filtroSemNf) {
           unicas = unicas.filter((a) => a.numero_serie && !nfPorSerie.has(a.numero_serie));
@@ -15079,7 +15406,7 @@ ${parecer.parecer_tecnico ? `
           (a.numero_serie || '').toLowerCase().includes(q) ||
           (a.modelo || '').toLowerCase().includes(q)
         );
-      }, [lotesVigentes, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, filtroProblema, nfPorSerie, sort]);
+      }, [lotesVigentes, filter, filtroPeriodo, filtroAno, filtroMes, filtroPendentes, filtroEquipamento, filtroModelo, filtroOrigem, filtroStatus, filtroSemNf, filtroProblema, nfPorSerie, correcaoPendente, sort]);
 
       // Contador de pacotes pendentes (apenas análises do agente, com período aplicado)
       const totalPendentes = useMemo(() => {
@@ -15463,8 +15790,8 @@ ${parecer.parecer_tecnico ? `
                       onClick: () => setImportOpen(true),
                     },
                     {
-                      label: 'Reanalisar OP corrigida', icon: 'upload', oculto: !can('historico_correcao'),
-                      descricao: 'Sobe a OP corrigida e refaz a análise (individual ou em massa)',
+                      label: 'Reanalisar documentos corrigidos', icon: 'upload', oculto: !can('historico_correcao'),
+                      descricao: 'Sobe OP, RC, etiquetas ou FORM corrigidos — soltos ou em pastas — e refaz as análises em massa',
                       onClick: () => setReanalisarOpOpen(true),
                     },
                     {
@@ -15613,7 +15940,7 @@ ${parecer.parecer_tecnico ? `
                           // O filtro por problema só faz sentido sobre pendências;
                           // se sair de um status que mostra apontamento em aberto,
                           // zera para não filtrar por algo que não está mais visível.
-                          if (!['em_aberto', 'nao_conforme', 'ressalva'].includes(v)) setFiltroProblema('todos');
+                          if (!['em_aberto', 'nao_conforme', 'ressalva', 'aguardando_correcao', 'correcao_atrasada'].includes(v)) setFiltroProblema('todos');
                         }}
                         className={selClasse} title="Filtrar por status da análise">
                         <option value="todos">Todos</option>
@@ -15622,9 +15949,11 @@ ${parecer.parecer_tecnico ? `
                         <option value="corrigido">Conforme corrigido</option>
                         <option value="ressalva">Conforme com ressalvas</option>
                         <option value="nao_conforme">Não conforme</option>
+                        <option value="aguardando_correcao">Enviadas p/ correção — aguardando retorno</option>
+                        <option value="correcao_atrasada">Correção atrasada (fora do prazo)</option>
                       </select>
                     </Campo>
-                    {['em_aberto', 'nao_conforme', 'ressalva'].includes(filtroStatus) && (
+                    {['em_aberto', 'nao_conforme', 'ressalva', 'aguardando_correcao', 'correcao_atrasada'].includes(filtroStatus) && (
                       <Campo label="Problema">
                         <select value={filtroProblema} onChange={(e) => setFiltroProblema(e.target.value)} className={selClasse} title="Filtrar pelo documento com apontamento em aberto — onde buscar o documento corrigido">
                           <option value="todos">Todos</option>
@@ -15740,6 +16069,14 @@ ${parecer.parecer_tecnico ? `
                             <div className="inline-flex items-center">
                               <StatusBadge status={a.status} />
                               <CorrecaoChip info={cInfo} />
+                              {(() => { const cp = correcaoPendente.get(a.id); if (!cp) return null;
+                                const cor = cp.atrasada ? 'hsl(0 72% 45%)' : 'hsl(28 80% 35%)', fundo = cp.atrasada ? 'hsl(0 85% 94%)' : 'hsl(35 92% 90%)';
+                                return (
+                                  <span className="inline-flex items-center ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold cursor-help whitespace-nowrap" style={{ backgroundColor: fundo, color: cor }}
+                                    title={`Enviada para correção (${cp.envio.setor || '—'}) em ${new Date(cp.envio.enviado_em).toLocaleString('pt-BR')}\nPrazo: ${cp.prazoDias} dia(s) útil(eis)${cp.temNf ? ' — equipamento com NF de venda' : ''} → ${cp.prazoEm.toLocaleString('pt-BR')}${cp.envio.problema ? '\n' + cp.envio.problema : ''}`}>
+                                    {cp.atrasada ? 'Atrasada' : 'Aguardando'} {cp.envio.setor || ''} · {cp.dias.toFixed(1).replace('.', ',')} d úteis
+                                  </span>
+                                ); })()}
                               {a.origem_analise === 'manual' && (
                                 <span
                                   className="inline-flex items-center justify-center w-5 h-5 ml-1.5 rounded-full text-[10px] font-bold cursor-help"
@@ -19033,6 +19370,7 @@ ${parecer.parecer_tecnico ? `
       // NFs de venda (rastreabilidade série × nota) — pasta de rede e agendamento
       const [nfPasta, setNfPasta] = useState('');
       const [nfDia, setNfDia] = useState('1');
+      const [nfFreq, setNfFreq] = useState('diaria'); // 'diaria' | 'mensal'
       const [nfHora, setNfHora] = useState('6');
       const [nfAnoMin, setNfAnoMin] = useState('2026');
       const [salvandoNf, setSalvandoNf] = useState(false);
@@ -19043,7 +19381,7 @@ ${parecer.parecer_tecnico ? `
       useEffect(() => {
         (async () => {
           try {
-            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo', 'meta_aprovacao', 'relatorio_auto_pasta', 'relatorio_auto_dia', 'relatorio_auto_hora', 'relatorio_auto_ultimo']);
+            const { data } = await supabase.from('config_app').select('chave, valor').in('chave', ['pasta_destino', 'pasta_por_mes', 'reinc_piso', 'reinc_incidencia_pct', 'reinc_fator_salto', 'nf_pasta_rede', 'nf_frequencia', 'nf_dia_mes', 'nf_hora', 'nf_ano_minimo', 'meta_aprovacao', 'relatorio_auto_pasta', 'relatorio_auto_dia', 'relatorio_auto_hora', 'relatorio_auto_ultimo']);
             if (data && data.length) {
               const map = Object.fromEntries(data.map((r) => [r.chave, r.valor]));
               if (map.pasta_destino != null) { setPastaDestino(map.pasta_destino); localStorage.setItem('confiance_pasta_destino', map.pasta_destino); }
@@ -19053,6 +19391,7 @@ ${parecer.parecer_tecnico ? `
               if (map.reinc_fator_salto != null && map.reinc_fator_salto !== '') setReincFator(String(map.reinc_fator_salto));
               if (map.nf_pasta_rede != null) setNfPasta(String(map.nf_pasta_rede));
               if (map.nf_dia_mes != null && map.nf_dia_mes !== '') setNfDia(String(map.nf_dia_mes));
+              if (map.nf_frequencia === 'mensal' || map.nf_frequencia === 'diaria') setNfFreq(map.nf_frequencia);
               if (map.nf_hora != null && map.nf_hora !== '') setNfHora(String(map.nf_hora));
               if (map.nf_ano_minimo != null && map.nf_ano_minimo !== '') setNfAnoMin(String(map.nf_ano_minimo));
               if (map.meta_aprovacao != null && map.meta_aprovacao !== '') setMetaAprov(String(map.meta_aprovacao));
@@ -19110,14 +19449,15 @@ ${parecer.parecer_tecnico ? `
           const anoMin = String(Math.min(2100, Math.max(2000, parseInt(nfAnoMin, 10) || 2026)));
           const { error } = await supabase.from('config_app').upsert([
             { chave: 'nf_pasta_rede', valor: (nfPasta || '').trim(), updated_at: agora, updated_by: autor },
+            { chave: 'nf_frequencia', valor: nfFreq, updated_at: agora, updated_by: autor },
             { chave: 'nf_dia_mes', valor: dia, updated_at: agora, updated_by: autor },
             { chave: 'nf_hora', valor: hora, updated_at: agora, updated_by: autor },
             { chave: 'nf_ano_minimo', valor: anoMin, updated_at: agora, updated_by: autor },
           ], { onConflict: 'chave' });
           if (error) throw error;
           setNfDia(dia); setNfHora(hora); setNfAnoMin(anoMin);
-          registrarLog(perfil, 'editar_config', 'config', 'nfs_venda', `${autor || 'Usuário'} configurou a varredura das NFs de venda (dia ${dia}, ${hora}h)`);
-          toast.success('Configuração das NFs de venda salva. A varredura roda no servidor no dia e hora definidos.');
+          registrarLog(perfil, 'editar_config', 'config', 'nfs_venda', `${autor || 'Usuário'} configurou a varredura das NFs de venda (${nfFreq === 'mensal' ? `mensal, dia ${dia}` : 'diária'}, ${hora}h)`);
+          toast.success(`Configuração das NFs de venda salva. A varredura roda no servidor ${nfFreq === 'mensal' ? `todo dia ${dia}` : 'todos os dias'} às ${hora}h.`);
         } catch (e) {
           toast.error('Erro ao salvar: ' + (e?.message || e));
         } finally { setSalvandoNf(false); }
@@ -19303,10 +19643,18 @@ ${parecer.parecer_tecnico ? `
                     Pode informar <strong>várias pastas separadas por ponto e vírgula</strong>, e usar <code>{'{ANO}'}</code> e <code>{'{ANO-1}'}</code> — assim a configuração não precisa ser trocada na virada do ano.
                   </p>
                 </div>
-                <div className="grid grid-cols-3 gap-3 max-w-md">
+                <div className="grid grid-cols-4 gap-3 max-w-xl">
+                  <div>
+                    <Label>Frequência</Label>
+                    <select value={nfFreq} onChange={(e) => setNfFreq(e.target.value)} disabled={!podeEditar}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                      <option value="diaria">Diária</option>
+                      <option value="mensal">Mensal</option>
+                    </select>
+                  </div>
                   <div>
                     <Label>Dia do mês</Label>
-                    <Input type="number" min="1" max="28" value={nfDia} onChange={(e) => setNfDia(e.target.value)} disabled={!podeEditar} />
+                    <Input type="number" min="1" max="28" value={nfDia} onChange={(e) => setNfDia(e.target.value)} disabled={!podeEditar || nfFreq !== 'mensal'} />
                   </div>
                   <div>
                     <Label>Hora</Label>
@@ -19317,6 +19665,9 @@ ${parecer.parecer_tecnico ? `
                     <Input type="number" min="2000" max="2100" value={nfAnoMin} onChange={(e) => setNfAnoMin(e.target.value)} disabled={!podeEditar} />
                   </div>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  <strong>Diária</strong> (recomendado): o prazo de retorno das correções depende de o equipamento já ter NF de venda (1 dia útil com NF, 3 sem), então as NFs precisam estar atualizadas todo dia. A varredura só lê arquivos novos ou alterados — é rápida.
+                </p>
                 <p className="text-xs text-muted-foreground">
                   O <strong>ano mínimo</strong> descarta pastas de anos anteriores: como todo equipamento analisado na plataforma foi fabricado a partir de 2026, notas de 2025 para trás não têm série que casaria com alguma análise — varrê-las só gasta tempo. O curinga <code>{'{ANO-1}'}</code> passa a valer sozinho na virada do ano, sem precisar reconfigurar.
                 </p>

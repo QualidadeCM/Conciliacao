@@ -760,26 +760,33 @@ app.get('/varrer-nfs/status', (req, res) => {
   res.json({ ok: true, status: varreduraStatus });
 });
 
-// ---- Agendamento mensal (sem dependencia externa) -------------------------
-//   Confere de hora em hora se chegou o dia/hora configurados (config_app:
-//   nf_dia_mes e nf_hora, default dia 1o as 06h) e se ainda nao rodou hoje.
+// ---- Agendamento da varredura de NFs (sem dependencia externa) -----------
+//   Confere de hora em hora se chegou a hora configurada (config_app:
+//   nf_frequencia 'diaria' (padrao) | 'mensal', nf_dia_mes (so no mensal),
+//   nf_hora — padrao 06h) e se ainda nao rodou hoje. Diaria porque o prazo de
+//   correcao depende de o equipamento ja ter NF (1 dia util com NF, 3 sem).
+//   A varredura e incremental (so arquivos novos/alterados), entao e leve.
 //   Roda dentro do proprio servico, no servidor — nao depende de ninguem
 //   estar com a plataforma aberta.
 let _ultimaVarreduraDia = '';
+const dataLocalISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 async function checarAgendamentoNfs() {
   try {
-    const cfg = await lerConfig(['nf_pasta_rede', 'nf_dia_mes', 'nf_hora', 'nf_ultima_varredura']);
+    const cfg = await lerConfig(['nf_pasta_rede', 'nf_frequencia', 'nf_dia_mes', 'nf_hora', 'nf_ultima_varredura']);
     if (!String(cfg.nf_pasta_rede || '').trim()) return;
+    const mensal = String(cfg.nf_frequencia || 'diaria') === 'mensal';
     const diaAlvo = parseInt(cfg.nf_dia_mes || '1', 10) || 1;
     const horaAlvo = parseInt(cfg.nf_hora || '6', 10) || 6;
     const agora = new Date();
-    if (agora.getDate() !== diaAlvo || agora.getHours() < horaAlvo) return;
-    const hoje = agora.toISOString().slice(0, 10);
+    if (mensal && agora.getDate() !== diaAlvo) return;
+    if (agora.getHours() < horaAlvo) return;
+    const hoje = dataLocalISO(agora);
     if (_ultimaVarreduraDia === hoje) return;
-    if (cfg.nf_ultima_varredura && String(cfg.nf_ultima_varredura).slice(0, 10) === hoje) { _ultimaVarreduraDia = hoje; return; }
+    if (cfg.nf_ultima_varredura && dataLocalISO(new Date(cfg.nf_ultima_varredura)) === hoje) { _ultimaVarreduraDia = hoje; return; }
+    if (varreduraStatus.rodando) return;
     _ultimaVarreduraDia = hoje;
-    console.log('[NFs] varredura mensal automatica iniciando...');
-    dispararVarredura({ origem: 'varredura_mensal' });
+    console.log(`[NFs] varredura ${mensal ? 'mensal' : 'diaria'} automatica iniciando...`);
+    dispararVarredura({ origem: mensal ? 'varredura_mensal' : 'varredura_diaria' });
   } catch (err) {
     console.error('[ERRO agendamento NFs]', err.message);
   }
@@ -838,7 +845,11 @@ async function gerarRelatoriosMensais({ mes, origem }) {
   const { data: produtos } = await admin.from('produtos').select('id, modelo, codigo_sapiens, equipamento');
   let temposAtivos = [];
   try { const { data } = await admin.from('tempos_estagio').select('equipamento, estagio_numero, ativo').eq('ativo', true); temposAtivos = data || []; } catch (e) { /* tabela opcional */ }
-  const base = motor.calcularBaseQualidade({ analises, produtos: produtos || [], temposAtivos });
+  // Acompanhamento das correções (prazo 1 dia útil com NF / 3 sem) — opcional.
+  let envios = [], nfSeries = new Set();
+  try { envios = await buscarTodasLinhas('correcoes_solicitadas', 'id, numero_op, numero_serie, setor, origem, problema, enviado_em, enviado_por', 'enviado_em'); } catch (e) { envios = []; }
+  try { nfSeries = new Set((await buscarTodasLinhas('nfs_venda', 'numero_serie', 'numero_serie')).map((r) => String(r.numero_serie || '').toUpperCase().replace(/\s+/g, '')).filter(Boolean)); } catch (e) { nfSeries = new Set(); }
+  const base = motor.calcularBaseQualidade({ analises, produtos: produtos || [], temposAtivos, envios, nfSeries });
   const dir = path.join(pasta, alvo.slice(0, 4));
   fs.mkdirSync(dir, { recursive: true });
   const meta = parseFloat(String(cfg.meta_aprovacao || '').replace(',', '.')) || 90;
