@@ -7054,6 +7054,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             const discrepancias = [];
             const discrepanciasDet = []; // {descricao, codigoSapiens, loteRC, loteEtq} — 1 apontamento por acessório
             const conferidos = [];
+            const semLoteRC = []; // {descricao, codigoSapiens, loteEtq} — RC sem lote/série do acessório
             // Normaliza para comparação: maiúsculas, sem hífens/espaços/pontos.
             const norm = (s) => String(s || '').replace(/[\s\-.]/g, '').toUpperCase();
             // Normaliza numérico: além de norm(), remove zeros à esquerda.
@@ -7070,27 +7071,42 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
               if (!etq) continue; // sem etiqueta para confrontar — passa
               const loteEtq = etq.loteOuSerie || null;
-              if (!loteEtq) continue;
 
               // Procura o lote/série na MESMA LINHA do código Sapiens dentro da RC.
               // Cada acessório ocupa uma linha da tabela ("20 ES ACE0004 Cabo SCM ... UN 1 1 S CSCM-20261-28"),
               // então confinar a busca à linha evita capturar valores de linhas vizinhas.
               const rcText = (docs.rc?._raw || '');
               const linhas = rcText.split(/\r?\n/);
-              const linha = linhas.find((l) => l.includes(a.codigoSapiens));
-              if (!linha) continue;
+              const idxLinha = linhas.findIndex((l) => l.includes(a.codigoSapiens));
+              if (idxLinha < 0) continue;
+              const linha = linhas[idxLinha];
 
               // Coleta os candidatos da linha:
               //  · alfanumérico tipo "CSCM-20261-28" / "MLED-20265-3" (série real)
               //  · 15-dígito (PDF: barcode com prefixo 00)
               //  · 13-dígito (CSV: EAN-13 puro)
-              const candidatos = [
-                ...(linha.match(/\b[A-Z][A-Z0-9]{1,7}-\d{4,6}-\d+\b/g) || []),
-                ...(linha.match(/\b\d{3,}\/\d{3,}\b/g) || []),   // prefixo/série (ex.: 000859/034718)
-                ...(linha.match(/\b\d{15}\b/g) || []),
-                ...(linha.match(/\b\d{13}\b/g) || []),
+              const extrairCandidatos = (txt) => [
+                ...(txt.match(/\b[A-Z][A-Z0-9]{1,7}-\d{4,6}-\d+\b/g) || []),
+                ...(txt.match(/\b\d{3,}\/\d{3,}\b/g) || []),   // prefixo/série (ex.: 000859/034718)
+                ...(txt.match(/\b\d{15}\b/g) || []),
+                ...(txt.match(/\b\d{13}\b/g) || []),
               ];
-              if (candidatos.length === 0) continue;
+              let candidatos = extrairCandidatos(linha);
+              // O PDF às vezes quebra a coluna de lote/série na linha seguinte; só vale
+              // se essa linha NÃO começa outro componente (não traz código Sapiens).
+              if (candidatos.length === 0) {
+                const prox = linhas[idxLinha + 1] || '';
+                if (prox && !/\b[A-Z]{2,5}\d{4,5}\b/.test(prox)) candidatos = extrairCandidatos(prox);
+              }
+              if (candidatos.length === 0) {
+                // A etiqueta traz lote/série mas a RC não: a baixa do componente foi feita
+                // sem o lote/série — antes isso passava em silêncio (não havia o que comparar).
+                if (loteEtq) {
+                  semLoteRC.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, loteEtq });
+                }
+                continue;
+              }
+              if (!loteEtq) continue;
 
               // Bateu? Se QUALQUER candidato da RC normaliza igual à etiqueta, é conforme.
               // Compara DUAS formas em paralelo:
@@ -7115,7 +7131,18 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 discrepanciasDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, loteRC, loteEtq });
               }
             }
-            if (discrepancias.length === 0 && conferidos.length > 0) {
+            // RC sem lote/série do acessório (etiqueta tem) → NC, responsável Almoxarifado (baixa).
+            if (semLoteRC.length > 0) {
+              add(C1, 'Verificado se a RC informa o lote/série dos acessórios', 'nao_conforme',
+                semLoteRC.map((d) => `${d.descricao} (${d.codigoSapiens}): RC sem lote/série × Etiqueta="${d.loteEtq}"`).join('; '));
+              for (const d of semLoteRC) {
+                apontar('nao_conforme', 1, 'RC × Etiqueta Acessório',
+                  `Acessório ${d.descricao} (${d.codigoSapiens}) está na RC sem número de lote/série, mas a etiqueta traz "${d.loteEtq}": a baixa foi feita sem o lote/série, não há como rastrear.`,
+                  'Corrigir a RC informando o lote/série do acessório (Almoxarifado) e refazer a análise.',
+                  'ISO 13485 §7.5.9 (rastreabilidade)');
+              }
+            }
+            if (discrepancias.length === 0 && semLoteRC.length === 0 && conferidos.length > 0) {
               // EXEMPLO do novo padrão: "o que foi verificado" (frase) + "valores lidos" (dados).
               add(C1, 'Verificada a consistência do lote/série dos acessórios entre RC e Etiqueta', 'conforme',
                 conferidos.join('; '));
