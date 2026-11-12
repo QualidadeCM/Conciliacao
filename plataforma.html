@@ -7055,6 +7055,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             const discrepanciasDet = []; // {descricao, codigoSapiens, loteRC, loteEtq} — 1 apontamento por acessório
             const conferidos = [];
             const semLoteRC = []; // {descricao, codigoSapiens, loteEtq} — RC sem lote/série do acessório
+            const semLoteEtq = []; // {descricao, codigoSapiens} — etiqueta do acessório sem lote/série
             // Normaliza para comparação: maiúsculas, sem hífens/espaços/pontos.
             const norm = (s) => String(s || '').replace(/[\s\-.]/g, '').toUpperCase();
             // Normaliza numérico: além de norm(), remove zeros à esquerda.
@@ -7071,6 +7072,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
               if (!etq) continue; // sem etiqueta para confrontar — passa
               const loteEtq = etq.loteOuSerie || null;
+              // Campo em branco também é apontamento: etiqueta sem lote/série não permite
+              // rastrear nem confrontar com a RC.
+              if (!loteEtq) { semLoteEtq.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens }); continue; }
 
               // Procura o lote/série na MESMA LINHA do código Sapiens dentro da RC.
               // Cada acessório ocupa uma linha da tabela ("20 ES ACE0004 Cabo SCM ... UN 1 1 S CSCM-20261-28"),
@@ -7101,12 +7105,9 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               if (candidatos.length === 0) {
                 // A etiqueta traz lote/série mas a RC não: a baixa do componente foi feita
                 // sem o lote/série — antes isso passava em silêncio (não havia o que comparar).
-                if (loteEtq) {
-                  semLoteRC.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, loteEtq });
-                }
+                semLoteRC.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, loteEtq });
                 continue;
               }
-              if (!loteEtq) continue;
 
               // Bateu? Se QUALQUER candidato da RC normaliza igual à etiqueta, é conforme.
               // Compara DUAS formas em paralelo:
@@ -7142,6 +7143,16 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                   'ISO 13485 §7.5.9 (rastreabilidade)');
               }
             }
+            if (semLoteEtq.length > 0) {
+              add(C1, 'Verificado se a etiqueta do acessório informa lote/série', 'ressalva',
+                semLoteEtq.map((d) => `${d.descricao} (${d.codigoSapiens}): etiqueta sem lote/série`).join('; '));
+              for (const d of semLoteEtq) {
+                apontar('ressalva', 1, 'Etiqueta Acessório',
+                  `Etiqueta do acessório ${d.descricao} (${d.codigoSapiens}) sem lote/série legível: não foi possível conferir com a RC nem garantir a rastreabilidade.`,
+                  'Conferir a etiqueta; se o lote/série existe, corrigir/reimprimir a etiqueta de forma legível.',
+                  'ISO 13485 §7.5.9 (rastreabilidade)');
+              }
+            }
             if (discrepancias.length === 0 && semLoteRC.length === 0 && conferidos.length > 0) {
               // EXEMPLO do novo padrão: "o que foi verificado" (frase) + "valores lidos" (dados).
               add(C1, 'Verificada a consistência do lote/série dos acessórios entre RC e Etiqueta', 'conforme',
@@ -7165,9 +7176,11 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             // o flag is_fabricante_confiance cadastrado na Ficha.
             const classifOk = [], classifNc = [];
             const classifNcDet = []; // {descricao, codigoSapiens, etqLbl, fchLbl}
+            const classifVazio = []; // etiqueta sem "Fabricante:/Fornecedor:" preenchido
             for (const a of presentes) {
               const etq = etAcs.find((e) => e?.codigoSapiens === a.codigoSapiens);
-              if (!etq || !etq.tipoFabForn) continue; // sem info na etiqueta — passa
+              if (!etq) continue;
+              if (!etq.tipoFabForn) { classifVazio.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens }); continue; } // em branco → ressalva
               // Ficha: tipo='F' se is_fabricante_confiance, 'Fo' caso contrário
               const esperado = a.tipo; // 'F' ou 'Fo'
               if (etq.tipoFabForn === esperado) {
@@ -7178,6 +7191,13 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 classifNc.push(`${a.descricao} (${a.codigoSapiens}): etiqueta="${etqLbl}" × Ficha="${fchLbl}"`);
                 classifNcDet.push({ descricao: a.descricao, codigoSapiens: a.codigoSapiens, etqLbl, fchLbl });
               }
+            }
+            for (const d of classifVazio) {
+              add(C1, 'Classificação Fabricante/Fornecedor dos acessórios', 'ressalva', `${d.descricao} (${d.codigoSapiens}): etiqueta sem Fabricante/Fornecedor informado.`);
+              apontar('ressalva', 1, 'Etiqueta Acessório',
+                `Etiqueta do acessório ${d.descricao} (${d.codigoSapiens}) sem a indicação de Fabricante/Fornecedor (campo em branco ou ilegível).`,
+                'Conferir a etiqueta; se o campo existe, corrigir/reimprimir de forma legível.',
+                'RDC 665/2022');
             }
             if (classifNc.length === 0 && classifOk.length > 0) {
               add(C1, 'Classificação Fabricante/Fornecedor dos acessórios', 'conforme',
@@ -7255,6 +7275,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               .split(/[^A-Z0-9]+/).filter((t) => t.length >= 3 && !stopwords.has(t.toLowerCase()));
             const descOk = [], descNc = [];
             const descNcDet = []; // {codigoSapiens, msg} — 1 apontamento por etiqueta/código
+            const descVazio = []; // etiquetas sem descrição
             const acessoriosFicha = produto?.acessorios || [];
             for (const etq of etAcs) {
               if (!etq?.codigoSapiens) continue;
@@ -7266,10 +7287,13 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 descNcDet.push({ codigoSapiens: etq.codigoSapiens, msg });
                 continue;
               }
-              if (!etq.descricao) continue; // etiqueta sem descrição parseável — passa
+              if (!etq.descricao || tokenize(etq.descricao).length === 0) {
+                // Descrição em branco/ilegível na etiqueta → ressalva (não dá para confirmar o item).
+                descVazio.push(`${aFicha.descricao} (${etq.codigoSapiens})`);
+                continue;
+              }
               const tFicha = new Set(tokenize(aFicha.descricao));
               const tEtq = tokenize(etq.descricao);
-              if (tEtq.length === 0) continue;
               const common = tEtq.filter((t) => tFicha.has(t)).length;
               if (common === 0) {
                 const msg = `código ${etq.codigoSapiens}: etiqueta diz "${etq.descricao}" mas a Ficha cadastra "${aFicha.descricao}" para esse código`;
@@ -7278,6 +7302,13 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
               } else {
                 descOk.push(`${etq.codigoSapiens} (${etq.descricao})`);
               }
+            }
+            for (const d of descVazio) {
+              add(C1, 'Descrição do acessório × Código Sapiens', 'ressalva', `Etiqueta de ${d}: descrição em branco/ilegível.`);
+              apontar('ressalva', 1, 'Etiqueta Acessório',
+                `Etiqueta do acessório ${d} sem descrição legível: não foi possível confirmar que o item corresponde ao código.`,
+                'Conferir a etiqueta e, se necessário, reimprimir de forma legível.',
+                'ISO 13485 §7.5.9');
             }
             if (descNc.length > 0) {
               add(C1, 'Descrição do acessório × Código Sapiens', 'nao_conforme',
