@@ -117,7 +117,7 @@ A plataforma tenta o serviço local primeiro e, se ele estiver fora do ar, **cai
 
 - Nenhum documento sai da rede da empresa — alinhado às regras de armazenamento do SGQ.
 - O PDF gerado é **sem criptografia/restrições**, compatível com assinatura digital (ICP-Brasil) no Adobe Acrobat.
-- Este serviço é a versão interina da conversão descrita em `ESPEC_PD_PACOTE_SERVIDOR_E_PDF_LOCAL.md`; na migração, o P&D pode incorporá-lo ao backend REST oficial.
+- Este serviço é a versão interina da conversão descrita em `SISTEMA_ATUAL_E_MIGRACAO_PD.md`; na migração, o P&D pode incorporá-lo ao backend REST oficial.
 
 ---
 

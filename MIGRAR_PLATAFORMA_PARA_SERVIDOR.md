@@ -90,7 +90,7 @@ liberação da porta e testes.
 
 O banco de dados é o Supabase (Postgres gerenciado), já em uso e fora do escopo
 desta migração — nada muda nele. A migração para MySQL local, conforme o padrão da
-empresa, está prevista em documento separado (`PLANO_MIGRACAO_P&D_SOFTWARE.md`).
+empresa, está prevista em documento separado (`SISTEMA_ATUAL_E_MIGRACAO_PD.md`).
 
 ---
 

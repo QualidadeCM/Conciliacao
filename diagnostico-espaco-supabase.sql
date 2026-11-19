@@ -131,3 +131,29 @@ select arq.tipo,
   left join subst s on s.id = arq.analise_id
  group by 1, 2
  order by 4 desc;
+
+
+-- ============================================================================
+-- 10) PASTAS DESCARTÁVEIS DO STORAGE (para apagar pelo painel: Storage → pacotes-analise)
+--     Lista as 100 pastas mais pesadas que são órfãs (análise não existe mais)
+--     ou de análises SUBSTITUÍDAS por reanálise. A coluna "pasta" é o nome da
+--     pasta no painel. NÃO inclui análises vigentes. Somente leitura.
+-- ============================================================================
+with arq as (
+  select split_part(o.name, '/', 1) as pasta,
+         coalesce((o.metadata->>'size')::bigint, 0) as bytes
+    from storage.objects o
+   where o.bucket_id = 'pacotes-analise'
+     and split_part(o.name, '/', 1) ~ '^[0-9a-f-]{36}$'
+), subst as (select distinct analise_origem_id as id from analises where analise_origem_id is not null)
+select arq.pasta,
+       case when a.id is null then 'órfã' else 'substituída' end as situacao,
+       count(*) as arquivos,
+       round(sum(arq.bytes) / 1024.0 / 1024.0, 2) as mb
+  from arq
+  left join analises a on a.id = arq.pasta::uuid
+  left join subst s on s.id = arq.pasta::uuid
+ where a.id is null or s.id is not null
+ group by arq.pasta, a.id
+ order by sum(arq.bytes) desc
+ limit 100;
