@@ -197,10 +197,12 @@ Abre depois da análise e também a partir do Histórico e do Dashboard. Tem set
 | Importar planilha | Importa as análises manuais feitas antes da plataforma (XLSX, com modelo para baixar) |
 | Reanalisar documentos corrigidos | Recebe vários documentos corrigidos, soltos ou em pastas, e descobre a que lote cada um pertence (pelo nº da OP na OP/RC e pela série na etiqueta/FORM). Reanalisa cada lote substituindo só o que veio. Para análises sem originais guardados, aceita a pasta completa (OP + RC + etiqueta externa no mínimo) |
 | Enviar problema em pacote | Agrupa os lotes em aberto pelo mesmo problema e envia uma única mensagem ao Slack do setor, com aviso de "já cobrado" quando o lote já foi enviado antes |
-| Exportar OPs em aberto | Excel com os lotes NC/ressalva e seus apontamentos |
+| Exportar OPs em aberto | Excel com os lotes NC/ressalva e seus apontamentos (uma linha por apontamento) |
 | Exportar Histórico | Excel da lista filtrada |
 | Exportar p/ auditoria | ZIP com sumário em PDF e uma pasta por análise (até 50) |
 | Backup mensal | Excel com todas as análises do banco |
+
+As três exportações em Excel (Exportar Histórico, Exportar OPs em aberto e Backup mensal) trazem a **NF de venda** vinculada ao lote pela série: número/série da nota, data de emissão, cliente e tipo de saída (venda ou outra saída). Se a série aparece em mais de uma nota, todas saem na mesma célula, em ordem de emissão, separadas por "; ".
 
 **d) Outros recursos**
 - Nova análise manual e "marcar NC manual como corrigida".

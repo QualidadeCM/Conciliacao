@@ -15237,7 +15237,7 @@ ${parecer.parecer_tecnico ? `
             let de = 0, todas = [];
             for (;;) {
               const { data: nv, error } = await supabase.from('nfs_venda')
-                .select('numero_serie, numero_nf, serie_nf, data_emissao, cliente_nome')
+                .select('numero_serie, numero_nf, serie_nf, data_emissao, cliente_nome, tipo_movimento')
                 .order('numero_serie', { ascending: true })
                 .range(de, de + 999);
               if (error) throw error;
@@ -15263,6 +15263,33 @@ ${parecer.parecer_tecnico ? `
         }
         return m;
       }, [nfsVenda]);
+
+      // NF(s) de saída vinculadas ao lote, para as exportações. Casa pela série
+      // normalizada (maiúsculas, sem espaços) para não perder nota por diferença
+      // de digitação. Mais de uma nota (ex.: venda + devolução + nova venda) sai
+      // em ordem de emissão, separadas por "; ".
+      const nfPorSerieNorm = useMemo(() => {
+        const norm = (x) => String(x || '').toUpperCase().replace(/\s+/g, '');
+        const m = new Map();
+        for (const n of nfsVenda) {
+          const k = norm(n.numero_serie);
+          if (!k) continue;
+          if (!m.has(k)) m.set(k, []);
+          m.get(k).push(n);
+        }
+        for (const l of m.values()) l.sort((a, b) => String(a.data_emissao || '').localeCompare(String(b.data_emissao || '')));
+        return m;
+      }, [nfsVenda]);
+      const colunasNf = (serie) => {
+        const l = nfPorSerieNorm.get(String(serie || '').toUpperCase().replace(/\s+/g, '')) || [];
+        const dataBR = (d) => (d ? String(d).slice(0, 10).split('-').reverse().join('/') : '');
+        return {
+          nf: l.map((n) => `${n.numero_nf}${n.serie_nf ? '/' + n.serie_nf : ''}`).join('; '),
+          nfEmissao: l.map((n) => dataBR(n.data_emissao)).join('; '),
+          nfCliente: l.map((n) => n.cliente_nome || '').join('; '),
+          nfTipo: l.map((n) => (n.tipo_movimento === 'outra_saida' ? 'Outra saída' : 'Venda')).join('; '),
+        };
+      };
 
       // Correção pendente por lote: último envio DEPOIS da análise vigente, com o
       // lote ainda NC/ressalva. Prazo: 1 dia útil com NF de venda, 3 sem.
@@ -15572,6 +15599,10 @@ ${parecer.parecer_tecnico ? `
             { header: 'Origem', key: 'origem', width: 12 },
             { header: 'Correções', key: 'correcoes', width: 10 },
             { header: 'Pacote', key: 'pacote', width: 12 },
+            { header: 'NF de venda', key: 'nf', width: 16 },
+            { header: 'Emissão da NF', key: 'nfEmissao', width: 14 },
+            { header: 'Cliente da NF', key: 'nfCliente', width: 34 },
+            { header: 'Tipo de saída', key: 'nfTipo', width: 12 },
             { header: 'Parecer (resumo)', key: 'parecer', width: 60 },
           ];
           const h = ws.getRow(1);
@@ -15589,6 +15620,7 @@ ${parecer.parecer_tecnico ? `
               origem: a.origem_analise === 'manual' ? 'Manual' : 'Agente',
               correcoes: cInfo.iteracoes > 1 ? `${cInfo.iteracoes - 1}x` : '',
               pacote: a.pacote_zip_path ? 'Salvo' : (a.origem_analise === 'manual' ? '—' : 'Pendente'),
+              ...colunasNf(a.numero_serie),
               parecer: (a.parecer_completo?.parecer_resumo || '').slice(0, 800),
             });
           }
@@ -15637,7 +15669,10 @@ ${parecer.parecer_tecnico ? `
             { header: 'Estágio', key: 'estagio', width: 9 },
             { header: 'Operador pendente', key: 'operador', width: 24 },
             { header: 'Ação recomendada', key: 'acao', width: 60 },
-            { header: 'NF de venda', key: 'nf', width: 14 },
+            { header: 'NF de venda', key: 'nf', width: 16 },
+            { header: 'Emissão da NF', key: 'nfEmissao', width: 14 },
+            { header: 'Cliente da NF', key: 'nfCliente', width: 34 },
+            { header: 'Tipo de saída', key: 'nfTipo', width: 12 },
           ];
           const h = ws.getRow(1);
           h.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -15650,7 +15685,6 @@ ${parecer.parecer_tecnico ? `
             const crono = pc.cronologia || [];
             const aps = (pc.apontamentos || []).filter((ap) => EM_ABERTO.has(ap.severidade) || ap.severidade === 'nao_conforme' || ap.severidade === 'ressalva');
             const dias = a.created_at ? Math.floor((Date.now() - new Date(a.created_at).getTime()) / 86400000) : '';
-            const nfs = nfPorSerie.get(a.numero_serie) || [];
             const equip = pc.produto?.familia || pc.produto?.equipamento || a.nome_produto || '';
             const base = {
               data: formatDate(a._data1a || a.created_at),
@@ -15660,7 +15694,7 @@ ${parecer.parecer_tecnico ? `
               equip,
               modelo: a.modelo || pc.produto?.modelo || '',
               status: a.status === 'ressalva' ? 'Conforme c/ ressalvas' : 'Não conforme',
-              nf: nfs.length ? nfs[0].numero_nf : '',
+              ...colunasNf(a.numero_serie),
             };
             if (!aps.length) {
               ws.addRow({ ...base, erro: '(sem apontamento detalhado no parecer)' });
@@ -15684,7 +15718,7 @@ ${parecer.parecer_tecnico ? `
               linhas++;
             }
           }
-          ws.autoFilter = { from: 'A1', to: 'O1' };
+          ws.autoFilter = { from: 'A1', to: 'R1' };
           const buf = await wb.xlsx.writeBuffer();
           const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
           const url = URL.createObjectURL(blob);
@@ -15718,7 +15752,8 @@ ${parecer.parecer_tecnico ? `
             'Registro Anvisa':   a.registro_anvisa || '',
             'Status':            a.status || '',
             'Parecer resumo':    a.parecer_resumo || '',
-            'Origem':            a.origem || 'agente',
+            'Origem':            a.origem_analise === 'manual' ? 'manual' : 'agente',
+            ...(() => { const c = colunasNf(a.numero_serie); return { 'NF de venda': c.nf, 'Emissão da NF': c.nfEmissao, 'Cliente da NF': c.nfCliente, 'Tipo de saída': c.nfTipo }; })(),
             'Análise origem ID': a.analise_origem_id || '',
             'Criado por (id)':   a.created_by || '',
             'ID':                a.id,
@@ -15729,6 +15764,7 @@ ${parecer.parecer_tecnico ? `
           ws['!cols'] = [
             { wch: 20 }, { wch: 20 }, { wch: 10 }, { wch: 16 }, { wch: 30 },
             { wch: 20 }, { wch: 16 }, { wch: 20 }, { wch: 60 }, { wch: 10 },
+            { wch: 16 }, { wch: 14 }, { wch: 34 }, { wch: 12 },
             { wch: 36 }, { wch: 36 }, { wch: 36 },
           ];
           XLSX.utils.book_append_sheet(wb, ws, 'Histórico');

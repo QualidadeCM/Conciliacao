@@ -314,7 +314,7 @@ Impacto médio · **Agora**
 
 **D10 · Exportações dispersas**
 **Migração**
-- **Hoje:** usam 2 bibliotecas, 3 formatos e regras próprias. O backup lê a coluna errada (`origem` em vez de `origem_analise`), então análises manuais saem como "agente".
+- **Hoje:** usam 2 bibliotecas, 3 formatos e regras próprias. (A coluna "Origem" do backup, que saía sempre "agente", foi corrigida em 19/11/2026.)
 - **Proposta:** um módulo único de exportação.
 
 **D11 · Textos antigos e mensagens técnicas para o usuário**
