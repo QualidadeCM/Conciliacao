@@ -1072,6 +1072,15 @@
       });
     }
 
+    // Bytes de arquivo de verdade (Uint8Array/ArrayBuffer/Blob). Um Uint8Array que
+    // passou por JSON.parse(JSON.stringify()) vira um objeto comum {0:80,1:75,...}:
+    // enviado ao conversor, virava o texto "[object Object]" e o FORM saía em
+    // branco no pacote (caso das OPs 8124–8128, 24/11/2026).
+    const ehBytesArquivo = (x) => !!x && (x instanceof Blob || x instanceof ArrayBuffer || ArrayBuffer.isView(x));
+    // Cópia do parecer sem os campos internos (_formXlsxBytes, _slots, _analiseId…),
+    // que nunca devem ir para o banco.
+    const parecerSemInternos = (p) => JSON.parse(JSON.stringify(p, (k, v) => (typeof k === 'string' && k.startsWith('_') ? undefined : v)));
+
     async function buscarTudoSupabase(tabela, colunas = '*', ordem = { campo: 'created_at', asc: false }) {
       const PAG = 1000;
       let de = 0, out = [];
@@ -10437,7 +10446,11 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         setSaving(true);
         try {
           const { data: { user } } = await supabase.auth.getUser();
-          const novoParecer = JSON.parse(JSON.stringify(parecer));
+          // Cópia SEM os campos internos: o JSON corrompia os bytes do FORM gerado
+          // (_formXlsxBytes) e gravava esse lixo no banco. Os campos internos são
+          // devolvidos ao estado da tela logo abaixo, intactos.
+          const novoParecer = parecerSemInternos(parecer);
+          const internos = Object.fromEntries(Object.entries(parecer).filter(([k]) => k.startsWith('_')));
           const ap = novoParecer.apontamentos?.[apIdx];
           if (!ap) throw new Error('Apontamento não encontrado.');
           ap.justificativa   = texto.trim();
@@ -10493,7 +10506,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
             }).eq('id', analiseId);
             if (error) throw error;
           }
-          setParecer(novoParecer);
+          setParecer({ ...novoParecer, ...internos });
           setJustifyModal(null);
           registrarLog(usuarioAtual, 'justificar_ressalva', 'analise', `OP ${opNum}${serieStr ? ' / ' + serieStr : ''}`, `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} justificou uma ressalva da OP ${opNum}`);
           const msg = novoResultado === 'conforme'
@@ -10882,7 +10895,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       // Baixar APENAS o FORM-GQ-0047 preenchido (XLSX com formatação preservada)
       const handleDownloadForm = () => {
         const bytes = parecer._formXlsxBytes;
-        if (!bytes) { alert('FORM-GQ-0047 não disponível.'); return; }
+        if (!ehBytesArquivo(bytes)) { toast.error('FORM-GQ-0047 não disponível nesta tela. Use "Baixar pacote", que recupera o FORM salvo.'); return; }
         const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         triggerDownload(blob, `FORM-GQ-0047_${opNum}_${serieStr}.xlsx`);
       };
@@ -10939,6 +10952,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       // configurado, tenta ele primeiro; em qualquer falha (fora do ar, erro),
       // cai automaticamente no CloudConvert para não travar o pacote.
       const convertToPdf = async (sourceBytes, filename, sourceFormat) => {
+        if (!ehBytesArquivo(sourceBytes)) throw new Error(`conteúdo inválido para conversão (${filename})`);
         if (CONVERSAO_PDF_LOCAL) {
           try {
             return await convertViaLocal(sourceBytes, filename, sourceFormat);
@@ -11210,7 +11224,7 @@ ${parecer.parecer_tecnico ? `
         // (slotsNovos._formXlsxBytes) para uso IMEDIATO no mesmo tick — o setParecer
         // é assíncrono e não reflete no closure atual, o que fazia o FORM-GQ-0047
         // sumir do pacote quando baixado pelo Histórico (correção 06/07/2026).
-        slotsNovos._formXlsxBytes = parecer._formXlsxBytes || null;
+        slotsNovos._formXlsxBytes = ehBytesArquivo(parecer._formXlsxBytes) ? parecer._formXlsxBytes : null;
         if (!slotsNovos._formXlsxBytes && arqOrig.form_gerado_xlsx?.path) {
           try {
             const { data } = await supabase.storage.from('pacotes-analise').download(arqOrig.form_gerado_xlsx.path);
@@ -11243,7 +11257,10 @@ ${parecer.parecer_tecnico ? `
         // 1) FORM-GQ-0047 — converte XLSX para PDF (assinável no Adobe).
         //    Usa os bytes devolvidos por restaurarSlotsDoStorage (slots._formXlsxBytes),
         //    garantindo o FORM no pacote também quando baixado pelo Histórico.
-        const formXlsxBytes = slots._formXlsxBytes || parecer._formXlsxBytes;
+        const formXlsxBytes = [slots._formXlsxBytes, parecer._formXlsxBytes].find(ehBytesArquivo) || null;
+        if (!formXlsxBytes) {
+          warnings.push('FORM-GQ-0047 não pôde ser recuperado (nem da memória, nem do armazenamento) e NÃO foi incluído no pacote. Refaça a análise para gerar o FORM de novo.');
+        }
         if (formXlsxBytes) {
           setZipStage('Convertendo FORM-GQ-0047 para PDF (CloudConvert — 10-30s)…');
           try {
@@ -11963,7 +11980,7 @@ ${parecer.parecer_tecnico ? `
                 {enviandoSlack ? (<><Icon name="loader" className="animate-spin" />Preparando…</>) : (<><Icon name="bell" />Enviar ao Slack</>)}
               </Button>
             )}
-            {parecer._formXlsxBytes && (
+            {ehBytesArquivo(parecer._formXlsxBytes) && (
               <Button variant="outline" onClick={handleDownloadForm} title="Baixar apenas o FORM-GQ-0047 preenchido em Excel">
                 <Icon name="download" />FORM-GQ-0047 (Excel)
               </Button>
