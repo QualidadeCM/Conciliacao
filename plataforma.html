@@ -1118,15 +1118,17 @@
       const byId = new Map(todasAnalises.map((a) => [a.id, a]));
       let cursor = analise;
       let iteracoes = 1;
-      let ajusteFicha = 0; // quantas re-análises foram por ficha desatualizada
+      let ajusteFicha = 0; // quantas re-análises foram ajuste (não correção)
+      let ajusteErroSistema = 0; // dessas, quantas por erro da plataforma
       const docsSet = new Set();
       const motivos = [];
       // Sobe pela chain
       while (cursor?.analise_origem_id) {
         // Ajustes que NÃO contam como iteração/correção: ficha desatualizada e
         // atualização do cadastro de operadores (operador/inspetor novo).
-        if (cursor.tipo_reanalise === 'atualizacao_ficha' || cursor.tipo_reanalise === 'atualizacao_cadastro') {
+        if (ehAjusteReanalise(cursor.tipo_reanalise)) {
           ajusteFicha++;
+          if (cursor.tipo_reanalise === 'erro_sistema') ajusteErroSistema++;
         } else {
           iteracoes++;
           // doc_substituido pode ter múltiplos slots separados por vírgula.
@@ -1143,6 +1145,7 @@
       return {
         iteracoes,
         ajusteFicha,
+        ajusteErroSistema,
         docsCorrigidos: [...docsSet],
         dataOriginal: cursor?.created_at || null,
         motivos,
@@ -1157,6 +1160,18 @@
       if (!info) return null;
       // Ajuste por ficha desatualizada (não é correção): chip próprio, cinza/azul.
       if (info.iteracoes <= 1) {
+        if (info.ajusteErroSistema > 0) {
+          return (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ml-1.5 cursor-help"
+              style={{ backgroundColor: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))' }}
+              title={`Análise refeita por erro de análise/parametrização da plataforma${info.motivos?.length ? ': ' + info.motivos.join(' | ') : ''}. Não conta como não conformidade nem como correção — a documentação do lote estava conforme.`}
+            >
+              <span>⚙</span>
+              <span>erro da plataforma</span>
+            </span>
+          );
+        }
         if (info.ajusteFicha > 0) {
           return (
             <span
@@ -1394,6 +1409,11 @@
     // próprio apontamento; o resto (OP, identificação) → PCP.
     // Acessório faltando na RC / grupo alternativo sem variante na RC = baixa de
     // acessório, feita pelo Almoxarifado (11/10/2026) — também para análises antigas.
+    // Reanálises que NÃO contam como correção (a documentação do lote estava
+    // conforme): ficha desatualizada, cadastro de operador/inspetor e — desde
+    // 25/11/2026 — erro de análise/parametrização da própria plataforma.
+    const TIPOS_AJUSTE_REANALISE = new Set(['atualizacao_ficha', 'atualizacao_cadastro', 'erro_sistema']);
+    const ehAjusteReanalise = (t) => TIPOS_AJUSTE_REANALISE.has(t);
     const ehBaixaAcessorio = (ap) => /acess[óo]rios?\s+obrigat[óo]rios?\s+faltando\s+na\s+rc|nenhuma\s+variante\s+presente\s+na\s+rc/i.test(ap?.descricao || '');
     // 25/11/2026: tudo que é RC (RC ausente, de outra OP, OP não identificada na
     // RC, componente "Não Conforme", grupo alternativo) também é do Almoxarifado.
@@ -1616,7 +1636,7 @@
     function calcularBaseQualidade({ analises, produtos = [], temposAtivos = [], envios = [], nfSeries = null }) {
       const byId = new Map(analises.map((a) => [a.id, a]));
       const idsSubst = new Set(analises.filter((a) => a.analise_origem_id).map((a) => a.analise_origem_id));
-      const ajuste = (t) => t === 'atualizacao_ficha' || t === 'atualizacao_cadastro';
+      const ajuste = ehAjusteReanalise;
       const statusDe = (x) => String(x?.parecer_completo?.resultado_geral || x?.status || '').toLowerCase();
       const chaveLote = (a) => `${a.numero_op || '?'}|${a.numero_serie || '?'}`;
       const equipByModelo = new Map(), equipBySap = new Map();
@@ -2250,7 +2270,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         while (c?.analise_origem_id && s-- > 0) { passos.push(c); c = byIdAll.get(c.analise_origem_id); if (!c) break; }
         return passos;
       };
-      const temCorrecaoReal = (a) => passosReanalise(a).some((p) => p.tipo_reanalise !== 'atualizacao_ficha' && p.tipo_reanalise !== 'atualizacao_cadastro');
+      const temCorrecaoReal = (a) => passosReanalise(a).some((p) => !ehAjusteReanalise(p.tipo_reanalise));
       const ehAjusteFichaSomente = (a) => !!a.analise_origem_id && !temCorrecaoReal(a);
       // Agrupa por LOTE (OP + nº de série). O período define QUAIS lotes entram
       // (basta ter alguma análise na janela); o ESTADO de cada um vem sempre da
@@ -2302,14 +2322,14 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       const docTipoCount = {};
       const slotsDe = (r) => String(r.doc_substituido || '').split(',').map((x) => x.trim().replace(/\s*\(removida\)\s*$/i, '').toLowerCase()).filter(Boolean);
       for (const r of analises) {
-        if (!r.analise_origem_id || r.tipo_reanalise === 'atualizacao_ficha' || r.tipo_reanalise === 'atualizacao_cadastro') continue;
+        if (!r.analise_origem_id || ehAjusteReanalise(r.tipo_reanalise)) continue;
         if (!lotesDoPeriodo.has(chaveLote(r))) continue;
         for (const sl of slotsDe(r)) docTipoCount[sl] = (docTipoCount[sl] || 0) + 1;
       }
       // "Histórico de correções" continua pela DATA DA CORREÇÃO: a pergunta ali
       // é "o que foi corrigido neste período".
       const correcoesDetalhe = []; // para timeline / tabela
-      for (const r of reanalises.filter((r) => r.tipo_reanalise !== 'atualizacao_ficha' && r.tipo_reanalise !== 'atualizacao_cadastro')) {
+      for (const r of reanalises.filter((r) => !ehAjusteReanalise(r.tipo_reanalise))) {
         // Normaliza chaves antigas "etiqueta_acessorio(removida)" → "etiqueta_acessorio"
         // para que remoções de etiqueta contem na categoria "Etiqueta Acessório"
         // (inclusive registros anteriores à padronização).
@@ -2539,7 +2559,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       const tendencia = useMemo(() => {
         const de = trendDe, ate = trendAte;
         const corr = analises
-          .filter((a) => a.analise_origem_id && a.tipo_reanalise !== 'atualizacao_ficha' && a.tipo_reanalise !== 'atualizacao_cadastro')
+          .filter((a) => a.analise_origem_id && !ehAjusteReanalise(a.tipo_reanalise))
           .filter((a) => { const d = (a.created_at || '').slice(0, 10); return d && d >= de && d <= ate; });
         // meses do intervalo (inclui meses sem correção como 0)
         const meses = [];
@@ -2599,7 +2619,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         // substituído — exclui ajuste de ficha/cadastro), pela DATA da correção. Dedup por lote.
         for (const r of analises) {
           if (!r.analise_origem_id) continue;
-          if (r.tipo_reanalise === 'atualizacao_ficha' || r.tipo_reanalise === 'atualizacao_cadastro') continue;
+          if (ehAjusteReanalise(r.tipo_reanalise)) continue;
           const d = (r.created_at || '').slice(0, 10); if (!d) continue;
           const keyMap = inPer(d) ? keyPer : inBase(d) ? keyBase : null;
           if (!keyMap) continue;
@@ -10385,6 +10405,8 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
       const [docsCorrigidos, setDocsCorrigidos] = useState({}); // { slotKey: { file, text, fileName, motivo } }
       const [etiquetasRemovidas, setEtiquetasRemovidas] = useState(new Set()); // códigos de etiquetas de acessório anexadas por engano — excluídas na re-análise e do pacote
       const [reanalisando, setReanalisando] = useState(false);
+      // Reanálise por erro da plataforma (25/11/2026): { motivo } quando aberta.
+      const [erroSistemaModal, setErroSistemaModal] = useState(null);
       const [saving, setSaving] = useState(false);
       // #2 — Reprocessar em lote as outras análises pendentes da mesma derivação
       // depois de atualizar a ficha. { candidatos:[], ativo, idx, feitos, falhas }
@@ -10572,12 +10594,16 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
         // modoCadastro=true: refaz a análise após cadastrar operador/inspetor que estava
         // faltando (a documentação estava conforme). Não conta como correção.
         const modoCadastro = opts && opts.modoCadastro === true;
+        // modoErroSistema=true (25/11/2026): refaz com os MESMOS documentos porque o
+        // apontamento anterior foi erro de análise/parametrização da plataforma.
+        // Não conta como não conformidade nem como correção.
+        const modoErroSistema = opts && opts.modoErroSistema === true;
         // Conta quantos slots foram corrigidos (acessórios contam por código)
         const slotKeysCorrigidos = Object.keys(docsCorrigidos).filter((k) => {
           if (k === 'etiqueta_acessorio') return Object.keys(docsCorrigidos[k] || {}).length > 0;
           return !!docsCorrigidos[k];
         });
-        if (!modoFicha && !modoCadastro && slotKeysCorrigidos.length === 0 && etiquetasRemovidas.size === 0) {
+        if (!modoFicha && !modoCadastro && !modoErroSistema && slotKeysCorrigidos.length === 0 && etiquetasRemovidas.size === 0) {
           toast.error('Nenhum documento corrigido anexado nem etiqueta marcada para remoção.');
           return;
         }
@@ -10663,7 +10689,27 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
           }
 
           const novoParecer = await executarAnaliseLocal(slotsParaParse, { permitirRefazer: true });
-          if (modoFicha || modoCadastro) {
+          if (modoErroSistema) {
+            // Vincula à análise que está na tela (não à recebida ao abrir, que pode já
+            // ter sido substituída por uma reanálise feita nesta mesma tela).
+            const origemId = parecer._analiseId || analiseId;
+            if (novoParecer._analiseId && origemId) {
+              const { error: errVinc } = await supabase.from('analises').update({
+                analise_origem_id: origemId,
+                tipo_reanalise: 'erro_sistema',
+                doc_substituido: null,
+                motivo_reanalise: `Erro de análise da plataforma: ${opts.motivoErroSistema || 'não informado'}`,
+              }).eq('id', novoParecer._analiseId);
+              if (errVinc) throw errVinc;
+            }
+            registrarLog(usuarioAtual, 'reanalise_erro_sistema', 'analise', `OP ${opNum}${serieStr ? ' / ' + serieStr : ''}`,
+              `${usuarioAtual?.nome_completo || usuarioAtual?.email || 'Usuário'} refez a análise da OP ${opNum} por erro da plataforma (novo resultado: ${(novoParecer.resultado_geral || '').toUpperCase()}). Motivo: ${opts.motivoErroSistema || '—'}`);
+            toast.success('Análise refeita. Registrada como erro da plataforma — não conta como não conformidade nem como correção.');
+            setParecer(novoParecer);
+            setDocsCorrigidos({});
+            setEtiquetasRemovidas(new Set());
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          } else if (modoFicha || modoCadastro) {
             // Ajuste sem correção de documento (ficha desatualizada OU cadastro de
             // operador/inspetor). Vincula à original (rastreabilidade) mas NÃO conta
             // como correção no dashboard.
@@ -12017,6 +12063,27 @@ ${parecer.parecer_tecnico ? `
               <Button variant="outline" onClick={abrirAtualizarFicha} disabled={carregandoFicha} title="A NC ou ressalva é causada por ficha mestre desatualizada? Atualize a ficha (gera nova revisão) e refaça a análise — não conta como correção.">
                 {carregandoFicha ? (<><Icon name="loader" className="animate-spin" />Abrindo ficha…</>) : (<><Icon name="edit" />Atualizar ficha e refazer</>)}
               </Button>
+            )}
+            {apontAbertos.length > 0 && (isAdmin || can('analise_refazer')) && (
+              <>
+                <Button variant="outline" onClick={() => setErroSistemaModal({ motivo: '' })} disabled={reanalisando}
+                  title="O apontamento foi erro de análise/parametrização da plataforma (os documentos estavam certos)? Refaz com os mesmos documentos sem contar como não conformidade nem como correção.">
+                  {reanalisando ? (<><Icon name="loader" className="animate-spin" />Refazendo…</>) : (<><Icon name="settings" />Refazer — erro da plataforma</>)}
+                </Button>
+                <Modal open={!!erroSistemaModal} onClose={() => setErroSistemaModal(null)} title="Refazer análise — erro da plataforma"
+                  description="Use quando o apontamento NÃO estava nos documentos, e sim na análise da plataforma (parametrização ou leitura errada). A análise é refeita com os mesmos documentos e fica registrada como erro da plataforma: o lote não conta como não conforme nem como corrigido nos indicadores.">
+                  <Label>O que a plataforma apontou errado? (obrigatório)</Label>
+                  <Textarea rows={3} value={erroSistemaModal?.motivo || ''} onChange={(e) => setErroSistemaModal((m) => ({ ...m, motivo: e.target.value }))}
+                    placeholder='Ex.: "RC sem lote/série" — a série 901606 estava na RC; a plataforma não lia séries só numéricas.' />
+                  <div className="flex justify-end gap-2 mt-4">
+                    <Button variant="outline" onClick={() => setErroSistemaModal(null)}>Cancelar</Button>
+                    <Button disabled={reanalisando || !(erroSistemaModal?.motivo || '').trim()}
+                      onClick={async () => { const motivo = erroSistemaModal.motivo.trim(); setErroSistemaModal(null); await handleReanalisar({ modoErroSistema: true, motivoErroSistema: motivo }); }}>
+                      Refazer análise
+                    </Button>
+                  </div>
+                </Modal>
+              </>
             )}
             {apontAbertos.length > 0 && (
               <Button variant="outline" onClick={abrirAlertaSlack} disabled={enviandoSlack} title="Revisar e enviar os apontamentos para o canal do Slack (PCP e Almoxarifado)">
@@ -13726,7 +13793,9 @@ ${parecer.parecer_tecnico ? `
 
     // Refaz UMA análise trocando os documentos enviados. modo: 'substituir' (usa os
     // originais guardados) | 'completa' (só os documentos enviados). Retorna { mudou, novoId }.
-    async function reanalisarComDocsCorrigidos(row, docs, acessorios, modo) {
+    // erroPlataforma (texto): a reanálise é por ERRO DA PLATAFORMA (os documentos
+    // estavam certos) — tipo 'erro_sistema', não conta como NC nem como correção.
+    async function reanalisarComDocsCorrigidos(row, docs, acessorios, modo, erroPlataforma = null) {
       const vazio = { op: null, rc: null, form_gq_0047: null, etiqueta_externa: null, etiqueta_acessorio: [], op_reprocesso: null, rnc: null };
       const slots = modo === 'completa' ? vazio : await reconstruirSlotsDeStorageGlobal(row.parecer_completo || {});
       const trocados = [];
@@ -13750,7 +13819,17 @@ ${parecer.parecer_tecnico ? `
       const parecerMudou = assinaturaParecer(row.parecer_completo) !== assinaturaParecer(novo);
       const mudou = modo === 'completa' || docMudou || parecerMudou;
       if (novo?._analiseId) {
-        if (mudou) {
+        if (mudou && erroPlataforma) {
+          const { error: errVinc } = await supabase.from('analises').update({
+            analise_origem_id: row.id,
+            tipo_reanalise: 'erro_sistema',
+            doc_substituido: null,
+            motivo_reanalise: `Erro de análise da plataforma: ${erroPlataforma}`,
+            pasta_rede_path: row.pasta_rede_path || null,
+            data_ref_original: row.data_ref_original || row.created_at || null,
+          }).eq('id', novo._analiseId);
+          if (errVinc) throw errVinc;
+        } else if (mudou) {
           const soOp = trocados.length === 1 && trocados[0] === 'op';
           await supabase.from('analises').update({
             analise_origem_id: row.id,
@@ -13776,9 +13855,11 @@ ${parecer.parecer_tecnico ? `
       const [ignorados, setIgnorados] = useState([]); // [{ nome, motivo }]
       const [prog, setProg] = useState({ idx: 0, total: 0 });
       const [resumo, setResumo] = useState(null);
+      // Reanálise por erro da plataforma (25/11/2026): não conta como NC nem correção.
+      const [erroPlat, setErroPlat] = useState({ ativo: false, motivo: '' });
       const pastaRef = useRef(null);
 
-      const reset = () => { setLotes([]); setIgnorados([]); setResumo(null); setProg({ idx: 0, total: 0 }); };
+      const reset = () => { setLotes([]); setIgnorados([]); setResumo(null); setProg({ idx: 0, total: 0 }); setErroPlat({ ativo: false, motivo: '' }); };
       const handleClose = () => { if (rodando) return; reset(); onClose(); };
       const normOp = (v) => String(v || '').replace(/\D/g, '');
       const normSerie = (v) => String(v || '').toUpperCase().replace(/\s+/g, '');
@@ -13886,6 +13967,7 @@ ${parecer.parecer_tecnico ? `
       const executar = async () => {
         const sel = lotes.filter((l) => l.sel && l.modo);
         if (sel.length === 0) { toast.error('Nenhum lote marcado para reanalisar.'); return; }
+        if (erroPlat.ativo && !erroPlat.motivo.trim()) { toast.error('Descreva o erro da plataforma antes de reanalisar.'); return; }
         setRodando(true);
         setProg({ idx: 0, total: sel.length });
         let mudaram = 0, iguais = 0; const falhas = [];
@@ -13894,7 +13976,7 @@ ${parecer.parecer_tecnico ? `
           setProg({ idx: i + 1, total: sel.length });
           setLotes((arr) => arr.map((x) => (x.key === L.key ? { ...x, status: 'rodando' } : x)));
           try {
-            const { mudou } = await reanalisarComDocsCorrigidos(L.row, L.docs, L.acessorios, L.modo);
+            const { mudou } = await reanalisarComDocsCorrigidos(L.row, L.docs, L.acessorios, L.modo, erroPlat.ativo ? erroPlat.motivo.trim() : null);
             if (mudou) mudaram++; else iguais++;
             setLotes((arr) => arr.map((x) => (x.key === L.key ? { ...x, status: mudou ? 'mudou' : 'igual' } : x)));
           } catch (e) {
@@ -13977,6 +14059,18 @@ ${parecer.parecer_tecnico ? `
               </div>
             )}
 
+            {!resumo && (
+              <div className="rounded-md border p-3 space-y-2">
+                <label className="flex items-start gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" className="mt-1" checked={erroPlat.ativo} disabled={rodando} onChange={(e) => setErroPlat((x) => ({ ...x, ativo: e.target.checked }))} />
+                  <span><strong>Erro da plataforma</strong> — os documentos estavam certos; o apontamento foi erro de análise/parametrização do sistema. Os lotes <strong>não contam como não conformidade nem como correção</strong>.</span>
+                </label>
+                {erroPlat.ativo && (
+                  <Textarea rows={2} value={erroPlat.motivo} disabled={rodando} onChange={(e) => setErroPlat((x) => ({ ...x, motivo: e.target.value }))}
+                    placeholder='O que a plataforma apontou errado? Ex.: "RC sem lote/série" — séries só numéricas não eram lidas.' />
+                )}
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2 border-t">
               <Button variant="outline" onClick={handleClose} disabled={rodando}>{resumo ? 'Fechar' : 'Cancelar'}</Button>
               {!resumo && <Button onClick={executar} disabled={rodando || selCount === 0}>{rodando ? <><Icon name="loader" className="h-4 w-4 animate-spin mr-2" />Reprocessando…</> : `Reanalisar ${selCount} lote(s)`}</Button>}
