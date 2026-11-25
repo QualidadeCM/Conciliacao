@@ -7122,13 +7122,36 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                 ...(txt.match(/\b\d{15}\b/g) || []),
                 ...(txt.match(/\b\d{13}\b/g) || []),
               ];
-              let candidatos = extrairCandidatos(linha);
+              // Coluna de lote/série da RC: tudo o que vem depois de
+              // "<unidade> <qtd> <qtd> <S|N>" (ex.: "UN 1 1 S  901606"). Lê QUALQUER
+              // formato de lote/série (inclusive numérico curto, como "901606"), que os
+              // padrões acima não cobrem — antes isso gerava falso "RC sem lote/série"
+              // (OPs com IPM0023, 25/11/2026).
+              const reColunaLote = /\b[A-Z]{1,4}\s+[\d.,]+\s+[\d.,]+\s+[SN]\b(.*)$/;
+              const lerColunaLote = (txt) => {
+                const m = String(txt || '').match(reColunaLote);
+                if (!m) return null; // estrutura da linha não reconhecida
+                return (m[1].match(/[A-Za-z0-9][A-Za-z0-9.\/-]{2,}/g) || []);
+              };
+              const colLinha = lerColunaLote(linha);
+              let candidatos = [...new Set([...extrairCandidatos(linha), ...(colLinha || [])])];
               // O PDF às vezes quebra a coluna de lote/série na linha seguinte; só vale
               // se essa linha NÃO começa outro componente (não traz código Sapiens).
               if (candidatos.length === 0) {
                 const prox = linhas[idxLinha + 1] || '';
                 if (prox && !/\b[A-Z]{2,5}\d{4,5}\b/.test(prox)) candidatos = extrairCandidatos(prox);
               }
+              // Valor da etiqueta presente na linha como palavra inteira → conta como lido.
+              if (candidatos.length === 0) {
+                const etqN0 = norm(loteEtq);
+                const tokens = linha.match(/[A-Za-z0-9][A-Za-z0-9.\/-]{2,}/g) || [];
+                const achou = tokens.find((t) => t !== a.codigoSapiens && norm(t) === etqN0);
+                if (achou) candidatos = [achou];
+              }
+              // Só afirma "RC sem lote/série" quando a estrutura da linha foi reconhecida
+              // e a coluna de lote/série está de fato vazia; se a linha não pôde ser lida
+              // nesse formato, não aponta (evita falso positivo).
+              if (candidatos.length === 0 && colLinha === null) continue;
               if (candidatos.length === 0) {
                 // A etiqueta traz lote/série mas a RC não: a baixa do componente foi feita
                 // sem o lote/série — antes isso passava em silêncio (não havia o que comparar).
