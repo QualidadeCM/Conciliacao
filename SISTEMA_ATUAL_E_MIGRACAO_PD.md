@@ -72,8 +72,10 @@ Equipe da GQ, gestores do PCP e do Almoxarifado, Responsável Técnico e Respons
   - **NC aberta:** ainda não conforme.
 - **Aprovação de primeira:** (conforme + com ressalva na 1ª análise) ÷ lotes do mês. A meta é configurável (padrão 90%).
 - **Setor responsável pelo apontamento:**
-  - **Almoxarifado:** etiquetas (externa e de acessório), baixa de acessório na RC (acessório faltando, grupo alternativo sem variante, lote ou código do acessório RC × etiqueta) e tempo dos Estágios 5 e 50;
-  - **PCP:** OP, RC, FORM e os demais estágios.
+  - **Almoxarifado:** etiquetas (externa e de acessório), **tudo o que é RC** (RC ausente ou de outra OP, OP não identificada na RC, componente "Não Conforme", baixa de acessório, grupo alternativo, lote ou código do acessório RC × etiqueta) e tempo dos Estágios 5 e 50;
+  - **PCP:** OP, FORM e os demais casos.
+- **Quem é mencionado / cobrado (desde 25/11/2026, igual no envio individual, no envio em lote, na exportação "OPs em aberto" e em "NCs por operador"):** Almoxarifado → quem executou o **Estágio 50**; PCP → quem executou o **Estágio 60**; tempo do Estágio 5 → quem executou o Estágio 5.
+- **Não vão ao Slack** (a própria GQ resolve): aptidão ou cadastro de inspetor, ressalvas do FORM (revisão, data OP × FORM, cópia controlada) e ajustes de cadastro/Ficha (inspeção em estágio não previsto, derivação sem Ficha, produto não identificado, data da conciliação não identificada).
 - **Responsável pela correção em casos específicos:**
   - **cronologia incoerente:** a causa é do inspetor; quem corrige é o executor do Estágio 60;
   - **código de barras de apontamento:** a causa é do executor do estágio; quem corrige é o PCP (Estágio 60).

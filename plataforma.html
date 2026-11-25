@@ -1389,13 +1389,31 @@
       const doc = String(documento || '').trim();
       return doc || 'Outros';
     };
-    // Setor dono da NC (decisão 09/10/2026): etiquetas e lote/código de acessório
-    // (RC × etiqueta) → Almoxarifado; tempo dos Estágios 5/50 vem marcado no próprio
-    // apontamento; o resto (OP, RC, identificação) → PCP.
+    // Setor dono da NC (decisões 09/10 e 25/11/2026): etiquetas, RC e lote/código de
+    // acessório (RC × etiqueta) → Almoxarifado; tempo dos Estágios 5/50 vem marcado no
+    // próprio apontamento; o resto (OP, identificação) → PCP.
     // Acessório faltando na RC / grupo alternativo sem variante na RC = baixa de
     // acessório, feita pelo Almoxarifado (11/10/2026) — também para análises antigas.
     const ehBaixaAcessorio = (ap) => /acess[óo]rios?\s+obrigat[óo]rios?\s+faltando\s+na\s+rc|nenhuma\s+variante\s+presente\s+na\s+rc/i.test(ap?.descricao || '');
-    const setorDoApontamento = (ap) => ap.setor_responsavel || ((['etx', 'eac'].includes(classificarDocApontamento(ap)) || ehBaixaAcessorio(ap)) ? 'Almoxarifado' : 'PCP');
+    // 25/11/2026: tudo que é RC (RC ausente, de outra OP, OP não identificada na
+    // RC, componente "Não Conforme", grupo alternativo) também é do Almoxarifado.
+    const setorDoApontamento = (ap) => ap.setor_responsavel || ((['etx', 'eac', 'rc'].includes(classificarDocApontamento(ap)) || ehBaixaAcessorio(ap)) ? 'Almoxarifado' : 'PCP');
+    // Estágio de QUEM CORRIGE (menção no Slack, "Operador pendente" na exportação,
+    // NCs por operador): estágio próprio do apontamento (tempo dos Estágios 5/50);
+    // senão Almoxarifado → executor do Estágio 50; PCP → executor do Estágio 60.
+    const estagioQueCorrige = (ap) => (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel)))
+      ? Number(ap.estagio_responsavel)
+      : (setorDoApontamento(ap) === 'Almoxarifado' ? 50 : 60);
+    // Apontamentos que a própria GQ resolve (25/11/2026) — NÃO vão ao Slack, nem
+    // no envio individual nem em lote: aptidão/cadastro de inspetor, ressalvas do
+    // FORM (gerado pela plataforma) e ajustes de cadastro/Ficha Mestre.
+    const naoVaiAoSlack = (ap) => {
+      const d = String(ap?.descricao || ''), doc = String(ap?.documento_afetado || '').trim();
+      return /Inspetor fora da aptid[ãa]o|Inspetor n[ãa]o cadastrado/i.test(d)
+        || /Data de revis[ãa]o do FORM|n[ãa]o confere com a data registrada no FORM|c[óo]pia controlada/i.test(d)
+        || /^Ficha Mestre$/i.test(doc)
+        || /n[ãa]o existe Ficha Mestre cadastrada para essa deriva|N[ãa]o foi poss[íi]vel identificar o produto|Data da concilia[çc][ãa]o \(est[áa]gio 60\) n[ãa]o identificada/i.test(d);
+    };
     const ondeDoApontamento = (ap) => {
       const doc = classificarDocApontamento(ap);
       if (doc === 'etx') return { k: 'z1', lbl: 'Etiqueta externa' };
@@ -1421,7 +1439,7 @@
       return String(ap.documento_afetado || 'Outros').trim() || 'Outros';
     };
     const ROTULO_SLOT = { op: 'OP', rc: 'RC', form_gq_0047: 'FORM-GQ-0047', etiqueta_externa: 'Etiqueta Externa', etiqueta_acessorio: 'Etiqueta de acessório', op_reprocesso: 'OP de Reprocesso', rnc: 'RNC' };
-    const SETOR_DO_SLOT = { etiqueta_externa: 'Almoxarifado', etiqueta_acessorio: 'Almoxarifado' };
+    const SETOR_DO_SLOT = { etiqueta_externa: 'Almoxarifado', etiqueta_acessorio: 'Almoxarifado', rc: 'Almoxarifado' };
 
     // Rosca (SVG) para o relatório: segs [{ label, value, hex }].
     function svgRosca(segs, centro) {
@@ -1658,9 +1676,9 @@
         };
         lotes.push(lote);
         for (const ap of ncAps) {
-          const b = classificarDocApontamento(ap);
           let est;
-          if (b === 'etx' || b === 'eac') est = 50;
+          if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
+          else if (setorDoApontamento(ap) === 'Almoxarifado') est = 50; // etiqueta / RC / baixa → Estágio 50
           else if (estagioCausaDoApontamento(ap) != null) est = estagioCausaDoApontamento(ap);
           else if (ap.estagio_responsavel != null && !isNaN(Number(ap.estagio_responsavel))) est = Number(ap.estagio_responsavel);
           else if (Array.isArray(ap.estagios) && ap.estagios.length && !isNaN(parseInt(String(ap.estagios[0]), 10))) est = parseInt(String(ap.estagios[0]), 10);
@@ -3536,7 +3554,7 @@ ${ctx.paraImpressao ? '<script>window.onload=function(){setTimeout(function(){wi
                   className={cn('text-xs px-3 py-1 rounded-full border transition-colors', setorAtacar === k ? 'bg-accent text-accent-foreground border-accent font-semibold' : 'bg-transparent text-muted-foreground border-border hover:bg-muted')}>{lbl}</button>
               ))}
               <span className="text-xs font-semibold">{exec.lotesPer.length} lote(s) conciliado(s) no período ·</span>
-              <span className="text-xs text-muted-foreground">{setorAtacar === 'todos' ? 'Todas as NCs do período.' : `Só NCs atribuídas ao ${setorAtacar}: etiquetas (externa e de acessório), lote/código de acessório entre RC e etiqueta e tempo dos Estágios 5 e 50 → Almoxarifado; OP, RC, identificação do produto e demais estágios → PCP.`}</span>
+              <span className="text-xs text-muted-foreground">{setorAtacar === 'todos' ? 'Todas as NCs do período.' : `Só NCs atribuídas ao ${setorAtacar}: etiquetas (externa e de acessório), RC (inclusive lote/código de acessório e baixa) e tempo dos Estágios 5 e 50 → Almoxarifado; OP, identificação do produto e demais estágios → PCP.`}</span>
             </div>
             <Card className="mb-6">
               <CardHeader>
@@ -11540,7 +11558,8 @@ ${parecer.parecer_tecnico ? `
       // Responsável por documento afetado:
       const responsavelPorSlot = (slotKey) => {
         if (slotKey === 'etiqueta_externa' || slotKey === 'etiqueta_acessorio') return 'Almoxarifado';
-        return 'PCP'; // OP, RC, FORM, reprocesso, RNC → PCP
+        if (slotKey === 'rc') return 'Almoxarifado'; // RC → Almoxarifado (25/11/2026)
+        return 'PCP'; // OP, FORM, reprocesso, RNC → PCP
       };
       const [enviandoSlack, setEnviandoSlack] = useState(false);
       const [slackModal, setSlackModal] = useState(null); // { itens: [...] } — caixa editável antes de enviar
@@ -11552,6 +11571,7 @@ ${parecer.parecer_tecnico ? `
       // ação corretiva sugerida (com detecção de reincidência entre análises).
       const abrirAlertaSlack = async () => {
         if (!apontAbertos.length) { toast.error('Não há apontamentos para enviar.'); return; }
+        if (!apontAbertos.some((ap) => !naoVaiAoSlack(ap))) { toast.error('Os apontamentos deste lote são resolvidos pela própria GQ (aptidão/cadastro de inspetor, FORM ou Ficha Mestre) e não vão ao Slack.'); return; }
         setEnviandoSlack(true);
         try {
           // === Reincidência baseada no ERRO (categoria + equipamento + alvo) ===
@@ -11630,7 +11650,7 @@ ${parecer.parecer_tecnico ? `
           // Inclui NCs e ressalvas. Ressalvas entram desmarcadas por padrão (não
           // floodam), mas ficam disponíveis para envio ao operador quando fizer
           // sentido (ex.: tempo do estágio fora da média).
-          const itens = apontAbertos.map((ap) => {
+          const itens = apontAbertos.filter((ap) => !naoVaiAoSlack(ap)).map((ap) => {
             const ehRessalva = ap.severidade === 'ressalva';
             const { slotKey, nome } = mapApontamento(ap);
             const doc = (slotKey === 'etiqueta_acessorio' && nome) ? `Etiqueta de Acessório (${nome})` : (labelSlot[slotKey] || ap.documento_afetado || 'Documento');
@@ -11649,7 +11669,7 @@ ${parecer.parecer_tecnico ? `
             // O canal segue o RESPONSÁVEL: setor_responsavel explícito (ex.: tempo do
             // estágio → Almoxarifado), senão o dono do documento (etiqueta →
             // Almoxarifado; OP/RC/FORM/etc → PCP).
-            const responsavel = ap.setor_responsavel || (ehBaixaAcessorio(ap) ? 'Almoxarifado' : responsavelPorSlot(slotKey));
+            const responsavel = setorDoApontamento(ap); // regra única (motor)
             const setor = responsavel;
             return {
               codigo: ap.codigo || (ehRessalva ? 'R' : 'NC'),
@@ -14027,12 +14047,14 @@ ${parecer.parecer_tecnico ? `
             const pc = a.parecer_completo || {};
             const crono = pc.cronologia || [];
             for (const ap of (pc.apontamentos || [])) {
+              if (naoVaiAoSlack(ap)) continue; // resolvido pela própria GQ
               let operador = '', operadorId = '', slackId = '';
               // Operador responsável pela correção: se o apontamento tem um estágio
               // próprio (ex.: tempo do Estágio 5/50), usa o executor daquele estágio;
               // senão (apontamentos de horário/cronologia a nível de OP), usa quem fez
               // a Conciliação (Estágio 60) — é ele quem regulariza a OP.
-              const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
+              // Almoxarifado (etiqueta/RC) → executor do Estágio 50; PCP → Estágio 60.
+              const estOper = estagioQueCorrige(ap);
               const c = crono.find((x) => x.estagio_numero === estOper);
               if (c) { operador = c.operador_nome || ''; operadorId = c.operador_id || ''; slackId = acharSlack(operadorId, operador); }
               // Cronologia incoerente: a correção é feita por quem executou o Estágio 60
@@ -15719,7 +15741,7 @@ ${parecer.parecer_tecnico ? `
               continue;
             }
             for (const ap of aps) {
-              const estOper = ap.estagio_responsavel != null ? ap.estagio_responsavel : 60;
+              const estOper = estagioQueCorrige(ap); // Almoxarifado → Est. 50; PCP → Est. 60
               const c = crono.find((x) => x.estagio_numero === estOper);
               const insp = inspetorResponsavel(ap, a); // cronologia → inspetor
               ws.addRow({
@@ -15727,8 +15749,8 @@ ${parecer.parecer_tecnico ? `
                 sev: ap.severidade === 'ressalva' ? 'Ressalva' : 'Não conforme',
                 doc: ap.documento_afetado || '',
                 erro: String(ap.descricao || '').replace(/\s+/g, ' ').trim(),
-                setor: ap.setor_responsavel || '',
-                estagio: insp ? `60 (corrige a inspeção #${insp.inspecao} do Est. ${insp.estagio}${insp.nome ? `, inspetor ${insp.nome}` : ''})` : ap.estagio_responsavel != null ? ap.estagio_responsavel : (c ? estOper : ''),
+                setor: setorDoApontamento(ap),
+                estagio: insp ? `60 (corrige a inspeção #${insp.inspecao} do Est. ${insp.estagio}${insp.nome ? `, inspetor ${insp.nome}` : ''})` : (c ? estOper : ''),
                 operador: c ? (c.operador_nome || '') : '',
                 acao: String(ap.recomendacao || '').replace(/\s+/g, ' ').trim(),
               });
